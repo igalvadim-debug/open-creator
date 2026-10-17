@@ -36,17 +36,29 @@ def venv_python() -> Path:
 
 
 def os_name_is_windows() -> bool:
+    """Return whether the current Python platform is Windows."""
     return sys.platform.startswith("win")
 
 
 def run(cmd: list[str]) -> int:
-    """Выполнить команду в ROOT, вернуть код выхода."""
+    """Run cmd from the repository root and return its exit status.
+
+    Nonzero statuses are returned without raising; process launch errors
+    propagate as OSError.
+    """
     print("+ " + " ".join(cmd))
     return subprocess.call(cmd, cwd=str(ROOT))
 
 
 def ensure_venv(base_python: str) -> Path:
-    """Создать ./venv из base_python, если его ещё нет."""
+    """Return the interpreter in ROOT/venv, creating it if needed.
+
+    Use base_python for creation; reuse an existing interpreter path without
+    checking base_python.
+    Raise SystemExit if base_python is absent or creation leaves no
+    interpreter. Creation failures propagate as subprocess.CalledProcessError;
+    process launch errors propagate as OSError.
+    """
     py = venv_python()
     if py.exists():
         print(f"[ok  ] venv уже существует: {VENV_DIR}")
@@ -66,7 +78,13 @@ def ensure_venv(base_python: str) -> Path:
 
 
 def activate_and_install(py: Path) -> None:
-    """«Активация» = работа через интерпретатор venv напрямую + pip install -r."""
+    """Upgrade pip, setuptools, and wheel; install requirements.txt via py.
+
+    The parent process environment is unchanged. A nonzero packaging-tool
+    upgrade status is ignored. Raise SystemExit if requirements.txt is missing
+    or its installation exits nonzero; process launch errors propagate as
+    OSError.
+    """
     env_prefix = VENV_DIR / ("Scripts" if os_name_is_windows() else "bin")
     print(f"[activ ] VIRTUAL_ENV={VENV_DIR} PATH~={env_prefix}")
     # Обновление pip/setuptools внутри venv (только PyPI, локально).
@@ -80,7 +98,13 @@ def activate_and_install(py: Path) -> None:
 
 
 def download_models(py: Path) -> None:
-    """Скачать только мои модели (GGUF/whisper/tts) в ./local-stack/models."""
+    """Run the model setup script using interpreter py when the script exists.
+
+    The script downloads missing GGUF files to its configured model directory.
+    It catches individual download errors, so success does not ensure all
+    models are present. A missing script or nonzero exit status is nonfatal.
+    Process launch errors propagate as OSError.
+    """
     setup = ROOT / "local-stack" / "setup_models.py"
     if not setup.exists():
         print("[skip ] local-stack/setup_models.py не найден — модели не скачаны")
@@ -115,12 +139,27 @@ endlocal
 
 
 def write_start_bat() -> None:
+    """Create or overwrite ROOT/start.bat with the UTF-8 Windows launcher.
+
+    File write errors propagate as OSError.
+    """
     bat = ROOT / "start.bat"
     bat.write_text(START_BAT.replace("\n", "\r\n"), encoding="utf-8")
     print(f"[ok    ] Создан {bat.name}: двойной клик или .\\start.bat")
 
 
 def main(argv: list[str]) -> int:
+    """Prepare the venv, install dependencies and models, and write start.bat.
+
+    argv excludes the program name. The value after the first --python wins;
+    without --python, argv[0] is used only when at least two arguments are
+    present and it does not start with '-'. Otherwise DEFAULT_PYTHON is used,
+    including when --python has no following value.
+
+    Return 0 after all steps complete, even if model downloads failed.
+    Setup SystemExit, subprocess.CalledProcessError, and OSError exceptions
+    propagate.
+    """
     base_python = DEFAULT_PYTHON
     if "--python" in argv:
         i = argv.index("--python")
