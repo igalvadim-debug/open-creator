@@ -1,6 +1,1 @@
-(empty — output nothing)
-.env
-.env.local
-
-venv/
-local-stack/models/
+node_modules/
