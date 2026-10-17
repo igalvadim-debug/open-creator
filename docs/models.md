@@ -43,6 +43,7 @@ C:\ai_diffusion\models\diffusion_models\qwen_image_2.1_int8_convrot.safetensors
 D:\ComfyUiVideo\models\diffusion_models\Qwen-Image-2.1-Turbo-INT8-ConvRot.safetensors
 C:\ai_diffusion\models\diffusion_models\seedvr2_7b_int8_convrot.safetensors
 C:\ai_diffusion\models\diffusion_models\wan_1.3B_exp_e14.safetensors
+C:\ai_diffusion\models\diffusion_models\moss_image_sft_int8_convrot.safetensors
 C:\ai_diffusion\models\diffusion_models\flux3_image_klein_base_int8_convrot.safetensors
 C:\ai_diffusion\models\diffusion_models\idea\ideogram4_fp8_scaled.safetensors
 C:\ai_diffusion\models\diffusion_models\idea\ideogram4_unconditional_fp8_scaled.safetensors
