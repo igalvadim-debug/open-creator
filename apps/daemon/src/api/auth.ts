@@ -14,7 +14,13 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
+/**
+ * Build a Fastify preHandler that enforces a bearer-token check against
+ * `expectedToken`, replying with 401 Unauthorized when the header is
+ * missing, non-string, or does not match (compared via {@link safeEqual}).
+ */
 export function requireAuth(expectedToken: string) {
+  /** Fastify preHandler performing the actual bearer-token comparison. */
   return async function auth(request: FastifyRequest, reply: FastifyReply) {
     const value = request.headers.authorization;
     // LOCAL-FIRST: daemon слушает только 127.0.0.1, но токен всё равно

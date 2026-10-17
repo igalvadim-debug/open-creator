@@ -52,6 +52,11 @@ def fix_badges(text):
 
 
 def main():
+    """Insert (or re-insert) the Apify promo block into README.md and clean
+    up upstream badges.
+
+    Returns 0 on success, including when README.md is missing (in which
+    case the step is skipped with a message on stderr)."""
     try:
         with open(README, encoding="utf-8") as f:
             text = f.read()

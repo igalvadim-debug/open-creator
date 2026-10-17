@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { requireAuth, safeEqual } from '../../src/api/auth.js';
 
+/** Build a minimal stand-in for a Fastify reply, recording the status code
+ * and body passed to `code()`/`send()` so assertions can inspect them. */
 function fakeReply() {
   const reply = {
     statusCode: 0,
