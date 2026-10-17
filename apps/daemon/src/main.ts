@@ -26,6 +26,7 @@ import {
   probeCodex
 } from './codex/probe.js';
 import { createRuntimeToken } from './security/token.js';
+import { installLocalOnlyFetch } from './local-guard.js';
 import {
   installGracefulShutdown,
   installParentPortShutdown
@@ -69,6 +70,8 @@ await main().catch(error => {
 });
 
 async function main(): Promise<void> {
+  // LOCAL-FIRST: guard fetch before anything can reach external AI APIs.
+  if (process.env.OPENCREATOR_LOCAL === '1') installLocalOnlyFetch();
   const token = createRuntimeToken();
   const environment = resolveProductionServerEnvironment();
   const paths = resolveProductionRuntimePaths(environment, {

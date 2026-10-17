@@ -18,13 +18,8 @@
   "small_model": "local-coder/Qwen3-4B-Instruct-2507-Q8_0.gguf",
   "mcp": {
     "lancedb-local": {
-      "type": "local",
-      "command": ["python", "./local-stack/lancedb_mcp/server_local.py"],
-      "enabled": true
-    },
-    "repomapper-local": {
-      "type": "local",
-      "command": ["python", "./local-stack/RepoMapper/http_repomapper.py"],
+      "type": "remote",
+      "url": "http://127.0.0.1:8001/mcp",
       "enabled": true
     }
   }

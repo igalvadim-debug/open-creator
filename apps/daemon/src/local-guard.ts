@@ -1,13 +1,13 @@
-# LOCAL-FIRST guard (open-creator localization)
-#
-# Плагин fetch, запрещающий обращения к внешним AI API в рантайме.
-# Подключается в bootstrap daemon'а:
-#   import { installLocalOnlyFetch } from './local-guard.js';
-#   if (process.env.OPENCREATOR_LOCAL === '1') installLocalOnlyFetch();
-#
-# Разрешены: 127.0.0.1 / localhost / ::1 / 0.0.0.0 и приватные подсети
-# (локальные ComfyUI/llama.cpp/TTS серверы). Всё остальное — ошибка с
-# явным сообщением о политике локальности.
+// LOCAL-FIRST guard (open-creator localization)
+//
+// Плагин fetch, запрещающий обращения к внешним AI API в рантайме.
+// Подключается в bootstrap daemon'а:
+//   import { installLocalOnlyFetch } from './local-guard.js';
+//   if (process.env.OPENCREATOR_LOCAL === '1') installLocalOnlyFetch();
+//
+// Разрешены: 127.0.0.1 / localhost / ::1 / 0.0.0.0 и приватные подсети
+// (локальные ComfyUI/llama.cpp/TTS серверы). Всё остальное — ошибка с
+// явным сообщением о политике локальности.
 
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '0.0.0.0']);
 
