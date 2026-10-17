@@ -401,7 +401,7 @@ async function synthesizeLocal(
 ): Promise<ExecuteSynthesisResult> {
   // Стандартное OpenAI-совместимое тело запроса для /v1/audio/speech.
   const body = {
-    model: input.model || process.env.LOCAL_TTS_MODEL || 'tts-1',
+    model: process.env.LOCAL_TTS_MODEL || 'tts-1',
     input: input.text,
     voice: input.voiceId,
     response_format: input.format,
