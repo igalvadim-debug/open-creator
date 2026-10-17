@@ -66,7 +66,7 @@ def ensure_venv(base_python: str) -> Path:
 
 
 def activate_and_install(py: Path) -> None:
-    """«Активация» = работа через интерпретатор venvнапрямую + pip install -r."""
+    """«Активация» = работа через интерпретатор venv напрямую + pip install -r."""
     env_prefix = VENV_DIR / ("Scripts" if os_name_is_windows() else "bin")
     print(f"[activ ] VIRTUAL_ENV={VENV_DIR} PATH~={env_prefix}")
     # Обновление pip/setuptools внутри venv (только PyPI, локально).
