@@ -28,9 +28,10 @@ ROOT = Path(__file__).resolve().parent
 VENV_DIR = ROOT / "venv"
 REQUIREMENTS = ROOT / "requirements.txt"
 MODELS_DIR = ROOT / "local-stack" / "models"
+INSTALL_COMPLETE = VENV_DIR / ".install-complete"
 
 # Интерпретатор по умолчанию (можно переопределить аргументом --python).
-DEFAULT_PYTHON = r"C:\Users\Startklar\AppData\Local\Programs\Python\Python312\python.exe"
+DEFAULT_PYTHON = sys.executable
 
 
 def venv_python() -> Path:
@@ -164,14 +165,25 @@ rem ---------------------------------------------------------------
 
 if /i "%~1"=="stop" goto :stop
 
-if not exist "venv\\Scripts\\python.exe" (
-    echo venv не найден — запускаю установку...
-    "C:\\Users\\Startklar\\AppData\\Local\\Programs\\Python\\Python312\\python.exe" install.py
+if not exist "venv\\Scripts\\python.exe" goto install
+if not exist "venv\\.install-complete" goto install
+goto start
+
+:install
+echo Установка не завершена — запускаю установку...
+if exist "venv\\Scripts\\python.exe" (
+    "venv\\Scripts\\python.exe" install.py
+) else (
+    where py >nul 2>&1
     if errorlevel 1 (
         echo [fail] Установка не удалась.
         pause
         exit /b 1
     )
+)
+if errorlevel 1 (
+    echo [fail] Установка не удалась.
+    exit /b 1
 )
 
 set PYTHONUTF8=1
@@ -207,7 +219,7 @@ def write_start_bat() -> None:
     File write errors propagate as OSError.
     """
     bat = ROOT / "start.bat"
-    bat.write_text(START_BAT.replace("\n", "\r\n"), encoding="utf-8")
+    bat.write_text(START_BAT, encoding="utf-8")
     print(f"[ok    ] Создан {bat.name}: двойной клик или .\\start.bat")
 
 
@@ -215,8 +227,8 @@ def main(argv: list[str]) -> int:
     """Prepare the venv, install dependencies/models/web UI, write start.bat.
 
     argv excludes the program name. The value after the first --python wins;
-    without --python, argv[0] is used only when at least two arguments are
-    present and it does not start with '-'. Otherwise DEFAULT_PYTHON is used,
+    without --python, argv[0] is used when present and it does not start
+    with '-'. Otherwise DEFAULT_PYTHON is used,
     including when --python has no following value.
 
     Return the nonzero model setup status (1 if its script is missing),
@@ -233,11 +245,12 @@ def main(argv: list[str]) -> int:
         i = argv.index("--python")
         if i + 1 < len(argv):
             base_python = argv[i + 1]
-    elif len(argv) >= 2 and not argv[0].startswith("-"):
+    elif argv and not argv[0].startswith("-"):
         base_python = argv[0]
 
     print("=== open-creator LOCAL installer (всё в этой папке) ===")
     py = ensure_venv(base_python)
+    INSTALL_COMPLETE.unlink(missing_ok=True)
     activate_and_install(py)
     models_rc = download_models(py)
     if models_rc != 0:
