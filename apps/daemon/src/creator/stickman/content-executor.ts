@@ -1069,6 +1069,17 @@ function requireGeneratedRecord(stageId: string, value: unknown): Record<string,
   );
 }
 
+/**
+ * Create a JSON completion callback that reads current settings on each call.
+ *
+ * Codex requests use the injected runtime and job context. Other sources use
+ * HTTP; local mode overrides the base URL and skips the API-key requirement.
+ * The HTTP response content is JSON-decoded without validating its shape.
+ *
+ * The callback rejects missing configuration, failed HTTP responses, or absent
+ * or invalid JSON content with CreatorExecutorError. Configuration read,
+ * Codex runtime, fetch, and response decoding errors propagate.
+ */
 export function createStickmanConfiguredCompletion(input: {
   configStore: Pick<CreatorServicesConfigStore, 'read'>;
   codexCompleteJson?: CodexCompleteJson;

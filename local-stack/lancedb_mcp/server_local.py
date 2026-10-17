@@ -41,6 +41,9 @@ TOOLS = {
 
 
 def _rpc(method: str, params: dict) -> object:
+    """POST a database operation and return decoded JSON.
+
+    URL policy, HTTP, and JSON decoding errors propagate."""
     llama_client.assert_local(C.LANCEDB_URL)
     url = f"{C.LANCEDB_URL}/{method}"
     data = json.dumps(params).encode()
@@ -50,6 +53,10 @@ def _rpc(method: str, params: dict) -> object:
 
 
 def call_tool(name: str, args: dict) -> str:
+    """Call search, file listing, or reindex and return the JSON response text.
+
+    Raise ValueError for an unknown tool; policy, HTTP, and decoding errors
+    propagate."""
     if name == "search_code":
         res = _rpc("search", {"table": args.get("table", "code"),
                               "query": args.get("query", ""), "k": args.get("k", 8)})
@@ -68,6 +75,10 @@ def call_tool(name: str, args: dict) -> str:
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
+        """Handle initialization, tool listing, or tool calls as JSON-RPC over HTTP.
+
+        Tool exceptions become text results with isError set. Malformed JSON
+        returns a bare error object; responses use HTTP 200."""
         n = int(self.headers.get("Content-Length", 0))
         try:
             msg = json.loads(self.rfile.read(n) or b"{}")
@@ -93,12 +104,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send({"jsonrpc": "2.0", "id": mid, "result": resp})
 
     def do_GET(self):  # noqa: N802
+        """Return health for /health prefixes, otherwise an HTTP 200 error object."""
         if self.path.startswith("/health"):
             self._send({"ok": True, "local": True, "tools": list(TOOLS)})
         else:
             self._send({"error": "use POST (JSON-RPC)"})
 
     def _send(self, obj) -> None:
+        """Write a JSON response with HTTP 200."""
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -107,10 +120,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, fmt, *args):
+        """Write a formatted request log to standard error."""
         sys.stderr.write("[mcp-8001] " + fmt % args + "\n")
 
 
 def main() -> None:
+    """Serve the tool HTTP endpoint on the configured host and port until interrupted."""
     srv = ThreadingHTTPServer((C.HOST, C.MCP_PORT), Handler)
     print(f"MCP (search_code/list_indexed_files/reindex) on http://{C.HOST}:{C.MCP_PORT}")
     srv.serve_forever()

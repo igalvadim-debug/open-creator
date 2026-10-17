@@ -572,6 +572,16 @@ async function synthesizeMinimax(
   return { content, format: detectAudioFormat(content, input.format) };
 }
 
+/**
+ * POST a TTS payload with cancellation and a timeout in milliseconds.
+ *
+ * Local mode replaces the complete endpoint with LOCAL_TTS_BASE_URL or the
+ * localhost speech endpoint and uses a placeholder key; the payload is unchanged.
+ * Forward a valid request ID to onGatewayRequest for official requests.
+ *
+ * @throws {KrillinTtsServiceError} On a non-success HTTP response. Fetch,
+ * serialization, and request callback errors propagate.
+ */
 async function providerFetch(
   url: string,
   apiKey: string,

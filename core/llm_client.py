@@ -29,12 +29,19 @@ def chat(messages: list[dict[str, str]], *, model: str | None = None,
 
 def complete(prompt: str, *, model: str | None = None, system: str | None = None,
              **kw) -> str:
+    """Send a user prompt with an optional system message and return the reply.
+
+    Extra keyword arguments are passed to chat; its errors propagate."""
     msgs = ([{"role": "system", "content": system}] if system else []) + [
         {"role": "user", "content": prompt}]
     return chat(msgs, model=model, **kw)
 
 
 def is_ready(timeout: float = 5.0) -> bool:
+    """Poll with timeout in seconds and return True unless polling raises.
+
+    A False result from the underlying readiness poll is ignored, so True
+    does not establish server readiness. Exceptions are converted to False."""
     try:
         LC.wait_ready(BASE_URL, timeout=timeout)
         return True

@@ -25,6 +25,14 @@ export function parseStickmanScript(value: unknown): StickmanScript {
   return parsed;
 }
 
+/**
+ * Generate and validate a script for a topic. targetDurationSeconds guides the
+ * prompt; the total duration is not enforced. Local mode overrides baseUrl with
+ * LOCAL_LLM_BASE_URL or its localhost default.
+ *
+ * @throws On HTTP failure, missing content, invalid JSON/schema, or duplicate
+ * segment IDs. Fetch and response decoding errors propagate.
+ */
 export async function generateStickmanScript(input: {
   baseUrl: string;
   apiKey: string;

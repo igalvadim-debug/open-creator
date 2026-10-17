@@ -34,6 +34,13 @@ export function parseEnvFile(source: string): Record<string, string> {
   return result;
 }
 
+/**
+ * Read whitelisted Volcengine keys without mutating the environment.
+ *
+ * Explicit environment keys take precedence, including empty values that
+ * suppress file fallback. Return no keys in local mode. The optional file is
+ * read before that check, so file read errors still propagate in local mode.
+ */
 export function loadVolcengineEnvironment(
   options: LocalEnvironmentLoadOptions = {}
 ): VolcengineEnvironment {

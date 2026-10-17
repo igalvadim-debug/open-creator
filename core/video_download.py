@@ -20,6 +20,10 @@ import config as C  # noqa: E402
 
 
 def download(url: str, out_dir: str | Path = C.OUTPUT_DIR) -> Path:
+    """Run yt-dlp into out_dir and return its most recently modified MP4.
+
+    Create the directory if needed. Selection can include pre-existing MP4s.
+    Raise RuntimeError if no MP4 is found; subprocess and file errors propagate."""
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     ydl = shutil.which("yt-dlp") or (C.BIN_DIR / ("yt-dlp" + (".exe" if sys.platform == "win32" else "")))
     if not ydl:
@@ -35,6 +39,9 @@ def download(url: str, out_dir: str | Path = C.OUTPUT_DIR) -> Path:
 
 
 def get_title(url: str) -> str:
+    """Return the stripped yt-dlp title output, or "video" if stdout is empty.
+
+    A nonzero process status is ignored; process launch errors propagate."""
     ydl = shutil.which("yt-dlp") or (C.BIN_DIR / "yt-dlp")
     p = subprocess.run([str(ydl), "--print", "title", url], capture_output=True, text=True)
     return p.stdout.strip() or "video"

@@ -22,7 +22,10 @@ _model = None
 
 
 def _get_whisper():
-    """Ленивая загрузка faster-whisper (локальные веса)."""
+    """Return a cached faster-whisper model, downloading weights if needed.
+
+    Raise RuntimeError if faster-whisper cannot be imported; model loading
+    and file errors propagate."""
     global _model
     if _model is None:
         try:
@@ -38,12 +41,17 @@ def _get_whisper():
 
 
 def _fmt_ts(t: float) -> str:
+    """Format seconds as an SRT timestamp with a comma and three decimals."""
     h = int(t // 3600); m = int(t % 3600 // 60); s = t % 60
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
 def transcribe(audio_path: str | Path) -> list[dict]:
-    """-> [{'start': sec, 'end': sec, 'text': str}, ...] Полностью локально."""
+    """Return transcription segments with start/end times in seconds and text.
+
+    Prefer installed whisper-cli and weights, writing a sibling transcript;
+    otherwise use faster-whisper, which may download missing weights. Model,
+    subprocess, file, and transcript parsing errors propagate."""
     audio_path = Path(audio_path)
     cli = C.BIN_DIR / ("whisper-cli" + (".exe" if sys.platform == "win32" else ""))
     gguf = C.WHISPER_MODELS_DIR / f"ggml-{C.WHISPER_MODEL}.bin"
@@ -66,6 +74,7 @@ def transcribe(audio_path: str | Path) -> list[dict]:
 
 
 def to_srt(segs: list[dict]) -> str:
+    """Render segments with start/end times in seconds as numbered SRT cues."""
     lines = []
     for i, s in enumerate(segs, 1):
         lines += [str(i), f"{_fmt_ts(s['start'])} --> {_fmt_ts(s['end'])}", s["text"], ""]
@@ -73,6 +82,8 @@ def to_srt(segs: list[dict]) -> str:
 
 
 def to_vtt(segs: list[dict]) -> str:
+    """Render segments under a WEBVTT header using the current timestamp
+    formatter, which retains commas and appends zeros."""
     lines = ["WEBVTT", ""]
     for s in segs:
         lines += [f"{_fmt_ts(s['start'])[:-1]}000 --> {_fmt_ts(s['end'])[:-1]}000",
@@ -81,6 +92,10 @@ def to_vtt(segs: list[dict]) -> str:
 
 
 def write_outputs(segs: list[dict], base: str | Path) -> dict[str, str]:
+    """Write SRT, VTT, and plain text files and return their paths by extension.
+
+    Replace the suffix of base, create parent directories, and overwrite
+    existing files. File and segment formatting errors propagate."""
     base = Path(base); base.parent.mkdir(parents=True, exist_ok=True)
     outs = {}
     for ext, content in (("srt", to_srt(segs)), ("vtt", to_vtt(segs)),
@@ -92,7 +107,8 @@ def write_outputs(segs: list[dict], base: str | Path) -> dict[str, str]:
 
 
 def extract_audio(video_path: str | Path) -> Path:
-    """ffmpeg -> 16k mono wav рядом с видео (для STT)."""
+    """Return a sibling .16k.wav file, creating 16 kHz mono audio with ffmpeg
+    only if that path is absent. File and subprocess errors propagate."""
     video_path = Path(video_path)
     wav = video_path.with_suffix(".16k.wav")
     if not wav.exists():

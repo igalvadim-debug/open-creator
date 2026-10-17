@@ -25,7 +25,11 @@ import config as C  # noqa: E402
 
 
 def assemble(video: Path, wav_files: list[Path], segs: list[dict], out: Path) -> Path:
-    """Склейка дубляжа по таймингам + подмена аудио дорожки (ffmpeg)."""
+    """Replace video audio with mixed speech delayed by segment starts in seconds.
+
+    wav_files and segs should correspond in order. Return out; with no WAVs,
+    copy the input video instead. The parent directory must exist. File and
+    ffmpeg errors propagate."""
     ff = shutil.which("ffmpeg") or (C.BIN_DIR / "ffmpeg")
     # 1) одна дорожка дубляжа: adelay каждого сегмента + amix
     inputs, filters = [], []
@@ -46,6 +50,12 @@ def assemble(video: Path, wav_files: list[Path], segs: list[dict], out: Path) ->
 
 
 def run(url: str | None, video_path: str | None, dst: str, dub: bool, src: str) -> None:
+    """Write original and translated subtitles and optionally a dubbed video.
+
+    video_path takes precedence over url; at least one must be supplied.
+    src="auto" requests source language inference and dst names the target
+    language. Outputs go under the configured dub directory. Pipeline errors
+    propagate and can leave partial outputs."""
     C.ensure_dirs()
     out_dir = C.OUTPUT_DIR / "dub"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -85,6 +95,7 @@ def run(url: str | None, video_path: str | None, dst: str, dub: bool, src: str) 
 
 
 def main() -> None:
+    """Parse dubbing options and run the pipeline; require a URL or video path."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--url")
     ap.add_argument("--video", help="уже скачанный файл mp4")

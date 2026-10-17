@@ -60,6 +60,15 @@ export async function fetchCreatorService(input: {
   });
 }
 
+/**
+ * Build an endpoint for a relative resource such as chat/completions.
+ *
+ * An empty base uses OpenAI, or LOCAL_LLM_BASE_URL (defaulting to localhost)
+ * when local mode is enabled. A supplied URL already ending in the resource is
+ * preserved; a root path receives /v1 before the resource.
+ *
+ * @throws {TypeError} If the selected base or resulting URL is invalid.
+ */
 export function openAiCompatibleEndpoint(baseUrl: string, resource: string): URL {
   const trimmed = baseUrl.trim().replace(/\/+$/, '');
   // LOCAL-FIRST: пустой baseUrl в режиме OPENCREATOR_LOCAL=1 -> локальный llama-server :8484.

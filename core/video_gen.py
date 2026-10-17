@@ -27,6 +27,9 @@ SERVER = C.COMFY_VIDEO_URL   # http://127.0.0.1:8197
 
 
 def workflow_path(name: str = "minimax_4step") -> Path:
+    """Resolve a workflow alias or JSON path; unknown non-JSON names use the
+    default workflow. Relative paths are based at CW_ROOT. Raise
+    FileNotFoundError if the resolved path does not exist."""
     fn = C.CW_WORKFLOWS.get(name, name if name.endswith(".json") else C.CW_WORKFLOWS["minimax_4step"])
     p = Path(fn) if Path(fn).is_absolute() else C.CW_ROOT / fn
     if not p.exists():
@@ -37,6 +40,10 @@ def workflow_path(name: str = "minimax_4step") -> Path:
 def build_workflow(prompt: str, *, name: str = "minimax_4step",
                    width: int = C.IMAGE_WIDTH, height: int = C.IMAGE_HEIGHT,
                    model: str = C.VIDEO_DEFAULT_MODEL, seed: int | None = None) -> dict:
+    """Load a workflow and replace prompt placeholders, checkpoint, and
+    existing size/seed inputs. Dimensions are pixels; an omitted seed uses
+    the current time. Update workflow defaults with the size and configured
+    batch size. Workflow lookup, read, and JSON errors propagate."""
     wf = json.loads(workflow_path(name).read_text(encoding="utf-8"))
     for n in wf.get("nodes", []):
         inp = n.setdefault("inputs", {})
@@ -60,7 +67,15 @@ def generate(prompt: str, out_path: str | Path, *, workflow: str = "minimax_4ste
              width: int = C.IMAGE_WIDTH, height: int = C.IMAGE_HEIGHT,
              model: str = C.VIDEO_DEFAULT_MODEL, enhance_prompt: bool = True,
              timeout: int = C.GEN_TIMEOUT_S) -> Path:
-    """POST /prompt -> poll /history -> скачать результат. Только localhost."""
+    """Save the first video, GIF, or image returned by the video workflow.
+
+    Create parent directories and overwrite out_path. Dimensions are pixels;
+    timeout is the polling window in seconds, not a total request deadline.
+    Enhancement errors retain the original prompt.
+
+    Raise RuntimeError for a rejected URL or history without media, and
+    TimeoutError on polling expiry. Workflow, HTTP, file, and response
+    decoding errors propagate."""
     LC.assert_local(SERVER)
     text = prompt
     if enhance_prompt:

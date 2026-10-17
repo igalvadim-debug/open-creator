@@ -41,6 +41,7 @@ _lock = threading.Lock()
 
 
 def _load_cache() -> dict:
+    """Load the index cache, returning an empty dictionary if absent or unreadable."""
     if CACHE_FILE.exists():
         try:
             return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
@@ -50,22 +51,29 @@ def _load_cache() -> dict:
 
 
 def _save_cache(cache: dict) -> None:
+    """Create the cache directory and overwrite the JSON cache file."""
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     CACHE_FILE.write_text(json.dumps(cache), encoding="utf-8")
 
 
 def chunk_lines(text: str, size: int = C.INDEX_CHUNK_LINES) -> list[str]:
+    """Split text into blocks of at most size lines, normalizing line endings.
+
+    Empty text returns no blocks. A zero size raises ValueError."""
     lines = text.splitlines()
     return ["\n".join(lines[i:i + size]) for i in range(0, len(lines), size)] or ([text] if text else [])
 
 
 def db():
+    """Connect to the configured database directory; raise RuntimeError if
+    lancedb is unavailable. Connection errors propagate."""
     if lancedb is None:
         raise RuntimeError("pip install lancedb pyarrow")
     return lancedb.connect(str(C.LANCEDB_DIR))
 
 
 def iter_files(root: Path, exts: set[str]):
+    """Yield files with matching lowercase extensions and no excluded path parts."""
     for p in root.rglob("*"):
         if p.is_file() and p.suffix.lower() in exts:
             if any(part in SKIP_DIRS for part in p.parts):
@@ -74,7 +82,13 @@ def iter_files(root: Path, exts: set[str]):
 
 
 def index_table(root: Path, table: str, exts: set[str]) -> dict:
-    """Инкрементальный индекс: sha1+mtime кэш, батчи по 8, чанки по 30 строк."""
+    """Embed changed files into table and save their modification/hash cache.
+
+    Return counts of scanned files, pending chunks, and indexed chunks. File
+    read errors are skipped. When replacing an existing table, deletion is
+    attempted for all paths containing #, including unchanged file chunks;
+    deletion errors are ignored. Database, embedding, and cache write errors
+    propagate."""
     cache = _load_cache()
     key_prefix = f"{table}:"
     todo: list[tuple[str, str]] = []      # (rel_path, chunk)
@@ -127,6 +141,8 @@ def index_table(root: Path, table: str, exts: set[str]) -> dict:
 
 
 def search(table: str, query: str, k: int = 8) -> list[dict]:
+    """Return up to k vector matches with path, text, and _score taken from
+    the database distance. Embedding and database errors propagate."""
     qv = llama_client.embed(C.EMBED_BASE_URL, C.EMBED_MODEL, [query])[0]
     t = db().open_table(table)
     return [{"path": r["path"], "text": r["text"], "_score": float(r.get("_distance", 0.0))}
@@ -134,6 +150,8 @@ def search(table: str, query: str, k: int = 8) -> list[dict]:
 
 
 def list_files(table: str) -> list[str]:
+    """Return sorted unique indexed paths without chunk suffixes, or an empty
+    list if any database or row-reading operation raises."""
     try:
         t = db().open_table(table)
         return sorted({r["path"].split("#")[0] for r in t.to_list()})
@@ -143,6 +161,7 @@ def list_files(table: str) -> list[str]:
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, obj) -> None:
+        """Write a JSON response with the supplied HTTP status."""
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -151,6 +170,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802
+        """Serve health or indexed files; respond with HTTP 404 for other paths."""
         if self.path.startswith("/health"):
             self._send(200, {"ok": True, "local": True, "dir": str(C.LANCEDB_DIR)})
         elif self.path.startswith("/files"):
@@ -161,6 +181,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):  # noqa: N802
+        """Reindex or search from a JSON request.
+
+        Return HTTP 400 for malformed JSON, HTTP 500 for search errors, and HTTP
+        404 for unknown paths. Reindex errors propagate."""
         n = int(self.headers.get("Content-Length", 0))
         try:
             req = json.loads(self.rfile.read(n) or b"{}")
@@ -187,10 +211,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def log_message(self, fmt, *args):  # тихий лог
+        """Write a formatted request log to standard error."""
         sys.stderr.write("[lancedb-8003] " + fmt % args + "\n")
 
 
 def main() -> None:
+    """Create configured directories and serve database requests until interrupted."""
     C.ensure_dirs()
     srv = ThreadingHTTPServer((C.HOST, C.LANCEDB_PORT), Handler)
     print(f"LanceDB HTTP on http://{C.HOST}:{C.LANCEDB_PORT} (dir={C.LANCEDB_DIR})")

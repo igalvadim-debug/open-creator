@@ -27,6 +27,14 @@ export function parseStickmanStoryboard(
   return parsed.shots;
 }
 
+/**
+ * Generate validated shots with exactly one shot per distinct segment ID.
+ * An empty characterPrompt uses the default stick figure description. Local
+ * mode overrides baseUrl with LOCAL_LLM_BASE_URL or its localhost default.
+ *
+ * @throws On HTTP failure, missing content, invalid JSON/schema, or unknown,
+ * duplicate, or missing segment IDs. Fetch and response decoding errors propagate.
+ */
 export async function generateStickmanStoryboard(input: {
   baseUrl: string;
   apiKey: string;

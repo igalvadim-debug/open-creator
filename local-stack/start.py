@@ -21,6 +21,8 @@ PIDFILE = C.STACK / ".pids"
 
 
 def find_llama_server() -> str:
+    """Find llama-server in the configured bin directory, then PATH; raise
+    SystemExit when no candidate is found."""
     for cand in (C.BIN_DIR / "llama-server", C.BIN_DIR / "llama-server.exe"):
         if cand.exists():
             return str(cand)
@@ -35,6 +37,8 @@ def find_llama_server() -> str:
 
 
 def pick_model() -> str:
+    """Return the configured model path if present, otherwise the first sorted
+    GGUF whose name lacks mmproj. Raise SystemExit when none is found."""
     primary = C.MODELS_DIR / C.DEFAULT_LLM_MODEL
     if primary.exists():
         return str(primary)
@@ -45,6 +49,8 @@ def pick_model() -> str:
 
 
 def pick_embed_model() -> str:
+    """Return the primary embedding model path or its fallback; raise
+    SystemExit when neither exists."""
     for name in (C.EMBED_MODEL_PRIMARY, C.EMBED_MODEL_FALLBACK):
         p = C.MODELS_DIR / name
         if p.exists():
@@ -53,6 +59,8 @@ def pick_embed_model() -> str:
 
 
 def spawn(cmd: list[str], log: Path) -> subprocess.Popen:
+    """Start a command from the repository root, appending stdout and stderr
+    to log, and return its process handle. File and launch errors propagate."""
     fh = open(log, "ab")
     p = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd=str(C.ROOT))
     print(f"[start] {' '.join(cmd[:4])}... -> logs/{log.name} (pid {p.pid})")
@@ -60,6 +68,11 @@ def spawn(cmd: list[str], log: Path) -> subprocess.Popen:
 
 
 def start() -> None:
+    """Launch the five stack processes and record their PIDs.
+
+    Poll LLM and embedding readiness without failing on a False result.
+    Model lookup, launch, and file errors propagate; previously started
+    processes are not cleaned up when a later step fails."""
     C.ensure_dirs()
     ls = find_llama_server()
     procs = []
@@ -96,6 +109,10 @@ def start() -> None:
 
 
 def stop() -> None:
+    """Send SIGTERM to recorded PIDs and remove the PID file without waiting.
+
+    Missing processes and invalid PID lines are ignored. Other signal and
+    file errors propagate; a missing PID file is a no-op."""
     if not PIDFILE.exists():
         print("нет .pids — останавливать нечего")
         return
@@ -109,6 +126,7 @@ def stop() -> None:
 
 
 def main() -> None:
+    """Start the stack, or signal recorded processes when --stop is supplied."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--stop", action="store_true")
     args = ap.parse_args()

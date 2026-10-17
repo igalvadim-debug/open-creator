@@ -23,6 +23,9 @@ LANG_NAMES = {"ru": "Russian", "de": "German", "en": "English"}
 
 
 def load_prompt_template() -> str:
+    """Read the translation prompt, or return the built-in template if absent.
+
+    File read errors propagate."""
     if PROMPT_FILE.exists():
         return PROMPT_FILE.read_text(encoding="utf-8")
     return ("Translate the numbered lines from {src_name} to {dst_name}. "
@@ -42,7 +45,12 @@ def translate(text: str, src: str = "auto", dst: str = "ru", *,
 
 def translate_lines(lines: list[str], src: str = "auto", dst: str = "ru",
                     batch: int = 20, model: str | None = None) -> list[str]:
-    """Перевод списка реплик (для сабтитлов/дубляжа) с сохранением нумерации."""
+    """Translate numbered batches and return one output per input line.
+
+    Missing numbered translations retain the original line. src="auto" asks
+    the model to infer the source language. batch must be positive: zero
+    raises ValueError, while a negative value produces no batches. Prompt
+    formatting, file, and model request errors propagate."""
     out: list[str] = []
     tpl = load_prompt_template()
     system = tpl.format(src_name=src.upper() if src != "auto" else "source language",
@@ -64,7 +72,9 @@ def translate_lines(lines: list[str], src: str = "auto", dst: str = "ru",
 
 def translate_srt(segs: list[dict], src: str, dst: str,
                   model: str | None = None) -> list[dict]:
-    """Сегменты STT -> переведённые сегменты (тайминги сохранены)."""
+    """Return copies of segments with translated text and text_orig added,
+    preserving timestamps and other fields. Missing translations retain the
+    original text; translation errors propagate."""
     texts = [s["text"] for s in segs]
     tr = translate_lines(texts, src, dst, model=model)
     return [{**s, "text_orig": s["text"], "text": t} for s, t in zip(segs, tr)]
