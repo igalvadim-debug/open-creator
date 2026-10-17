@@ -34,6 +34,14 @@ def catalog_models(category: str | None = None) -> list[dict]:
     return []
 
 
+def loras_for_prompt(prompt: str, category: str = "lora") -> list[dict]:
+    """LO-ра из каталога (в т.ч. импортированные через parse_external_inventory.py),
+    чей триггер встречается в промпте. Пути — относительные внутри ./ComfyUI-local."""
+    p = prompt.lower()
+    return [m for m in catalog_models(category)
+            if m.get("trigger") and m["trigger"].lower() in p]
+
+
 def enhance(prompt: str) -> str:
     """Локальный промпт-энхансер (:8484)."""
     try:
