@@ -1,7 +1,9 @@
 name: Sync upstream OpenCreator
 
-# Keeps this repo mirrored with krillinai/OpenCreator, then re-applies our
-# Apify promo block on top. Runs daily + on demand.
+# LOCAL-FIRST + безопасный flow: синхронизация с апстримом больше НЕ
+# перезаписывает main через rm -rf. Вместо этого создаётся ветка и Pull
+# Request — изменения попадают в main только после ревью и зелёного CI.
+
 on:
   schedule:
     - cron: '0 11 * * *'  # daily ~7am ET
@@ -9,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   sync:
@@ -19,44 +22,71 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Sync from upstream and re-apply promo
+      - name: Build upstream snapshot on a sync branch
         run: |
-          set -e
-          git config user.name "cporter202-sync"
-          git config user.email "cporter202-sync@users.noreply.github.com"
+          set -euo pipefail
+          git config user.name "opencreator-sync-bot"
+          git config user.email "opencreator-sync-bot@users.noreply.github.com"
 
-          # Stash our own automation files so the wipe below doesn't kill them
-          mkdir -p /tmp/keep/.github/workflows /tmp/keep/scripts
-          cp .github/workflows/sync-upstream.yml /tmp/keep/.github/workflows/ 2>/dev/null || true
-          cp scripts/inject_apify_ad.py /tmp/keep/scripts/ 2>/dev/null || true
-          cp ATTRIBUTION.md /tmp/keep/ 2>/dev/null || true
+          BRANCH="sync/upstream-$(date -u +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH"
 
-          # Fresh shallow copy of upstream (no history needed)
+          # Сохраняем наши локализационные/автомационные файлы
+          KEEP=(
+            .github/workflows/ci.yml
+            .github/workflows/sync-upstream.yml
+            scripts/inject_apify_ad.py
+            ATTRIBUTION.md
+            README_LOCAL.md
+            local-stack
+            tests/local
+          )
+          rm -rf /tmp/keep && mkdir -p /tmp/keep
+          for f in "${KEEP[@]}"; do
+            if [ -e "$f" ]; then mkdir -p "/tmp/keep/$(dirname "$f")"; cp -a "$f" "/tmp/keep/$f"; fi
+          done
+
+          # Свежий снапшот апстрима (клон — это сетевая операция установки,
+          # допустимая вне рантайма приложения)
           rm -rf /tmp/upstream
           git clone --depth 1 https://github.com/krillinai/OpenCreator.git /tmp/upstream
 
-          # Replace working tree with upstream (keep our .git)
+          # Заменяем рабочее дерево снапшотом апстрима, .git не трогаем
           find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
           tar -C /tmp/upstream --exclude=.git -cf - . | tar -xf - .
 
-          # Restore our automation files
-          mkdir -p .github/workflows scripts
-          cp /tmp/keep/.github/workflows/sync-upstream.yml .github/workflows/
-          cp /tmp/keep/scripts/inject_apify_ad.py scripts/
-          cp /tmp/keep/ATTRIBUTION.md . 2>/dev/null || true
-          # Drop upstream's own CI workflows (their CI doesn't run here,
-          # and pushing workflow files needs elevated token permission)
-          find .github/workflows -type f ! -name 'sync-upstream.yml' -delete
+          # Возвращаем наше
+          for f in "${KEEP[@]}"; do
+            if [ -e "/tmp/keep/$f" ]; then mkdir -p "$(dirname "$f")"; cp -a "/tmp/keep/$f" "$f"; fi
+          done
+          # Чужие CI-workflow апстрима здесь не запускаются
+          find .github/workflows -type f ! -name 'sync-upstream.yml' ! -name 'ci.yml' -delete 2>/dev/null || true
 
-          # Re-apply the Apify promo block (idempotent)
           python3 scripts/inject_apify_ad.py
 
-          # Commit + push only if something changed
           git add -A
           if git diff --cached --quiet; then
-            echo "No upstream changes — nothing to do."
+            echo "No upstream changes."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "Sync upstream OpenCreator ($(date -u +%Y-%m-%d))"
-            git push origin HEAD:main
-            echo "Synced and pushed."
+            git push origin "$BRANCH"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           fi
+        id: sync
+
+      - name: Open Pull Request (never auto-push to main)
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr create \
+            --title "Sync upstream OpenCreator" \
+            --body "Автоматический снапшот апстрима. См. diff; мержить только после зелёного CI (защита ветки main)." \
+            --head "${{ steps.sync.outputs.branch }}" \
+            --base main --fill-headless 2>/dev/null || \
+          gh pr create \
+            --title "Sync upstream OpenCreator" \
+            --body "Автоматический снапшот апстрима. Мержить только после зелёного CI." \
+            --head "${{ steps.sync.outputs.branch }}" --base main

@@ -1,3 +1,2 @@
-(empty — output nothing)
-.env
-.env.local
+node_modules/
+__pycache__/
