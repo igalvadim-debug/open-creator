@@ -131,7 +131,8 @@ def index_table(root: Path, table: str, exts: set[str]) -> dict:
             # Точечное удаление: только чанки тех файлов, которые реально
             # переиндексируются. Раньше фильтр `path LIKE '%#%'` стирал всю
             # таблицу (все пути содержат '#'), и старые данные терялись.
-            conds = " OR ".join(f'path LIKE \'{p.replace("\'", "")}%#\%%\'' for p in sorted(old_paths))
+            escaped_paths = [p.replace("'", "") for p in sorted(old_paths)]
+            conds = " OR ".join(f"path LIKE '{p}%#\\%%'" for p in escaped_paths)
             if conds:
                 t.delete(conds)
             t.add(rows)
