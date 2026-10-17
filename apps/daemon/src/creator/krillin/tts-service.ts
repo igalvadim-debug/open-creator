@@ -578,6 +578,12 @@ async function providerFetch(
   body: unknown,
   input: ExecuteSynthesisInput & { timeoutMs: number }
 ): Promise<Response> {
+  // LOCAL-FIRST: OPENCREATOR_LOCAL=1 -> все cloud-TTS (OpenAI/Aliyun/Volcengine/MiniMax)
+  // перенаправляются на локальный OpenAI-совместимый TTS-эндпоинт llama.cpp (:8484).
+  if (/^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
+    url = process.env.LOCAL_TTS_BASE_URL ?? 'http://127.0.0.1:8484/v1/audio/speech';
+    apiKey = 'local';
+  }
   const response = await timedFetch(url, {
     method: 'POST',
     headers: {

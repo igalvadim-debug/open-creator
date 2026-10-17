@@ -1089,11 +1089,16 @@ export function createStickmanConfiguredCompletion(input: {
         model: config.llm.model
       });
     }
-    if (!config.llm.apiKey.trim()) {
+    // LOCAL-FIRST: OPENCREATOR_LOCAL=1 -> локальный llama-server :8484 (ключ не нужен).
+    const localMode = /^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '');
+    if (!localMode && !config.llm.apiKey.trim()) {
       throw new CreatorExecutorError('creator_llm_config_missing', 'LLM configuration is incomplete');
     }
+    const llmBase = localMode
+      ? (process.env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1')
+      : (config.llm.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1');
     const response = await fetch(
-      `${config.llm.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1'}/chat/completions`,
+      `${llmBase}/chat/completions`,
       {
         method: 'POST',
         signal: request.signal,

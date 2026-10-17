@@ -62,6 +62,11 @@ export async function fetchCreatorService(input: {
 
 export function openAiCompatibleEndpoint(baseUrl: string, resource: string): URL {
   const trimmed = baseUrl.trim().replace(/\/+$/, '');
+  // LOCAL-FIRST: пустой baseUrl в режиме OPENCREATOR_LOCAL=1 -> локальный llama-server :8484.
+  if (!trimmed && /^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
+    const local = process.env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1';
+    return new URL(`${local.replace(/\/+$/, '')}/${resource}`);
+  }
   if (!trimmed) return new URL(`https://api.openai.com/v1/${resource}`);
   const base = new URL(trimmed);
   if (base.pathname.toLowerCase().endsWith(`/${resource.toLowerCase()}`)) return base;
