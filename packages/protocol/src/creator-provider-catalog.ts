@@ -30,11 +30,13 @@ const entry = (value: CreatorProviderCatalogEntry) => value;
 // в рантайме при локальном режиме.
 // ВАЖНО: этот модуль импортируется и в браузерное приложение (Vite), где
 // глобального объекта `process` не существует — читаем окружение безопасно.
-const browserEnv: Record<string, string | undefined> = {};
+// Vite exposes public settings with a VITE_ prefix; daemon values take priority.
+const browserEnv = (import.meta as ImportMeta & {
+  readonly env?: Record<string, string | undefined>;
+}).env ?? {};
 const readEnv = (key: string): string | undefined =>
-  typeof process !== 'undefined' && process?.env
-    ? process.env[key]
-    : browserEnv[key];
+  (typeof process !== 'undefined' ? process.env?.[key] : undefined)
+    ?? browserEnv[`VITE_${key}`];
 
 const LOCAL_MODE = /^(1|true|yes)$/i.test(readEnv('OPENCREATOR_LOCAL') ?? '');
 const LOCAL_LLM_BASE = readEnv('LOCAL_LLM_BASE_URL') ?? 'http://127.0.0.1:8484/v1';

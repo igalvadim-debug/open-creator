@@ -27,6 +27,15 @@ describe('local Codex provider', () => {
     } })).resolves.toEqual({ baseUrl: 'http://localhost:9000/v1', apiKey: 'local', model: 'custom.gguf' });
   });
 
+  it.each(['1', 'true', 'yes', 'TrUe'])('routes the text model locally without image settings (%s)', async flag => {
+    root = await codexHome(['this is not valid TOML']);
+    await expect(readLocalCodexModelConfiguration({ codexHome: root, env: {
+      OPENCREATOR_LOCAL: flag, LOCAL_LLM_BASE_URL: 'http://localhost:9000/v1', LOCAL_LLM_MODEL: 'custom.gguf'
+    } })).resolves.toEqual({
+      authentication: 'api_key', provider: { baseUrl: 'http://localhost:9000/v1', apiKey: 'local', model: 'custom.gguf' }
+    });
+  });
+
   it.each(['0', 'false', 'no', 'trueish', ''])('does not activate local mode for %j', async flag => {
     root = await codexHome(['openai_base_url = "https://cloud.example.test/v1"']);
     await writeFile(join(root, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'stored-key' }));

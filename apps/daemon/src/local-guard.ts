@@ -3,7 +3,8 @@
 // Плагин fetch, запрещающий обращения к внешним AI API в рантайме.
 // Подключается в bootstrap daemon'а:
 //   import { installLocalOnlyFetch } from './local-guard.js';
-//   if (process.env.OPENCREATOR_LOCAL === '1') installLocalOnlyFetch();
+//   import { isLocalMode } from './local-mode.js';
+//   if (isLocalMode(process.env)) installLocalOnlyFetch();
 //
 // Разрешены: 127.0.0.1 / localhost / ::1 / 0.0.0.0 и приватные подсети
 // (локальные ComfyUI/llama.cpp/TTS серверы). Всё остальное — ошибка с

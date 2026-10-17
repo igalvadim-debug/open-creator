@@ -2,6 +2,6 @@ Translate the numbered lines below from {src_name} to {dst_name}.
 
 Rules:
 - Keep line numbering and total line count EXACTLY the same.
-- Keep any timestamps, tags (like <i>, {{\\{}}}), speaker markers unchanged.
+- Keep any timestamps, tags (like <i>, {{{{\\{{}}}}}}), speaker markers unchanged.
 - Natural, fluent {dst_name}; preserve meaning and tone; do not merge or split lines.
 - Output ONLY the translated numbered lines, no commentary.

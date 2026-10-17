@@ -144,6 +144,18 @@ class TranslationTests(unittest.TestCase):
         chat.assert_called_once_with([{'role': 'system', 'content': 'Translate EN to German'},
                                      {'role': 'user', 'content': 'Hello'}], model='custom', temperature=0.2, max_tokens=4096)
 
+    def test_repository_prompt_preserves_literal_braces_for_text_and_lines(self):
+        prompt = Path(__file__).resolve().parents[2] / 'config/prompts/translation.txt'
+        with patch.object(translation, 'PROMPT_FILE', prompt), \
+                patch.object(translation.llm_client, 'chat', return_value='1. Hallo') as chat:
+            translation.translate('Hello', 'en', 'de')
+            self.assertEqual(translation.translate_lines(['Hello'], 'en', 'de'), ['Hallo'])
+        self.assertEqual(chat.call_count, 2)
+        for call in chat.call_args_list:
+            system = call.args[0][0]['content']
+            self.assertIn('from EN to German', system)
+            self.assertIn(r'tags (like <i>, {{\\{}}})', system)
+
     def test_batches_restart_numbering_and_preserve_missing_translations(self):
         with patch.object(translation.llm_client, 'chat', side_effect=['2) zwei\n1. eins\n99. ignored', 'model omitted numbering']) as chat:
             result = translation.translate_lines(['one', 'two', 'three'], batch=2, dst='de')

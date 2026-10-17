@@ -1,6 +1,7 @@
 import { parse } from '@iarna/toml';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isLocalMode } from '../local-mode.js';
 
 type TomlValue = ReturnType<typeof parse>[string];
 
@@ -51,12 +52,6 @@ export class LocalCodexProviderError extends Error {
     super(message);
     this.name = 'LocalCodexProviderError';
   }
-}
-
-const LOCAL_TRUTHY = /^(1|true|yes)$/i;
-
-function isLocalMode(env: NodeJS.ProcessEnv): boolean {
-  return LOCAL_TRUTHY.test(env.OPENCREATOR_LOCAL ?? '');
 }
 
 export async function readLocalCodexImageConfiguration(input: {
