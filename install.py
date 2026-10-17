@@ -8,8 +8,8 @@ activate без лишней оболочки), ставит requirements.txt Л
 ./local-stack/models/) и генерирует start.bat для запуска стека.
 
 Использование:
-    "C:\\Users\\Startklar\\AppData\\Local\\Programs\\Python\\Python312\\python.exe" install.py
-Либо просто запустить start.bat — при отсутствии venv он сам вызовет install.py.
+    python install.py [--python <путь к Python>]
+Либо запустить start.bat — при незавершённой установке он сам вызовет install.py.
 Всё остаётся внутри этой папки репозитория: venv, модели, кэш pip — local.
 """
 from __future__ import annotations
@@ -23,9 +23,10 @@ ROOT = Path(__file__).resolve().parent
 VENV_DIR = ROOT / "venv"
 REQUIREMENTS = ROOT / "requirements.txt"
 MODELS_DIR = ROOT / "local-stack" / "models"
+INSTALL_COMPLETE = VENV_DIR / ".install-complete"
 
 # Интерпретатор по умолчанию (можно переопределить аргументом --python).
-DEFAULT_PYTHON = r"C:\Users\Startklar\AppData\Local\Programs\Python\Python312\python.exe"
+DEFAULT_PYTHON = sys.executable
 
 
 def venv_python() -> Path:
@@ -97,25 +98,24 @@ def activate_and_install(py: Path) -> None:
     print("[ok    ] Зависимости установлены в venv (все локально, без внешних AI API)")
 
 
-def download_models(py: Path) -> None:
+def download_models(py: Path) -> int:
     """Run the model setup script using interpreter py when the script exists.
 
-    The script downloads missing GGUF files to its configured model directory.
-    It catches individual download errors, so success does not ensure all
-    models are present. A missing script or nonzero exit status is nonfatal.
+    Return the setup exit status, or 1 if the script is missing.
     Process launch errors propagate as OSError.
     """
     setup = ROOT / "local-stack" / "setup_models.py"
     if not setup.exists():
-        print("[skip ] local-stack/setup_models.py не найден — модели не скачаны")
-        return
+        print("[fail ] local-stack/setup_models.py не найден — модели не скачаны")
+        return 1
     print("[models] Скачиваю модели локально в ./local-stack/models ...")
     rc = run([str(py), str(setup)])
     if rc != 0:
-        print("[warn  ] Скачивание моделей завершилось с ошибкой;"
-              " повторите позже: venv python local-stack/setup_models.py")
+        print("[fail  ] Скачивание моделей завершилось с ошибкой;"
+              " повторите установку: python install.py")
     else:
         print(f"[ok    ] Модели на месте: {MODELS_DIR}")
+    return rc
 
 
 START_BAT = """@echo off
@@ -123,17 +123,29 @@ rem open-creator LOCAL — запуск стека (LLM :8484, embeddings :8512,
 setlocal
 cd /d "%~dp0"
 
-if not exist "venv\\Scripts\\python.exe" (
-    echo venv не найден — запускаю установку...
-    "C:\\Users\\Startklar\\AppData\\Local\\Programs\\Python\\Python312\\python.exe" install.py
+if not exist "venv\\Scripts\\python.exe" goto install
+if not exist "venv\\.install-complete" goto install
+goto start
+
+:install
+echo Установка не завершена — запускаю установку...
+if exist "venv\\Scripts\\python.exe" (
+    "venv\\Scripts\\python.exe" install.py
+) else (
+    where py >nul 2>&1
     if errorlevel 1 (
-        echo [fail] Установка не удалась.
-        exit /b 1
+        python install.py
+    ) else (
+        py -3 install.py
     )
 )
+if errorlevel 1 (
+    echo [fail] Установка не удалась.
+    exit /b 1
+)
 
-call "venv\\Scripts\\activate.bat"
-python local-stack\\start.py
+:start
+"venv\\Scripts\\python.exe" local-stack\\start.py
 endlocal
 """
 
@@ -144,7 +156,7 @@ def write_start_bat() -> None:
     File write errors propagate as OSError.
     """
     bat = ROOT / "start.bat"
-    bat.write_text(START_BAT.replace("\n", "\r\n"), encoding="utf-8")
+    bat.write_text(START_BAT, encoding="utf-8")
     print(f"[ok    ] Создан {bat.name}: двойной клик или .\\start.bat")
 
 
@@ -152,11 +164,12 @@ def main(argv: list[str]) -> int:
     """Prepare the venv, install dependencies and models, and write start.bat.
 
     argv excludes the program name. The value after the first --python wins;
-    without --python, argv[0] is used only when at least two arguments are
-    present and it does not start with '-'. Otherwise DEFAULT_PYTHON is used,
+    without --python, argv[0] is used when present and it does not start
+    with '-'. Otherwise DEFAULT_PYTHON is used,
     including when --python has no following value.
 
-    Return 0 after all steps complete, even if model downloads failed.
+    Return 0 and mark installation complete only after all steps succeed.
+    Return a nonzero model setup status without writing the launcher.
     Setup SystemExit, subprocess.CalledProcessError, and OSError exceptions
     propagate.
     """
@@ -165,14 +178,18 @@ def main(argv: list[str]) -> int:
         i = argv.index("--python")
         if i + 1 < len(argv):
             base_python = argv[i + 1]
-    elif len(argv) >= 2 and not argv[0].startswith("-"):
+    elif argv and not argv[0].startswith("-"):
         base_python = argv[0]
 
     print("=== open-creator LOCAL installer (всё в этой папке) ===")
     py = ensure_venv(base_python)
+    INSTALL_COMPLETE.unlink(missing_ok=True)
     activate_and_install(py)
-    download_models(py)
+    rc = download_models(py)
+    if rc != 0:
+        return rc
     write_start_bat()
+    INSTALL_COMPLETE.write_text("ok\n", encoding="utf-8")
     print("=== Готово. Запуск: start.bat ===")
     return 0
 
