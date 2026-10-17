@@ -25,6 +25,14 @@ export function parseStickmanScript(value: unknown): StickmanScript {
   return parsed;
 }
 
+/**
+ * Generate and validate a script for a topic. targetDurationSeconds guides the
+ * prompt; the total duration is not enforced. Local mode overrides baseUrl with
+ * LOCAL_LLM_BASE_URL or its localhost default.
+ *
+ * @throws On HTTP failure, missing content, invalid JSON/schema, or duplicate
+ * segment IDs. Fetch and response decoding errors propagate.
+ */
 export async function generateStickmanScript(input: {
   baseUrl: string;
   apiKey: string;
@@ -33,8 +41,12 @@ export async function generateStickmanScript(input: {
   targetDurationSeconds: number;
   fetchImpl?: typeof fetch;
 }): Promise<StickmanScript> {
+  // LOCAL-FIRST: OPENCREATOR_LOCAL=1 -> локальный llama-server :8484 вместо cloud.
+  const localMode = /^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '');
+  const base = localMode ? (process.env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1')
+    : `${input.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1'}`;
   const response = await (input.fetchImpl ?? fetch)(
-    `${input.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1'}/chat/completions`,
+    `${base}/chat/completions`,
     {
       method: 'POST',
       headers: {

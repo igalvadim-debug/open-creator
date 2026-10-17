@@ -60,8 +60,22 @@ export async function fetchCreatorService(input: {
   });
 }
 
+/**
+ * Build an endpoint for a relative resource such as chat/completions.
+ *
+ * An empty base uses OpenAI, or LOCAL_LLM_BASE_URL (defaulting to localhost)
+ * when local mode is enabled. A supplied URL already ending in the resource is
+ * preserved; a root path receives /v1 before the resource.
+ *
+ * @throws {TypeError} If the selected base or resulting URL is invalid.
+ */
 export function openAiCompatibleEndpoint(baseUrl: string, resource: string): URL {
   const trimmed = baseUrl.trim().replace(/\/+$/, '');
+  // LOCAL-FIRST: пустой baseUrl в режиме OPENCREATOR_LOCAL=1 -> локальный llama-server :8484.
+  if (!trimmed && /^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
+    const local = process.env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1';
+    return new URL(`${local.replace(/\/+$/, '')}/${resource}`);
+  }
   if (!trimmed) return new URL(`https://api.openai.com/v1/${resource}`);
   const base = new URL(trimmed);
   if (base.pathname.toLowerCase().endsWith(`/${resource.toLowerCase()}`)) return base;

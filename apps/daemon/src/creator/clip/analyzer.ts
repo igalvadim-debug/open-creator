@@ -33,6 +33,15 @@ export function parseClipCandidates(value: unknown, duration: number): ClipCandi
   return sorted;
 }
 
+/**
+ * Request clip candidates and return them in start-time order, filtered by
+ * inclusive duration limits and truncated to count. All times are in seconds.
+ * Local mode overrides baseUrl with LOCAL_LLM_BASE_URL or its localhost default.
+ *
+ * @throws On HTTP failure, missing content, invalid JSON/schema, invalid or
+ * overlapping ranges, duplicate IDs, or no remaining candidates. Fetch and
+ * response decoding errors propagate.
+ */
 export async function analyzeClips(input: {
   baseUrl: string;
   apiKey: string;
@@ -46,7 +55,11 @@ export async function analyzeClips(input: {
   genre?: ClipGenre;
   fetchImpl?: typeof fetch;
 }): Promise<ClipCandidate[]> {
-  const response = await (input.fetchImpl ?? fetch)(`${input.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1'}/chat/completions`, {
+  // LOCAL-FIRST: OPENCREATOR_LOCAL=1 -> локальный llama-server :8484 вместо cloud.
+  const localMode = /^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '');
+  const base = localMode ? (process.env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1')
+    : `${input.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1'}`;
+  const response = await (input.fetchImpl ?? fetch)(`${base}/chat/completions`, {
     method: 'POST',
     headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({
