@@ -376,10 +376,51 @@ function ensureSuccessfulResponse(response: KrillinUtilityResponse): void {
 async function executeProviderSynthesis(
   input: ExecuteSynthesisInput & { timeoutMs: number }
 ): Promise<ExecuteSynthesisResult> {
+  // LOCAL-FIRST: обработку локального режима нужно выполнить ДО сборки
+  // специфичных провайдерских тел запросов (Aliyun, MiniMax, Volcengine).
+  // В локальном режиме синтез идёт на сервис, который действительно
+  // поддерживает OpenAI-совместимый /v1/audio/speech (Kokoro-FastAPI,
+  // llama.cpp c TTS-адаптером и т.п.), а НЕ на базовый LLM-инференс
+  // (LOCAL_LLM_BASE_URL — это текстовая модель, она не умеет озвучку).
+  if (/^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
+    return synthesizeLocal(input);
+  }
   if (input.provider === 'aliyun') return synthesizeAliyun(input);
   if (input.provider === 'minimax') return synthesizeMinimax(input);
   if (input.provider === 'volcengine') return synthesizeVolcengine(input);
   return synthesizeOpenAi(input);
+}
+
+function localTtsEndpoint(): string {
+  const base = (process.env.LOCAL_TTS_BASE_URL ?? 'http://127.0.0.1:8880/v1').trim();
+  return appendPath(base, '/audio/speech');
+}
+
+async function synthesizeLocal(
+  input: ExecuteSynthesisInput & { timeoutMs: number }
+): Promise<ExecuteSynthesisResult> {
+  // Стандартное OpenAI-совместимое тело запроса для /v1/audio/speech.
+  const body = {
+    model: input.model || process.env.LOCAL_TTS_MODEL || 'tts-1',
+    input: input.text,
+    voice: input.voiceId,
+    response_format: input.format,
+    ...(input.speed === 1 ? {} : { speed: input.speed })
+  };
+  const response = await timedFetch(localTtsEndpoint(), {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer local',
+      'content-type': 'application/json',
+      ...(input.logicalId ? { 'Idempotency-Key': input.logicalId } : {})
+    },
+    body: JSON.stringify(body)
+  }, input);
+  if (!response.ok) await throwProviderHttpError(response, input.provider);
+  return {
+    content: await readAudioResponse(response),
+    format: audioFormat(response.headers.get('content-type'), undefined, input.format)
+  };
 }
 
 async function synthesizeVolcengine(
@@ -578,12 +619,9 @@ async function providerFetch(
   body: unknown,
   input: ExecuteSynthesisInput & { timeoutMs: number }
 ): Promise<Response> {
-  // LOCAL-FIRST: OPENCREATOR_LOCAL=1 -> все cloud-TTS (OpenAI/Aliyun/Volcengine/MiniMax)
-  // перенаправляются на локальный OpenAI-совместимый TTS-эндпоинт llama.cpp (:8484).
-  if (/^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
-    url = process.env.LOCAL_TTS_BASE_URL ?? 'http://127.0.0.1:8484/v1/audio/speech';
-    apiKey = 'local';
-  }
+  // LOCAL-FIRST: локальный режим обрабатывается раньше — в
+  // executeProviderSynthesis (см. synthesizeLocal), поэтому сюда попадают
+  // только настоящие cloud-запросы.
   const response = await timedFetch(url, {
     method: 'POST',
     headers: {

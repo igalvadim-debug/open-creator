@@ -114,10 +114,12 @@ def index_table(root: Path, table: str, exts: set[str]) -> dict:
         if table in list(names):
             t = d.open_table(table)
             old_paths = {r["path"].split("#")[0] for r in rows}
-            try:
-                t.delete(f"path LIKE '%#%'")  # noop-safe; ниже перезапись точечная
-            except Exception:  # noqa: BLE001
-                pass
+            # Точечное удаление: только чанки тех файлов, которые реально
+            # переиндексируются. Раньше фильтр `path LIKE '%#%'` стирал всю
+            # таблицу (все пути содержат '#'), и старые данные терялись.
+            conds = " OR ".join(f'path LIKE \'{p.replace("\'", "")}%#\%%\'' for p in sorted(old_paths))
+            if conds:
+                t.delete(conds)
             t.add(rows)
         else:
             d.create_table(table, rows)

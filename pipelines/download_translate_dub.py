@@ -32,7 +32,9 @@ def assemble(video: Path, wav_files: list[Path], segs: list[dict], out: Path) ->
     for i, (w, s) in enumerate(zip(wav_files, segs)):
         inputs += ["-i", str(w)]
         ms = int(s["start"] * 1000)
-        filters.append(f"[{i}:a]adelay={ms}|{ms}[a{i}]")
+        # Индекс +1: под нулевым входом ffmpeg идёт исходное видео
+        # (-i video.mp4), wav-файлы дубляжа начинаются с входа 1.
+        filters.append(f"[{i + 1}:a]adelay={ms}|{ms}[a{i}]")
     n = len(wav_files)
     if n == 0:
         shutil.copy(video, out); return out

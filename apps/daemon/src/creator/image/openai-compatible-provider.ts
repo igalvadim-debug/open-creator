@@ -1,13 +1,29 @@
 import type { ImageProvider } from './provider.js';
+import { LocalCodexProviderError } from '../../codex/local-provider.js';
 
-// LOCAL-FIRST: в режиме OPENCREATOR_LOCAL=1 базовый URL cloud-провайдера
-// принудительно заменяется на локальный llama-server :8484 (или COMFY_IMAGE_BASE_URL),
-// а fetch защищается local-guard'ом. Cloud при этом не вызывается никогда.
-function localBaseUrl(baseUrl: string, fallback: string): string {
-  if (/^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
-    return process.env.LOCAL_LLM_BASE_URL ?? fallback;
+// LOCAL-FIRST: в режиме OPENCREATOR_LOCAL=1 генерация изображений уходит
+// строго на ComfyUI (COMFY_IMAGE_BASE_URL). Локальный llama.cpp
+// (LOCAL_LLM_BASE_URL) умеет только текст, поэтому для картинок он не
+// используется никогда. В облачном режиме по умолчанию возвращается
+// стандартный URL OpenAI.
+const DEFAULT_CLOUD_IMAGE_BASE_URL = 'https://api.openai.com/v1';
+
+function localImageBaseUrl(): string {
+  const comfyBaseUrl = (process.env.COMFY_IMAGE_BASE_URL ?? '').trim();
+  if (comfyBaseUrl.length === 0) {
+    throw new LocalCodexProviderError(
+      'Image generation is unavailable in local mode: set COMFY_IMAGE_BASE_URL to a running ComfyUI server (the local llama.cpp endpoint only supports text).'
+    );
   }
-  return baseUrl || fallback;
+  return comfyBaseUrl.replace(/\/+$/, '');
+}
+
+function resolveImageBaseUrl(baseUrl: string): string {
+  if (/^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
+    // Никаких LOCAL_LLM_BASE_URL / Qwen3-8B для картинок — только ComfyUI.
+    return localImageBaseUrl();
+  }
+  return baseUrl || DEFAULT_CLOUD_IMAGE_BASE_URL;
 }
 
 export function createOpenAiCompatibleImageProvider(input: {
@@ -17,7 +33,7 @@ export function createOpenAiCompatibleImageProvider(input: {
   fetchImpl?: typeof fetch;
 }): ImageProvider {
   const fetchImpl = input.fetchImpl ?? fetch;
-  const baseUrl = localBaseUrl(input.baseUrl, 'http://127.0.0.1:8484/v1');
+  const baseUrl = resolveImageBaseUrl(input.baseUrl);
   return {
     id: 'openai-compatible',
     capabilities: { generate: true, edit: false },
