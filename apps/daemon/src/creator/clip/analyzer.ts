@@ -46,7 +46,11 @@ export async function analyzeClips(input: {
   genre?: ClipGenre;
   fetchImpl?: typeof fetch;
 }): Promise<ClipCandidate[]> {
-  const response = await (input.fetchImpl ?? fetch)(`${input.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1'}/chat/completions`, {
+  // LOCAL-FIRST: OPENCREATOR_LOCAL=1 -> локальный llama-server :8484 вместо cloud.
+  const localMode = /^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '');
+  const base = localMode ? (process.env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1')
+    : `${input.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1'}`;
+  const response = await (input.fetchImpl ?? fetch)(`${base}/chat/completions`, {
     method: 'POST',
     headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({

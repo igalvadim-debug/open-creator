@@ -39,6 +39,8 @@ export function loadVolcengineEnvironment(
 ): VolcengineEnvironment {
   const env = options.env ?? process.env;
   const fileValues = readWhitelistedVolcengineEnvFile(options);
+  // LOCAL-FIRST: в локальном режиме облачные ключи Volcengine не применяются.
+  if (/^(1|true|yes)$/i.test(env.OPENCREATOR_LOCAL ?? '')) return {};
   const result: VolcengineEnvironment = {};
   for (const key of VOLCENGINE_ENV_KEYS) {
     if (Object.prototype.hasOwnProperty.call(env, key)) {

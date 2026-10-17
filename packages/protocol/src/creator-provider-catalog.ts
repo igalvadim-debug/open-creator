@@ -24,7 +24,43 @@ export type CreatorProviderCatalogEntry = {
 
 const entry = (value: CreatorProviderCatalogEntry) => value;
 
-export const creatorProviderCatalog = [
+// LOCAL-FIRST: когда включён OPENCREATOR_LOCAL=1, все AI-провайдеры переводятся
+// на локальные серверы (llama.cpp / ComfyUI / whisper / piper). Cloud-записи
+// ниже остаются только как справочник форматов протоколов и не используются
+// в рантайме при локальном режиме.
+const LOCAL_MODE = /^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '');
+const LOCAL_LLM_BASE = process.env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1';
+const LOCAL_COMFY_IMAGE = process.env.COMFY_IMAGE_BASE_URL ?? 'http://127.0.0.1:8291';
+const LOCAL_COMFY_VIDEO = process.env.COMFY_VIDEO_BASE_URL ?? 'http://127.0.0.1:8197';
+
+export const localCreatorProviderCatalog: readonly CreatorProviderCatalogEntry[] = [
+  entry({ id: 'local-llm', kind: 'llm', label: 'Local LLM (llama.cpp :8484)', protocol: 'openai-compatible', defaultBaseUrl: LOCAL_LLM_BASE, models: [
+    { id: 'Qwen3-8B-Q4_K_M.gguf', label: 'Qwen3 8B', recommended: true },
+    { id: 'Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf', label: 'Qwen2.5 Coder 7B' },
+    { id: 'gemma-3n-E4B-it-QAT-Q4_K_XL.gguf', label: 'Gemma-3n E4B' },
+    { id: 'Qwen3-4B-Instruct-2507-Q8_0.gguf', label: 'Qwen3 4B' },
+    { id: 'gemma-3-4b-it-qat-q4_0-gguf.gguf', label: 'Gemma-3 4B + vision mmproj' }
+  ], credentials: [], capabilities: ['chat', 'translation', 'prompt-enhance', 'agent'], status: 'supported' }),
+  entry({ id: 'local-image', kind: 'image', label: 'Local ComfyUI image (:8291)', protocol: 'local', defaultBaseUrl: LOCAL_COMFY_IMAGE, models: [
+    { id: 'auto:checkpoints', label: 'Из cw_local_catalog.json (checkpoints)', recommended: true },
+    { id: 'auto:diffusion_model_gguf', label: 'GGUF diffusion models' }
+  ], credentials: [], capabilities: ['text-to-image', 'image-edit', 'reference-image'], status: 'supported' }),
+  entry({ id: 'local-video', kind: 'video', label: 'Local ComfyUI video (:8197)', protocol: 'local', defaultBaseUrl: LOCAL_COMFY_VIDEO, models: [
+    { id: 'minimax_h3_fl2va_pruned_w6a8.safetensors', label: 'MiniMax H3 Flash-LV pruned (local GGUF/safetensors)', recommended: true }
+  ], credentials: [], capabilities: ['text-to-video', 'image-to-video'], status: 'supported' }),
+  entry({ id: 'local-tts', kind: 'tts', label: 'Local TTS (Piper / Coqui XTTS-v2 / F5-TTS)', protocol: 'local', models: [
+    { id: 'piper', label: 'Piper (быстрый, .onnx голоса)', recommended: true },
+    { id: 'xtts_v2', label: 'Coqui XTTS-v2 (клонирование голоса)' },
+    { id: 'f5tts', label: 'F5-TTS' }
+  ], credentials: [], capabilities: ['speech-generation', 'voice-preview', 'dubbing'], status: 'supported' }),
+  entry({ id: 'local-stt', kind: 'transcription', label: 'Local Whisper (faster-whisper / whisper.cpp)', protocol: 'local', models: [
+    { id: 'base', label: 'Whisper base', recommended: true },
+    { id: 'small', label: 'Whisper small' },
+    { id: 'medium', label: 'Whisper medium' }
+  ], credentials: [], capabilities: ['transcribe', 'srt', 'vtt'], status: 'supported' })
+];
+
+export const creatorProviderCatalogBase = [
   entry({ id: 'openai', kind: 'llm', label: 'OpenAI', protocol: 'openai-compatible', defaultBaseUrl: 'https://api.openai.com/v1', models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', recommended: true }], credentials: ['apiKey'], status: 'supported' }),
   entry({ id: 'deepseek', kind: 'llm', label: 'DeepSeek', protocol: 'openai-compatible', defaultBaseUrl: 'https://api.deepseek.com', models: [{ id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', recommended: true }, { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' }, { id: 'deepseek-flash', label: 'DeepSeek Flash' }], credentials: ['apiKey'], status: 'supported' }),
   entry({ id: 'minimax', kind: 'llm', label: 'MiniMax', protocol: 'openai-compatible', defaultBaseUrl: 'https://api.minimax.io', models: [{ id: 'MiniMax-M2.7', label: 'MiniMax M2.7', recommended: true }, { id: 'MiniMax-M2.7-highspeed', label: 'MiniMax M2.7 Highspeed' }, { id: 'MiniMax-M2.5', label: 'MiniMax M2.5' }, { id: 'MiniMax-M2.5-highspeed', label: 'MiniMax M2.5 Highspeed' }], credentials: ['apiKey'], status: 'supported' }),
@@ -41,7 +77,13 @@ export const creatorProviderCatalog = [
   entry({ id: 'minimax-tts', kind: 'tts', label: 'MiniMax Voice', protocol: 'openai-compatible', defaultBaseUrl: 'https://api.minimax.io', models: [{ id: 'speech-2.8-hd', label: 'Speech 2.8 HD', recommended: true }], credentials: ['apiKey'], capabilities: ['speech-generation', 'voice-preview'], status: 'supported' }),
   entry({ id: 'aliyun-tts', kind: 'tts', label: 'Alibaba Cloud Voice', protocol: 'openai-compatible', defaultBaseUrl: 'https://dashscope.aliyuncs.com/api/v1', models: [{ id: 'qwen3-tts-flash', label: 'Qwen3 TTS Flash', recommended: true }], credentials: ['apiKey'], capabilities: ['speech-generation', 'voice-preview'], status: 'supported' }),
   entry({ id: 'edge-tts', kind: 'tts', label: 'Edge TTS', protocol: 'custom', models: [], credentials: [], capabilities: ['speech-generation'], status: 'supported' })
-] as const;
+];
+
+// Публичный каталог: в локальном режиме (OPENCREATOR_LOCAL=1) — только локальные
+// провайдеры; иначе — полная таблица, но с приоритетом локальных записей.
+export const creatorProviderCatalog = (LOCAL_MODE
+  ? localCreatorProviderCatalog
+  : [...localCreatorProviderCatalog, ...creatorProviderCatalogBase]) as readonly CreatorProviderCatalogEntry[];
 
 export const creatorProviderCatalogById = {
   llm: Object.fromEntries(creatorProviderCatalog.filter(item => item.kind === 'llm').map(item => [item.id, item])),

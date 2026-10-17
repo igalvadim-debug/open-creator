@@ -1,5 +1,15 @@
 import type { ImageProvider } from './provider.js';
 
+// LOCAL-FIRST: в режиме OPENCREATOR_LOCAL=1 базовый URL cloud-провайдера
+// принудительно заменяется на локальный llama-server :8484 (или COMFY_IMAGE_BASE_URL),
+// а fetch защищается local-guard'ом. Cloud при этом не вызывается никогда.
+function localBaseUrl(baseUrl: string, fallback: string): string {
+  if (/^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
+    return process.env.LOCAL_LLM_BASE_URL ?? fallback;
+  }
+  return baseUrl || fallback;
+}
+
 export function createOpenAiCompatibleImageProvider(input: {
   baseUrl: string;
   apiKey: string;
@@ -7,12 +17,13 @@ export function createOpenAiCompatibleImageProvider(input: {
   fetchImpl?: typeof fetch;
 }): ImageProvider {
   const fetchImpl = input.fetchImpl ?? fetch;
+  const baseUrl = localBaseUrl(input.baseUrl, 'http://127.0.0.1:8484/v1');
   return {
     id: 'openai-compatible',
     capabilities: { generate: true, edit: false },
     async generate(request, signal) {
       if (request.referenceImage !== undefined) throw new Error('unsupported_capability: reference image editing');
-      const response = await fetchImpl(`${input.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1'}/images/generations`, {
+      const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/images/generations`, {
         method: 'POST',
         signal,
         headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },

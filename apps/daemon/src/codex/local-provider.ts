@@ -57,6 +57,18 @@ export async function readLocalCodexProvider(input: {
   env?: NodeJS.ProcessEnv;
 }): Promise<LocalCodexProvider> {
   const env = input.env ?? process.env;
+
+  // LOCAL-FIRST (open-creator localization): OPENCREATOR_LOCAL=1 переключает
+  // Codex-агента на локальный llama.cpp сервер (OpenAI-совместимый :8484).
+  // Cloud-эндпоинты в этом режиме не используются.
+  if (/^(1|true|yes)$/i.test(env.OPENCREATOR_LOCAL ?? '')) {
+    return {
+      baseUrl: env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1',
+      apiKey: 'local',
+      model: env.LOCAL_LLM_MODEL ?? 'Qwen3-8B-Q4_K_M.gguf'
+    };
+  }
+
   const config = await readToml(join(input.codexHome, 'config.toml'), true);
   const providerId = readString(config.model_provider);
   const providers = readRecord(config.model_providers);
