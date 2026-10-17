@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out our repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -40,6 +40,8 @@ jobs:
             README_LOCAL.md
             local-stack
             tests/local
+            apps/daemon/src/api/auth.ts
+            apps/daemon/test/unit/api-auth.test.ts
           )
           rm -rf /tmp/keep && mkdir -p /tmp/keep
           for f in "${KEEP[@]}"; do
@@ -83,10 +85,10 @@ jobs:
         run: |
           gh pr create \
             --title "Sync upstream OpenCreator" \
-            --body "Автоматический снапшот апстрима. См. diff; мержить только после зелёного CI (защита ветки main)." \
+            --body "Автоматический снапшот апстрима. См. diff; мержить только после зелёного CI (защита ветки main). Запуски workflow pull_request требуют одобрения: одобрите их для запуска CI до мержа." \
             --head "${{ steps.sync.outputs.branch }}" \
             --base main --fill-headless 2>/dev/null || \
           gh pr create \
             --title "Sync upstream OpenCreator" \
-            --body "Автоматический снапшот апстрима. Мержить только после зелёного CI." \
+            --body "Автоматический снапшот апстрима. Мержить только после зелёного CI. Запуски workflow pull_request требуют одобрения: одобрите их для запуска CI до мержа." \
             --head "${{ steps.sync.outputs.branch }}" --base main

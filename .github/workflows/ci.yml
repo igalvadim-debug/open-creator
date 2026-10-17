@@ -1,8 +1,8 @@
 name: CI (local-first)
 
-# LOCAL-FIRST: все шаги работают офлайн — установка зависимостей из
-# pnpm-lock.yaml без постинсталл-сборки нативных модулей, тесты только
-# юнит/интеграционные (внешние сети не трогаем).
+# LOCAL-FIRST: юнит/интеграционные тесты не обращаются к внешним сетям.
+# Установка зависимостей pnpm и Python может обращаться к реестрам;
+# postinstall-скрипты pnpm отключены через --ignore-scripts.
 
 on:
   push:
@@ -21,9 +21,9 @@ jobs:
   typecheck-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4            # версия берётся из packageManager в package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0; pnpm version from packageManager in package.json
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -39,8 +39,8 @@ jobs:
   python-local-stack:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
           cache: pip
@@ -57,9 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
       - name: Dependency audit
         run: pnpm audit --audit-level=high || true
