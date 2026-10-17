@@ -97,6 +97,17 @@ export async function readLocalCodexImageConfiguration(input: {
   return { authentication: 'api_key', provider: await readLocalCodexProvider(input) };
 }
 
+/**
+ * Resolve an API provider from local Codex settings and credentials.
+ *
+ * With OPENCREATOR_LOCAL set to 1, true, or yes (case-insensitive), return
+ * LOCAL_LLM_BASE_URL/LOCAL_LLM_MODEL defaults and a placeholder key without
+ * reading files. Otherwise, prefer the provider bearer token, then its
+ * environment key, then auth.json; use gpt-image-1 unless an image model is set.
+ *
+ * @throws {LocalCodexProviderError} If config.toml cannot be read or parsed,
+ * or the resolved base URL or API key is missing. Unreadable auth.json is ignored.
+ */
 export async function readLocalCodexProvider(input: {
   codexHome: string;
   env?: NodeJS.ProcessEnv;

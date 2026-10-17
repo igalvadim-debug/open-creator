@@ -111,5 +111,6 @@ GEN_TIMEOUT_S = 3600
 
 
 def ensure_dirs() -> None:
+    """Create configured model, binary, log, output, and database directories."""
     for d in (MODELS_DIR, BIN_DIR, LOGS_DIR, OUTPUT_DIR, LANCEDB_DIR):
         d.mkdir(parents=True, exist_ok=True)

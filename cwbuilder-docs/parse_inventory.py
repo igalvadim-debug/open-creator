@@ -30,6 +30,10 @@ MODEL_EXT = {".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx", "
 
 
 def scan() -> dict:
+    """Return a catalog of supported model files and workflow names.
+
+    Model paths are relative to LOCAL with forward slashes; size_mb uses
+    decimal megabytes rounded to one decimal. File errors propagate."""
     models: list[dict] = []
     for sub in SUBDIRS:
         d = LOCAL / sub
@@ -54,6 +58,7 @@ def scan() -> dict:
 
 
 def main() -> None:
+    """Scan model files and overwrite the catalog JSON; file errors propagate."""
     cat = scan()
     CATALOG_OUT.write_text(json.dumps(cat, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[ok] Каталог: {cat['total_models']} моделей -> cw_local_catalog.json")

@@ -16,11 +16,15 @@ import llama_client  # noqa: E402
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
+    """Print a labeled result with optional detail and return ok unchanged."""
     print(f"[{'OK ' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
     return ok
 
 
 def http_get(url: str) -> object | None:
+    """GET and decode JSON, returning None on request or decoding errors.
+
+    The URL policy check runs first and its RuntimeError propagates."""
     llama_client.assert_local(url)
     try:
         with urllib.request.urlopen(url, timeout=5) as r:
@@ -30,6 +34,10 @@ def http_get(url: str) -> object | None:
 
 
 def main() -> int:
+    """Check configured services and return 0 on success, otherwise 1.
+
+    ComfyUI availability is optional. Chat and embedding smoke tests run
+    only when their model endpoints return JSON."""
     results = []
 
     models = http_get(f"{C.LLM_BASE_URL}/models")

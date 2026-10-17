@@ -27,6 +27,7 @@ SUBDIRS = [
 
 
 def cmd_layout() -> None:
+    """Print each model directory status and recursive entry count."""
     print(f"Корень: ./{LOCAL.relative_to(HERE.parent)}")
     for s in SUBDIRS:
         d = LOCAL / s
@@ -36,6 +37,7 @@ def cmd_layout() -> None:
 
 
 def cmd_setup() -> None:
+    """Create model directories and an empty catalog if one does not exist."""
     for s in SUBDIRS:
         (LOCAL / s).mkdir(parents=True, exist_ok=True)
     print(f"[ok] Создано {len(SUBDIRS)} подпапок в ./{LOCAL.relative_to(HERE.parent)}")
@@ -48,12 +50,17 @@ def cmd_setup() -> None:
 
 
 def load_catalog() -> dict:
+    """Load the JSON catalog; exit with a message if it is missing.
+
+    Read and JSON decoding errors propagate."""
     if not CATALOG.exists():
         sys.exit("Нет cw_local_catalog.json — запустите python parse_inventory.py")
     return json.loads(CATALOG.read_text(encoding="utf-8"))
 
 
 def cmd_find(q: str) -> None:
+    """Print up to 50 case-insensitive name substring or exact category matches
+    and the total match count. Catalog loading errors propagate."""
     cat = load_catalog()
     ql = q.lower()
     hits = [m for m in cat.get("models", [])
@@ -64,6 +71,7 @@ def cmd_find(q: str) -> None:
 
 
 def cmd_catalog() -> None:
+    """Print catalog totals, category counts, and workflow names."""
     cat = load_catalog()
     print(f"Моделей всего: {cat.get('total_models', len(cat.get('models', [])))}")
     for k, v in (cat.get("by_category") or {}).items():
@@ -72,6 +80,7 @@ def cmd_catalog() -> None:
 
 
 def main() -> None:
+    """Dispatch the catalog CLI command, or print help for no/unknown command."""
     args = sys.argv[1:]
     if not args:
         print(__doc__)

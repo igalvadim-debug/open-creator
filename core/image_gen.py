@@ -27,6 +27,10 @@ DEFAULT_WORKFLOW = _ROOT / "config" / "workflows" / "image_default.json"
 
 
 def catalog_models(category: str | None = None) -> list[dict]:
+    """Read catalog entries, optionally filtered by exact category.
+
+    Return an empty list when the catalog is absent. Read and JSON errors
+    propagate."""
     if C.CW_CATALOG.exists():
         cat = json.loads(C.CW_CATALOG.read_text(encoding="utf-8"))
         ms = cat.get("models", [])
@@ -43,7 +47,7 @@ def loras_for_prompt(prompt: str, category: str = "lora") -> list[dict]:
 
 
 def enhance(prompt: str) -> str:
-    """Локальный промпт-энхансер (:8484)."""
+    """Return an enhanced prompt, or the original prompt if enhancement raises."""
     try:
         import cw_prompt_enhance
         return cw_prompt_enhance.enhance(prompt)
@@ -53,6 +57,9 @@ def enhance(prompt: str) -> str:
 
 def build_workflow(prompt: str, *, width: int = C.IMAGE_WIDTH, height: int = C.IMAGE_HEIGHT,
                    seed: int | None = None, workflow_path: Path | None = None) -> dict:
+    """Load a workflow and replace prompt placeholders and existing size/seed
+    inputs. Dimensions are in pixels; a missing seed uses the current time.
+    File and JSON decoding errors propagate."""
     wf_file = workflow_path or DEFAULT_WORKFLOW
     wf = json.loads(Path(wf_file).read_text(encoding="utf-8"))
     nodes = wf.get("nodes", [])
@@ -72,7 +79,15 @@ def build_workflow(prompt: str, *, width: int = C.IMAGE_WIDTH, height: int = C.I
 def generate(prompt: str, out_path: str | Path, *, enhance_prompt: bool = True,
              width: int = C.IMAGE_WIDTH, height: int = C.IMAGE_HEIGHT,
              workflow_path: Path | None = None, timeout: int = C.GEN_TIMEOUT_S) -> Path:
-    """POST /prompt -> ждать /history -> скачать /view. Только localhost."""
+    """Generate an image and save the first image or GIF output to out_path.
+
+    Create parent directories and overwrite an existing output. Dimensions
+    are in pixels; timeout is the polling window in seconds, not a total
+    request deadline. Enhancement failures use the original prompt.
+
+    Raise RuntimeError for a rejected server URL or completed history without
+    media, and TimeoutError when polling expires. HTTP, file, workflow, and
+    response decoding errors propagate."""
     LC.assert_local(SERVER)
     prompt_text = enhance(prompt) if enhance_prompt else prompt
     wf = build_workflow(prompt_text, width=width, height=height, workflow_path=workflow_path)

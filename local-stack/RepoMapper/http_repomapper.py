@@ -23,6 +23,10 @@ TS_SIG_RE = re.compile(
 
 
 def map_python(f: Path) -> list[str]:
+    """Return top-level Python function signatures and class summaries.
+
+    Syntax errors produce an empty list; read errors propagate. Class
+    summaries include at most 12 method names."""
     try:
         tree = ast.parse(f.read_text(encoding="utf-8", errors="replace"))
     except SyntaxError:
@@ -41,6 +45,8 @@ def map_python(f: Path) -> list[str]:
 
 
 def map_ts(f: Path) -> list[str]:
+    """Return at most 200 matching declaration lines, each capped at 160
+    characters. This uses line patterns rather than a syntax parser."""
     sigs = []
     for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
         m = TS_SIG_RE.match(line)
@@ -50,6 +56,10 @@ def map_ts(f: Path) -> list[str]:
 
 
 def build_map(root: Path) -> dict:
+    """Map supported source files to nonempty declaration summaries.
+
+    Skip files with excluded path components and return root, file count,
+    and map. File read errors propagate."""
     out: dict[str, list[str]] = {}
     for p in root.rglob("*"):
         if not p.is_file() or any(part in SKIP_DIRS for part in p.parts):
@@ -68,6 +78,7 @@ def build_map(root: Path) -> dict:
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, obj, code=200):
+        """Write a JSON response with the supplied HTTP status."""
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -76,6 +87,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802
+        """Serve health or a repository map, otherwise respond with HTTP 404.
+
+        The root query value is used as a path without URL decoding; map errors
+        propagate."""
         if self.path.startswith("/health"):
             self._send({"ok": True, "local": True, "llm_used": False})
         elif self.path.startswith("/map"):
@@ -87,10 +102,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"error": "not found"}, 404)
 
     def log_message(self, fmt, *args):
+        """Write a formatted request log to standard error."""
         sys.stderr.write("[repomapper-8002] " + fmt % args + "\n")
 
 
 def main() -> None:
+    """Serve repository maps on the configured host and port until interrupted."""
     srv = ThreadingHTTPServer((C.HOST, C.REPOMAPPER_PORT), Handler)
     print(f"RepoMapper (AST, no-LLM) on http://{C.HOST}:{C.REPOMAPPER_PORT}")
     srv.serve_forever()

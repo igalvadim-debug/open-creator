@@ -15,6 +15,8 @@ LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1", "0.0.0.0")
 
 
 def assert_local(base_url: str) -> None:
+    """Raise RuntimeError unless the URL contains a recognized local address
+    substring, case-insensitively. This does not validate the parsed hostname."""
     low = base_url.lower()
     if not any(h in low for h in LOCAL_HOSTS):
         raise RuntimeError(
@@ -24,6 +26,10 @@ def assert_local(base_url: str) -> None:
 
 
 def _post(url: str, payload: dict[str, Any], timeout: float = 600.0) -> dict[str, Any]:
+    """POST JSON after the URL policy check and decode the JSON response.
+
+    timeout is in seconds. Policy, serialization, HTTP, and response
+    decoding errors propagate."""
     assert_local(url)
     req = urllib.request.Request(
         url,
@@ -73,6 +79,10 @@ def embed(base_url: str, model: str, texts: list[str], *, timeout: float = 300.0
 def embed_batched(
     base_url: str, model: str, texts: Iterable[str], batch_size: int = 8, *, timeout: float = 300.0
 ) -> list[list[float]]:
+    """Embed successive batches and concatenate vectors in batch order.
+
+    timeout applies to each request in seconds. A nonpositive batch_size
+    sends one text per request. Embedding errors propagate."""
     out: list[list[float]] = []
     batch: list[str] = []
     for t in texts:
@@ -86,7 +96,11 @@ def embed_batched(
 
 
 def wait_ready(base_url: str, *, timeout: float = 120.0) -> bool:
-    """Ждёт готовности локального llama-server (/models)."""
+    """Poll /models for HTTP 200 and return False when timeout seconds elapse.
+
+    Requests have a separate three-second timeout, so this is not a strict
+    wall-clock deadline. URL policy errors propagate; HTTP and OS errors
+    are retried."""
     assert_local(base_url)
     deadline = time.time() + timeout
     while time.time() < deadline:

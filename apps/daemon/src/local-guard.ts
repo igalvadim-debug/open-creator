@@ -11,6 +11,11 @@
 
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '0.0.0.0']);
 
+/**
+ * Check the fetch guard's URL rules. Non-HTTP(S) schemes are accepted;
+ * HTTP(S) hosts must match the local set or private-address prefix patterns.
+ * Malformed URL strings return false. No DNS resolution is performed.
+ */
 export function isLocalUrl(raw: string | URL): boolean {
   try {
     const u = typeof raw === 'string' ? new URL(raw) : raw;
@@ -26,12 +31,21 @@ export function isLocalUrl(raw: string | URL): boolean {
 }
 
 export class ExternalApiBlockedError extends Error {
+  /** Create a policy error identifying the rejected URL. */
   constructor(url: string) {
     super(`OPENCREATOR_LOCAL=1: внешний AI API запрещён политикой локальности (${url})`);
     this.name = 'ExternalApiBlockedError';
   }
 }
 
+/**
+ * Replace the target object's fetch with a guard on the initial request URL.
+ * Use globalThis.fetch when the target has no fetch. This does not inspect
+ * redirect destinations or validate hosts accepted by prefix patterns.
+ *
+ * The installed fetch rejects disallowed URLs with ExternalApiBlockedError;
+ * errors from the captured fetch propagate.
+ */
 export function installLocalOnlyFetch(globalObj: { fetch?: unknown } = globalThis as never): void {
   const original = (globalObj.fetch ?? globalThis.fetch) as typeof fetch;
   const guarded: typeof fetch = async (input, init) => {

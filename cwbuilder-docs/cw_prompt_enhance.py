@@ -25,6 +25,9 @@ SYSTEM = (
 
 
 def enhance(prompt: str, lang: str = "en", model: str | None = None) -> str:
+    """Ask the configured LLM to expand a visual prompt in lang and return the
+    reply with surrounding whitespace and double quotes stripped. Model
+    request and response errors propagate."""
     out = llama_client.chat(
         C.LLM_BASE_URL,
         model or C.DEFAULT_LLM_MODEL,
@@ -36,6 +39,7 @@ def enhance(prompt: str, lang: str = "en", model: str | None = None) -> str:
 
 
 def main() -> None:
+    """Print an enhanced CLI prompt, or exit with a message on enhancement error."""
     ap = argparse.ArgumentParser()
     ap.add_argument("prompt")
     ap.add_argument("--lang", default="en")

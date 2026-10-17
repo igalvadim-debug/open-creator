@@ -23,6 +23,11 @@ CFG_FILE = _ROOT / "config" / "config.local.json"
 
 
 def load_cfg() -> dict:
+    """Merge TTS defaults with the local JSON configuration.
+
+    An ONNX voice under the ComfyUI tts directory overrides the backend to
+    Piper, preferring filenames containing the configured language. File,
+    JSON decoding, and malformed configuration errors propagate."""
     cfg = {"backend": C.TTS_BACKEND, "voice": C.TTS_VOICE,
            "model_path": C.TTS_MODEL_PATH, "language": "ru",
            "speaker": C.TTS_SPEAKER, "speed": C.TTS_SPEED}
@@ -41,7 +46,12 @@ def load_cfg() -> dict:
 
 
 def synth(text: str, out_path: str | Path) -> Path:
-    """Озвучить текст локально -> wav. Внешних вызовов: 0."""
+    """Synthesize speech to out_path and return that path, creating parents.
+
+    The configured backend controls the output format; the HTTP backend saves
+    response bytes without conversion. Raise RuntimeError for an unknown
+    backend, a missing Piper model, or a failed Piper command. Dependency,
+    model loading, file, subprocess, HTTP, and URL policy errors propagate."""
     cfg = load_cfg()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,7 +115,10 @@ def synth(text: str, out_path: str | Path) -> Path:
 
 
 def synth_lines(segs: list[dict], out_base: str | Path) -> list[Path]:
-    """Дубляж сегментов (с таймингами STT) -> набор wav."""
+    """Synthesize each segment text to numbered sibling WAV paths in order.
+
+    Create parent directories; segment timestamps do not control duration or
+    placement. Synthesis errors propagate and may leave earlier files written."""
     out_base = Path(out_base); out_base.parent.mkdir(parents=True, exist_ok=True)
     files = []
     for i, s in enumerate(segs):

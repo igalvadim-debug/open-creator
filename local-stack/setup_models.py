@@ -35,10 +35,16 @@ DOWNLOADS: list[tuple[str, str]] = [
 
 
 def target_name(url_tail: str) -> str:
+    """Return the final slash-separated component of a download URL tail."""
     return url_tail.rsplit("/", 1)[-1]
 
 
 def download(repo: str, tail: str) -> Path:
+    """Download a Hugging Face model to MODELS_DIR unless its path exists.
+
+    Write through a .part file, then rename it to the destination. The parent
+    directory must exist; HTTP and file errors propagate and may leave the
+    partial file."""
     dest = C.MODELS_DIR / target_name(tail)
     if dest.exists():
         print(f"[skip] {dest.name} уже на месте")
@@ -57,6 +63,7 @@ def download(repo: str, tail: str) -> Path:
 
 
 def status() -> None:
+    """Print model file presence and guidance for Whisper and Piper voices."""
     missing = []
     for repo, tail in DOWNLOADS:
         p = C.MODELS_DIR / target_name(tail)
@@ -72,6 +79,9 @@ def status() -> None:
 
 
 def main() -> None:
+    """Create directories and list model status or download missing models.
+
+    Individual download exceptions are reported and processing continues."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true", help="только статус")
     args = ap.parse_args()

@@ -33,6 +33,15 @@ export function parseClipCandidates(value: unknown, duration: number): ClipCandi
   return sorted;
 }
 
+/**
+ * Request clip candidates and return them in start-time order, filtered by
+ * inclusive duration limits and truncated to count. All times are in seconds.
+ * Local mode overrides baseUrl with LOCAL_LLM_BASE_URL or its localhost default.
+ *
+ * @throws On HTTP failure, missing content, invalid JSON/schema, invalid or
+ * overlapping ranges, duplicate IDs, or no remaining candidates. Fetch and
+ * response decoding errors propagate.
+ */
 export async function analyzeClips(input: {
   baseUrl: string;
   apiKey: string;

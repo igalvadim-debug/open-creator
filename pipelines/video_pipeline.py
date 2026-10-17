@@ -20,6 +20,8 @@ import config as C  # noqa: E402
 
 
 def main() -> None:
+    """Generate video from CLI options and write it to the requested path
+    or a timestamped default. Generation errors propagate."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--workflow", default="minimax_4step",

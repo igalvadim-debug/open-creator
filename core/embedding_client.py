@@ -22,16 +22,24 @@ BASE_URL = C.EMBED_BASE_URL   # http://127.0.0.1:8512/v1
 
 
 def embed(texts: list[str], *, timeout: float = 300.0) -> list[list[float]]:
+    """Return embeddings from the configured server, ordered by response index.
+
+    timeout is the HTTP timeout in seconds. Policy, HTTP, JSON decoding, and
+    response shape errors propagate."""
     return LC.embed(BASE_URL, C.EMBED_MODEL, texts, timeout=timeout)
 
 
 def embed_many(texts: Iterable[str]) -> list[list[float]]:
+    """Embed all texts in configured-size batches and concatenate the results.
+
+    Policy, HTTP, JSON decoding, and response shape errors propagate."""
     return LC.embed_batched(BASE_URL, C.EMBED_MODEL, list(texts),
                             batch_size=C.INDEX_BATCH_SIZE)
 
 
 def free_tier_embed_unsafe(texts: list[str]) -> list[list[float]]:
-    """Единственный допустимый внешний канал. По умолчанию ВЫКЛЮЧЕН."""
+    """Raise RuntimeError when free-tier access is disabled, otherwise raise
+    NotImplementedError because no external endpoint is implemented."""
     if not C.ALLOW_FREE_TIER:
         raise RuntimeError("ALLOW_FREE_TIER=0: внешние эмбеддинги запрещены политиком")
     raise NotImplementedError("Free-tier включён явно, но endpoint не настроен (.env)")

@@ -81,6 +81,8 @@ CATEGORY_MAP = {
 
 
 def category_from_path(path: str) -> str:
+    """Map folders after the case-sensitive models component to a category,
+    using the first remaining folder lowercased or "misc" as a fallback."""
     parts = re.split(r"[\\/]", path)
     try:
         mi = parts.index("models")
@@ -94,7 +96,8 @@ def category_from_path(path: str) -> str:
 
 
 def rel_name(path: str) -> str:
-    """Относительное имя внутри ComfyUI-local (без диска, только 'models/' и далее)."""
+    """Return forward-slash components after models, or the last two path
+    components if models is absent. Do not retain the models component."""
     parts = re.split(r"[\\/]", path)
     if "models" in parts:
         idx = parts.index("models")
@@ -103,6 +106,10 @@ def rel_name(path: str) -> str:
 
 
 def parse_line(line: str) -> tuple[str, str] | None:
+    """Parse a Windows path with an optional Trigger suffix, or return None.
+
+    Plain paths containing spaces or ending in a forward slash are rejected.
+    Recognized no-trigger markers become an empty trigger string."""
     m = LINE_RE.match(line)
     if m:
         trig = m.group("trig").strip()
@@ -116,6 +123,10 @@ def parse_line(line: str) -> tuple[str, str] | None:
 
 
 def load_entries(text: str) -> list[dict]:
+    """Parse supported model entries and deduplicate by category and path.
+
+    Preserve first occurrences, mark files absent, and set unknown sizes to
+    zero. This reads inventory text without checking or copying model files."""
     entries: list[dict] = []
     seen: set[str] = set()
     for line in text.splitlines():
@@ -145,6 +156,9 @@ def load_entries(text: str) -> list[dict]:
 
 
 def main(argv: list[str]) -> None:
+    """Summarize an inventory file and, with --apply, append new catalog entries
+    and refresh counts. Refresh presence flags only when LOCAL exists.
+    Missing arguments exit with usage; file and JSON errors propagate."""
     if len(argv) < 2:
         sys.exit(__doc__)
     src = Path(argv[1])

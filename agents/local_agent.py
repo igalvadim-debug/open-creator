@@ -38,6 +38,9 @@ SYSTEM_PROMPT = """Ты — локальный кодинг-агент open-crea
 
 
 def _mcp(tool: str, args: dict) -> str:
+    """Call an MCP tool and return its first text result.
+
+    Policy, HTTP, JSON decoding, and missing-result errors propagate."""
     LC.assert_local(C.MCP_URL)
     msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
            "params": {"name": tool, "arguments": args}}
@@ -49,6 +52,8 @@ def _mcp(tool: str, args: dict) -> str:
 
 
 def _repo_map() -> str:
+    """Fetch a repository map, limited to 80 files, eight signatures per file,
+    and 12,000 characters. Policy, HTTP, and response parsing errors propagate."""
     LC.assert_local(C.REPOMAPPER_URL)
     with urllib.request.urlopen(f"{C.REPOMAPPER_URL}/map?root={_ROOT}", timeout=120) as r:  # noqa: S310
         d = json.loads(r.read().decode())
@@ -59,6 +64,8 @@ def _repo_map() -> str:
 
 
 def _safe_path(p: str) -> Path:
+    """Resolve a path against the repository root; raise RuntimeError if it
+    resolves outside that root, including through a symlink."""
     rp = (_ROOT / p).resolve()
     if _ROOT not in rp.parents and rp != _ROOT:
         raise RuntimeError("путь вне репозитория запрещён")
@@ -66,6 +73,13 @@ def _safe_path(p: str) -> Path:
 
 
 def execute(tool: str, args: dict) -> str:
+    """Run a named tool and return its text output.
+
+    File reads and shell output are truncated to 20,000 characters. Writes
+    create parent directories and replace files within the repository. Shell
+    commands run from the repository root with a 600-second timeout; commands
+    containing a forbidden substring return a rejection message. Unknown tools
+    return a message. Tool, file, and subprocess errors propagate."""
     if tool in ("search_code", "list_indexed_files", "reindex"):
         return _mcp(tool, args)
     if tool == "repo_map":
@@ -88,6 +102,9 @@ def execute(tool: str, args: dict) -> str:
 
 
 def parse_action(text: str) -> dict | None:
+    """Decode the JSON between the first opening and last closing brace,
+    after stripping an optional code fence. Return None for missing braces
+    or invalid JSON; decoded values are not checked for an action schema."""
     t = text.strip()
     if t.startswith("```"):
         t = t.strip("`").removeprefix("json").strip()
@@ -101,7 +118,11 @@ def parse_action(text: str) -> dict | None:
 
 
 def run(task: str, *, max_steps: int = 10, model: str | None = None) -> str:
-    """Цикл агента против локального llama-server :8484."""
+    """Run up to max_steps model/tool iterations and return the final answer.
+
+    An unparseable response is returned verbatim. Exhausting the step limit
+    returns a message with the last model response. Tool calls may write files
+    or run shell commands; model and tool errors propagate."""
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": task}]
     transcript = []
