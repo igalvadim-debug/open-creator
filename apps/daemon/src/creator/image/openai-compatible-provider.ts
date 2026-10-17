@@ -1,4 +1,5 @@
 import type { ImageProvider } from './provider.js';
+import { LocalCodexProviderError } from '../../codex/local-provider.js';
 
 // LOCAL-FIRST: в режиме OPENCREATOR_LOCAL=1 базовый URL cloud-провайдера
 // принудительно заменяется на локальный llama-server :8484 (или COMFY_IMAGE_BASE_URL),
@@ -9,9 +10,10 @@ import type { ImageProvider } from './provider.js';
  */
 function localBaseUrl(baseUrl: string, fallback: string): string {
   if (/^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
-    return process.env.LOCAL_LLM_BASE_URL ?? fallback;
+    // Никаких LOCAL_LLM_BASE_URL / Qwen3-8B для картинок — только ComfyUI.
+    return localImageBaseUrl();
   }
-  return baseUrl || fallback;
+  return baseUrl || DEFAULT_CLOUD_IMAGE_BASE_URL;
 }
 
 /**
@@ -32,7 +34,7 @@ export function createOpenAiCompatibleImageProvider(input: {
   fetchImpl?: typeof fetch;
 }): ImageProvider {
   const fetchImpl = input.fetchImpl ?? fetch;
-  const baseUrl = localBaseUrl(input.baseUrl, 'http://127.0.0.1:8484/v1');
+  const baseUrl = resolveImageBaseUrl(input.baseUrl);
   return {
     id: 'openai-compatible',
     capabilities: { generate: true, edit: false },

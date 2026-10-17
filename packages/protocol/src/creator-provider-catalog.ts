@@ -28,10 +28,20 @@ const entry = (value: CreatorProviderCatalogEntry) => value;
 // на локальные серверы (llama.cpp / ComfyUI / whisper / piper). Cloud-записи
 // ниже остаются только как справочник форматов протоколов и не используются
 // в рантайме при локальном режиме.
-const LOCAL_MODE = /^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '');
-const LOCAL_LLM_BASE = process.env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1';
-const LOCAL_COMFY_IMAGE = process.env.COMFY_IMAGE_BASE_URL ?? 'http://127.0.0.1:8291';
-const LOCAL_COMFY_VIDEO = process.env.COMFY_VIDEO_BASE_URL ?? 'http://127.0.0.1:8197';
+// ВАЖНО: этот модуль импортируется и в браузерное приложение (Vite), где
+// глобального объекта `process` не существует — читаем окружение безопасно.
+// Vite exposes public settings with a VITE_ prefix; daemon values take priority.
+const browserEnv = (import.meta as ImportMeta & {
+  readonly env?: Record<string, string | undefined>;
+}).env ?? {};
+const readEnv = (key: string): string | undefined =>
+  (typeof process !== 'undefined' ? process.env?.[key] : undefined)
+    ?? browserEnv[`VITE_${key}`];
+
+const LOCAL_MODE = /^(1|true|yes)$/i.test(readEnv('OPENCREATOR_LOCAL') ?? '');
+const LOCAL_LLM_BASE = readEnv('LOCAL_LLM_BASE_URL') ?? 'http://127.0.0.1:8484/v1';
+const LOCAL_COMFY_IMAGE = readEnv('COMFY_IMAGE_BASE_URL') ?? 'http://127.0.0.1:8291';
+const LOCAL_COMFY_VIDEO = readEnv('COMFY_VIDEO_BASE_URL') ?? 'http://127.0.0.1:8197';
 
 export const localCreatorProviderCatalog: readonly CreatorProviderCatalogEntry[] = [
   entry({ id: 'local-llm', kind: 'llm', label: 'Local LLM (llama.cpp :8484)', protocol: 'openai-compatible', defaultBaseUrl: LOCAL_LLM_BASE, models: [
