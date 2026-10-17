@@ -85,6 +85,11 @@ def main() -> int:
     results.append(check("ALLOW_FREE_TIER выключен", not C.ALLOW_FREE_TIER,
                          "внешний free-tier fallback запрещён"))
 
+    # LOCAL-FIRST: все эндпоинты конфигурации — loopback; бинды серверов — 127.0.0.1
+    violations = C.validate_local_config()
+    results.append(check("Конфигурация только loopback (127.0.0.1)", not violations,
+                         "; ".join(violations) if violations else "все URL/бинды локальны"))
+
     failed = [r for r in results if r is False]
     print(f"\nИтого: {len(results)} проверок, провалено: {len(failed)}")
     print("Внешних обращений к AI API в рантайме: 0 (все эндпоинты 127.0.0.1)")

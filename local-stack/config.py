@@ -114,3 +114,45 @@ def ensure_dirs() -> None:
     """Create configured model, binary, log, output, and database directories."""
     for d in (MODELS_DIR, BIN_DIR, LOGS_DIR, OUTPUT_DIR, LANCEDB_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+# --- LOCAL-FIRST инварианты ---------------------------------------------------
+# Конфигурация валидируется при импорте: процесс падает сразу с понятным
+# сообщением, а не позже — запросом к внешнему API.
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def validate_local_config() -> list[str]:
+    """Return a list of local-first policy violations (empty list = OK).
+
+    Проверяет, что все HTTP-эндпоинты стека указывают на loopback-хосты и
+    что серверы биндятся только локально."""
+    from urllib.parse import urlparse
+
+    problems: list[str] = []
+    urls = {
+        "LLM_BASE_URL": LLM_BASE_URL,
+        "EMBED_BASE_URL": EMBED_BASE_URL,
+        "MCP_URL": MCP_URL,
+        "REPOMAPPER_URL": REPOMAPPER_URL,
+        "LANCEDB_URL": LANCEDB_URL,
+        "COMFY_IMAGE_URL": COMFY_IMAGE_URL,
+        "COMFY_VIDEO_URL": COMFY_VIDEO_URL,
+        "TTS_OPENAI_BASE": TTS_OPENAI_BASE,
+    }
+    for name, url in urls.items():
+        host = urlparse(url).hostname or ""
+        if host not in _LOCAL_HOSTS:
+            problems.append(f"{name}={url}: хост '{host}' не является loopback")
+    if HOST not in _LOCAL_HOSTS:
+        problems.append(f"HOST={HOST}: серверы нельзя биндить вне loopback")
+    return problems
+
+
+if os.environ.get("OPENCREATOR_LOCAL", "").lower() in ("1", "true", "yes"):
+    _violations = validate_local_config()
+    if _violations:
+        raise SystemExit(
+            "OPENCREATOR_LOCAL=1, но конфигурация локального стека нарушена:\n  - "
+            + "\n  - ".join(_violations)
+        )

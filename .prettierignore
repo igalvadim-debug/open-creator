@@ -1,0 +1,12 @@
+node_modules
+dist
+build
+coverage
+pnpm-lock.yaml
+assets
+resources
+template
+local-stack/models
+local-stack/bin
+apps/web/public
+*.md

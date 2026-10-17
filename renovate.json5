@@ -1,0 +1,10 @@
+{
+  "$schema": "https://docs.renovatebot.com/presets-renovate.json",
+  "extends": ["config:recommended"],
+  "schedule": ["after 9am on monday"],
+  "packageRules": [
+    { "matchManagers": ["npm"], "groupName": "js deps" },
+    { "matchManagers": ["pip_requirements", "pep621"], "groupName": "python local-stack" }
+  ],
+  "lockFileMaintenance": { "enabled": true, "schedule": ["before 5am on tuesday"] }
+}
