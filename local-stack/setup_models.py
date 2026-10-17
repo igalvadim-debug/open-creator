@@ -78,24 +78,28 @@ def status() -> None:
         print(f"\nНе хватает {len(missing)} файлов. Запустите: python setup_models.py")
 
 
-def main() -> None:
+def main() -> int:
     """Create directories and list model status or download missing models.
 
-    Individual download exceptions are reported and processing continues."""
+    Report individual failures, continue downloads, and return nonzero if any
+    download failed."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true", help="только статус")
     args = ap.parse_args()
     C.ensure_dirs()
     if args.list:
         status()
-        return
+        return 0
+    failed = False
     for repo, tail in DOWNLOADS:
         try:
             download(repo, tail)
         except Exception as e:  # noqa: BLE001
+            failed = True
             print(f"[FAIL] {target_name(tail)}: {e}")
     status()
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
