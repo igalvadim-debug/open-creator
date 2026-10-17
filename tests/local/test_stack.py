@@ -48,6 +48,16 @@ class StackTests(unittest.TestCase):
                 cfg.ensure_dirs()
                 self.assertTrue(all(getattr(cfg, key).is_dir() for key in ['MODELS_DIR', 'BIN_DIR', 'LOGS_DIR', 'OUTPUT_DIR', 'LANCEDB_DIR']))
 
+    def test_configuration_reports_malformed_urls_and_continues_validation(self):
+        for url in ['http://[::1/v1', 'http://[invalid]/v1']:
+            with self.subTest(url=url), patch.multiple(config, LLM_BASE_URL=url,
+                    EMBED_BASE_URL='https://external.example.test/v1', HOST='0.0.0.0'):
+                problems = config.validate_local_config()
+                self.assertEqual(len(problems), 3)
+                self.assertTrue(any(problem.startswith(f'LLM_BASE_URL={url}:') for problem in problems))
+                self.assertTrue(any(problem.startswith('EMBED_BASE_URL=') for problem in problems))
+                self.assertTrue(any(problem.startswith('HOST=') for problem in problems))
+
     def test_chunks_handle_empty_input_and_thirty_line_boundary(self):
         self.assertEqual(db_http.chunk_lines(''), [])
         lines = [str(i) for i in range(31)]

@@ -141,7 +141,11 @@ def validate_local_config() -> list[str]:
         "TTS_OPENAI_BASE": TTS_OPENAI_BASE,
     }
     for name, url in urls.items():
-        host = urlparse(url).hostname or ""
+        try:
+            host = urlparse(url).hostname or ""
+        except ValueError as exc:
+            problems.append(f"{name}={url}: некорректный URL ({exc})")
+            continue
         if host not in _LOCAL_HOSTS:
             problems.append(f"{name}={url}: хост '{host}' не является loopback")
     if HOST not in _LOCAL_HOSTS:
