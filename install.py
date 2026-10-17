@@ -219,14 +219,14 @@ def main(argv: list[str]) -> int:
     present and it does not start with '-'. Otherwise DEFAULT_PYTHON is used,
     including when --python has no following value.
 
-    Return 0 only after all steps complete, including successful model setup;
-    start.bat is written and "Готово" printed only on that success path. When
-    model setup exits nonzero, do not write start.bat or print "Готово", and
-    return its (nonzero) status as an installation failure. Web-UI dependency
-    install failures (corepack/pnpm) are reported but nonfatal: the Python
-    stack still works and `pnpm install` can be retried later. Setup
-    SystemExit, subprocess.CalledProcessError, and OSError exceptions
-    propagate.
+    Return the nonzero model setup status (1 if its script is missing),
+    skipping web dependency installation and launcher creation. Otherwise,
+    attempt web dependency installation, create or overwrite start.bat, and
+    return 0 even if corepack/pnpm returns a nonzero status. Individual model
+    download errors are caught by the setup script, so a zero status does not
+    guarantee that all models are present. Setup SystemExit,
+    subprocess.CalledProcessError, and OSError exceptions propagate, including
+    web process launch errors and launcher write errors.
     """
     base_python = DEFAULT_PYTHON
     if "--python" in argv:
