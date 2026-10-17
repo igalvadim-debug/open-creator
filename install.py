@@ -102,14 +102,38 @@ def activate_and_install(py: Path) -> None:
     print("[ok    ] Зависимости установлены в venv (все локально, без внешних AI API)")
 
 
+def required_model_files() -> list[Path]:
+    """Return target paths of the required model downloads declared in setup_models.py.
+
+    Parses the DOWNLOADS list literal via ast; falls back to an empty list if
+    the script or list is absent/unparsable (then no extra verification runs).
+    """
+    import ast
+    setup = ROOT / "local-stack" / "setup_models.py"
+    try:
+        tree = ast.parse(setup.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return []
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "DOWNLOADS" for t in node.targets)):
+            try:
+                pairs = ast.literal_eval(node.value)
+                return [MODELS_DIR / tail.rsplit("/", 1)[-1] for _repo, tail in pairs]
+            except (ValueError, TypeError):
+                return []
+    return []
+
+
 def download_models(py: Path) -> int:
-    """Run the model setup script using interpreter py; return its exit status.
+    """Run the model setup script using interpreter py; return failure status.
 
     The script downloads missing GGUF files to its configured model directory.
-    It catches individual download errors, so success does not ensure all
-    models are present. Return 1 when the script is missing (treated as a
-    failed setup); otherwise return the script's exit status unchanged.
-    Process launch errors propagate as OSError.
+    It catches individual download errors and always exits 0, so a nonzero
+    result here reflects ANY failed/missing required download: return 1 when
+    the script is missing, when the script exits nonzero, or when any required
+    model file is still absent afterwards. Process launch errors propagate as
+    OSError.
     """
     setup = ROOT / "local-stack" / "setup_models.py"
     if not setup.exists():
@@ -117,12 +141,15 @@ def download_models(py: Path) -> int:
         return 1
     print("[models] Скачиваю модели локально в ./local-stack/models ...")
     rc = run([str(py), str(setup)])
-    if rc != 0:
+    missing = [p.name for p in required_model_files() if not p.exists()]
+    if rc != 0 or missing:
+        if missing:
+            print(f"[fail  ] Не хватает моделей: {', '.join(missing)}")
         print("[fail  ] Скачивание моделей завершилось с ошибкой;"
               " повторите позже: venv python local-stack/setup_models.py")
-    else:
-        print(f"[ok    ] Модели на месте: {MODELS_DIR}")
-    return rc
+        return rc if rc != 0 else 1
+    print(f"[ok    ] Модели на месте: {MODELS_DIR}")
+    return 0
 
 
 def install_web_deps() -> int:
@@ -130,16 +157,26 @@ def install_web_deps() -> int:
 
     Runs `corepack enable` then `pnpm install` from the repository root
     (packageManager in package.json pins pnpm). Nonzero statuses are returned
-    without raising; process launch errors (e.g. Node.js/corepack missing)
-    propagate as OSError.
+    without raising; process launch errors (e.g. missing Corepack executable)
+    are converted to a nonzero status (1) instead of propagating, so callers
+    can keep their warning flow and still write start.bat.
     """
     print("[web   ] Ставлю JS-зависимости веб-интерфейса (corepack + pnpm) ...")
-    rc = run(["corepack", "enable"])
+    try:
+        rc = run(["corepack", "enable"])
+    except OSError as e:
+        print(f"[fail  ] corepack не запущен ({e}) — нужен Node.js 16.13+ "
+              "(https://nodejs.org); веб-интерфейс можно поставить позже: pnpm install")
+        return 1
     if rc != 0:
         print("[fail  ] corepack enable не удался — нужен Node.js 16.13+ "
               "(https://nodejs.org); веб-интерфейс можно поставить позже: pnpm install")
         return rc
-    rc = run(["pnpm", "install"])
+    try:
+        rc = run(["pnpm", "install"])
+    except OSError as e:
+        print(f"[fail  ] pnpm не запущен ({e}); повторите позже: pnpm install")
+        return 1
     if rc != 0:
         print("[fail  ] pnpm install завершился с ошибкой;"
               " повторите позже: pnpm install")
@@ -179,22 +216,31 @@ set PYTHONIOENCODING=utf-8
 set OPENCREATOR_LOCAL=1
 
 echo [1/2] Запускаю local-stack (llama-server :8484, embeddings :8512, MCP :8001)...
+rem Стек сам пишет PID-файл local-stack\\.pids — "start.bat stop" остановит только его
 start "open-creator-local-stack" cmd /k ""venv\\Scripts\\activate.bat" && python local-stack\\start.py"
 
 echo [2/2] Запускаю веб-интерфейс (pnpm web:dev)...
 timeout /t 5 /nobreak >nul
 start "" http://127.0.0.1:19861/
-pnpm web:dev
+rem PID-обёртка пишет .webui.pid и останавливает при Ctrl+C только своё дерево
+node scripts\\web-dev-wrapper.mjs pnpm web:dev
 
 echo Готово. Закройте окно стека или выполните: start.bat stop
 pause
 exit /b 0
 
 :stop
-echo Останавливаю весь стек — закройте окна «open-creator-local-stack» и dev-сервера
-echo (или нажмите Ctrl+C в них).
-taskkill /f /im llama-server.exe >nul 2>&1
-powershell -NoProfile -Command "foreach($p in 8001,8002,8003,8484,8512,19861){ Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue; Write-Host ('Port ' + $p + ': PID ' + $_.OwningProcess + ' остановлен') } }"
+echo Останавливаю только процессы, записанные этим лаунчером (.pids / .webui.pid) ...
+rem Стек: local-stack/start.py --stop шлёт сигнал только PID из local-stack\\.pids
+if exist "venv\\Scripts\\python.exe" ("venv\\Scripts\\python.exe" local-stack\\start.py --stop) else (python local-stack\\start.py --stop)
+rem Веб-интерфейс: обёртка сверяет имя процесса перед остановкой; чужие не трогает
+if exist ".webui.pid" (
+    node scripts\\web-dev-wrapper.mjs --stop ".webui.pid" || echo [warn] веб-интерфейс: процесс не найден или уже завершён
+    del /q ".webui.pid" 2>nul
+) else (
+    echo [skip] .webui.pid нет — веб-интерфейс не запускался этим лаунчером
+)
+echo Готово. Чужие llama-server и слушатели портов не тронуты.
 exit /b 0
 
 endlocal
