@@ -6,6 +6,17 @@
 (`local-stack/setup_models.py`). Image/video-генерация через ComfyUI вынесена в
 отдельную задачу (`cwbuilder-docs/`) и здесь не затрагивается.
 
+## Установка (Windows)
+
+Двойной клик по **`install.bat`** (или `.\install.bat` в cmd) — скрипт найдёт CPython
+(`py -3.12` → `py -3` → `python`) и вызовет `install.py`, который:
+создаст `./venv`, поставит `requirements.txt`, скачает GGUF-модели в `./local-stack/models/`,
+выполнит `corepack enable && pnpm install` и сгенерирует `start.bat`.
+Всё остаётся локально в папке репозитория. После установки `install.bat` предложит
+запустить стек сразу (`start.bat` — стек + веб-интерфейс http://127.0.0.1:19861/).
+
+Явный запуск без bat-обёртки: `"C:\путь\к\python.exe" install.py [--python <python.exe>]`.
+
 ## Запуск
 
 ```bash

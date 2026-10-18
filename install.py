@@ -19,6 +19,7 @@ activate без лишней оболочки), ставит requirements.txt Л
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -272,10 +273,18 @@ endlocal
 def write_start_bat() -> None:
     """Create or overwrite ROOT/start.bat with the UTF-8 Windows launcher.
 
-    File write errors propagate as OSError.
+    The launcher is written as UTF-8 text (LF newlines) so the file matches
+    START_BAT byte-for-byte. On success the INSTALL_COMPLETE marker is created
+    next to the venv; a failed launcher write propagates as OSError before the
+    marker is created, so an incomplete installation never leaves a stale
+    marker behind.
     """
     bat = ROOT / "start.bat"
-    bat.write_text(START_BAT, encoding="utf-8")
+    data = START_BAT.encode("utf-8")
+    if not bat.exists() or bat.read_bytes() != data:
+        bat.write_bytes(data)
+    INSTALL_COMPLETE.parent.mkdir(parents=True, exist_ok=True)
+    INSTALL_COMPLETE.touch()
     print(f"[ok    ] Создан {bat.name}: двойной клик или .\\start.bat")
 
 
@@ -307,6 +316,9 @@ def main(argv: list[str]) -> int:
     print("=== open-creator LOCAL installer (всё в этой папке) ===")
     py = ensure_venv(base_python)
     INSTALL_COMPLETE.unlink(missing_ok=True)
+    # Шаги установки: 1) обновление pip/setuptools/wheel, 2) requirements.txt,
+    # 3) скачивание моделей. Веб-зависимости ставятся отдельной функцией через
+    # subprocess напрямую и сюда не входят.
     activate_and_install(py)
     models_rc = download_models(py)
     if models_rc != 0:
