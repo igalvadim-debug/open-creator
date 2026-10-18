@@ -157,11 +157,11 @@ def download_models(py: Path) -> int:
 def install_web_deps() -> int:
     """Install the web UI JS dependencies via corepack/pnpm; return exit status.
 
-    Runs `corepack enable` then `pnpm install` from the repository root
-    (packageManager in package.json pins pnpm). The executables are resolved
-    with shutil.which() first so Windows .cmd shims (corepack.cmd, pnpm.cmd)
-    can be launched; if a tool cannot be found we return a nonzero status
-    instead of relying on subprocess to locate it. Nonzero statuses are
+    Runs `corepack enable`, then on success `pnpm install`, from the
+    repository root (packageManager in package.json pins pnpm). Executables
+    are resolved with shutil.which() so Windows .cmd shims (corepack.cmd,
+    pnpm.cmd) can be launched; missing Corepack returns 1, while unresolved
+    pnpm is launched by name. Nonzero statuses are
     returned without raising; process launch errors (e.g. missing Corepack
     executable) are converted to a nonzero status (1) instead of propagating,
     so callers can keep their warning flow and still write start.bat.
