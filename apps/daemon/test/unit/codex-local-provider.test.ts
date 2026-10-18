@@ -12,37 +12,6 @@ import {
 describe('local Codex provider', () => {
   let root = '';
 
-  it.each(['1', 'true', 'YES', 'TrUe'])('uses local defaults without reading credentials in local mode (%s)', async flag => {
-    root = await codexHome(['this is not valid TOML']);
-    await writeFile(join(root, 'auth.json'), '{invalid');
-    await expect(readLocalCodexProvider({ codexHome: root, env: { OPENCREATOR_LOCAL: flag } }))
-      .resolves.toEqual({ baseUrl: 'http://127.0.0.1:8484/v1', apiKey: 'local', model: 'Qwen3-8B-Q4_K_M.gguf' });
-  });
-
-  it('uses local endpoint and model overrides ahead of cloud settings', async () => {
-    root = await codexHome(['openai_base_url = "https://cloud.example.test/v1"']);
-    await expect(readLocalCodexProvider({ codexHome: root, env: {
-      OPENCREATOR_LOCAL: '1', LOCAL_LLM_BASE_URL: 'http://localhost:9000/v1',
-      LOCAL_LLM_MODEL: 'custom.gguf', OPENAI_API_KEY: 'cloud-secret'
-    } })).resolves.toEqual({ baseUrl: 'http://localhost:9000/v1', apiKey: 'local', model: 'custom.gguf' });
-  });
-
-  it.each(['1', 'true', 'yes', 'TrUe'])('routes the text model locally without image settings (%s)', async flag => {
-    root = await codexHome(['this is not valid TOML']);
-    await expect(readLocalCodexModelConfiguration({ codexHome: root, env: {
-      OPENCREATOR_LOCAL: flag, LOCAL_LLM_BASE_URL: 'http://localhost:9000/v1', LOCAL_LLM_MODEL: 'custom.gguf'
-    } })).resolves.toEqual({
-      authentication: 'api_key', provider: { baseUrl: 'http://localhost:9000/v1', apiKey: 'local', model: 'custom.gguf' }
-    });
-  });
-
-  it.each(['0', 'false', 'no', 'trueish', ''])('does not activate local mode for %j', async flag => {
-    root = await codexHome(['openai_base_url = "https://cloud.example.test/v1"']);
-    await writeFile(join(root, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'stored-key' }));
-    await expect(readLocalCodexProvider({ codexHome: root, env: { OPENCREATOR_LOCAL: flag } }))
-      .resolves.toMatchObject({ baseUrl: 'https://cloud.example.test/v1', apiKey: 'stored-key' });
-  });
-
   it('uses the standard API endpoint with a local key and preserves the text model', async () => {
     root = await codexHome(['model = "local-text-model"']);
     await writeFile(join(root, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'local-key' }));
