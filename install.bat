@@ -20,13 +20,15 @@ if not exist "install.py" (
 
 rem Уже установленный venv имеет приоритет (идемпотентный повторный запуск).
 if exist "venv\Scripts\python.exe" (
-    set "PYEXE=venv\Scripts\python.exe"
+    set "PYPATH=venv\Scripts\python.exe"
+    set "PYARGS="
     goto run
 )
 
 rem Известная локальная установка Python 3.12 (проверяется первой — поиск в PATH не нужен).
 if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
-    set "PYEXE=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    set "PYPATH=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    set "PYARGS="
     goto run
 )
 
@@ -35,23 +37,28 @@ where py >nul 2>&1
 if errorlevel 1 goto try_python
 py -3.12 -c "import sys" >nul 2>&1
 if not errorlevel 1 (
-    set "PYEXE=py -3.12"
+    set "PYPATH=py"
+    set "PYARGS=-3.12"
     goto run
 )
 py -3 -c "import sys" >nul 2>&1
 if not errorlevel 1 (
-    set "PYEXE=py -3"
+    set "PYPATH=py"
+    set "PYARGS=-3"
     goto run
 )
 
 :try_python
 where python >nul 2>&1
 if errorlevel 1 goto no_python
-set "PYEXE=python"
+set "PYPATH=python"
+set "PYARGS="
 
 :run
 echo === Установка open-creator LOCAL (всё локально в этой папке) ===
-%PYEXE% install.py %*
+rem Кавычки только вокруг пути exe — чтобы пробелы в %LOCALAPPDATA% не ломали запуск,
+rem а опции py-лаунчера (%PYARGS%) оставались отдельными аргументами.
+"%PYPATH%" %PYARGS% install.py %*
 if errorlevel 1 (
     echo.
     echo [fail] Установка не завершена. См. сообщения выше.
