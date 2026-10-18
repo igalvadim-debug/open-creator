@@ -52,6 +52,10 @@ if not errorlevel 1 (
 :try_python
 where python >nul 2>&1
 if errorlevel 1 goto no_python
+rem Проверка версии: install.py требует CPython >= 3.12 (см. MIN_PYTHON в install.py).
+rem При --version не-интерактивный вывод, код 0 только если версия подходит.
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" >nul 2>&1
+if errorlevel 1 goto bad_python
 set "PYPATH=python"
 set "PYARGS="
 
@@ -80,5 +84,12 @@ exit /b 0
 echo [fail] Python не найден в PATH.
 echo        Установите Python 3.12+ ^(https://python.org^) и повторите,
 echo        либо запустите явно: "C:\путь\к\python.exe" install.py
+pause
+exit /b 1
+
+:bad_python
+echo [fail] Найден python в PATH, но его версия ниже 3.12 — не поддерживается.
+echo        Установите Python 3.12+ ^(https://python.org^), либо укажите явно:
+echo        "C:\путь\к\python3.12.exe" install.py
 pause
 exit /b 1
