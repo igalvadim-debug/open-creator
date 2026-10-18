@@ -271,13 +271,12 @@ endlocal
 
 
 def write_start_bat() -> None:
-    """Create or overwrite ROOT/start.bat with the UTF-8 Windows launcher.
+    """Ensure ROOT/start.bat matches START_BAT encoded as UTF-8 with LF newlines.
 
-    The launcher is written as UTF-8 text (LF newlines) so the file matches
-    START_BAT byte-for-byte. On success the INSTALL_COMPLETE marker is created
-    next to the venv; a failed launcher write propagates as OSError before the
-    marker is created, so an incomplete installation never leaves a stale
-    marker behind.
+    Leave a matching launcher untouched; otherwise create or overwrite it.
+    Then touch INSTALL_COMPLETE inside the venv, creating its parent directory
+    if needed. Filesystem errors propagate as OSError; an existing completion
+    marker is not removed on failure.
     """
     bat = ROOT / "start.bat"
     data = START_BAT.encode("utf-8")
@@ -296,14 +295,14 @@ def main(argv: list[str]) -> int:
     with '-'. Otherwise DEFAULT_PYTHON is used,
     including when --python has no following value.
 
+    Clear the completion marker after preparing the venv.
     Return the nonzero model setup status (1 if its script is missing),
     skipping web dependency installation and launcher creation. Otherwise,
-    attempt web dependency installation, create or overwrite start.bat, and
-    return 0 even if corepack/pnpm returns a nonzero status. Individual model
-    download errors are caught by the setup script, so a zero status does not
-    guarantee that all models are present. Setup SystemExit,
-    subprocess.CalledProcessError, and OSError exceptions propagate, including
-    web process launch errors and launcher write errors.
+    attempt web dependency installation, ensure start.bat is up to date, mark
+    installation complete, and return 0 even if web dependencies fail to install.
+    Web process launch errors are converted to nonzero statuses; other setup
+    SystemExit, subprocess.CalledProcessError, and OSError exceptions propagate,
+    including launcher and completion marker filesystem errors.
     """
     base_python = DEFAULT_PYTHON
     if "--python" in argv:
