@@ -1,0 +1,38 @@
+# local-stack — локальный стек open-creator (llama.cpp-клиенты, LanceDB MCP, RepoMapper).
+# Пакет нужен CI: `pip install -e ./local-stack[dev]` (см. .github/workflows/ci.yml).
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-creator-local-stack"
+version = "0.1.0"
+description = "Local-only AI stack for open-creator (LanceDB MCP, RepoMapper, llama.cpp client)"
+requires-python = ">=3.11"
+dependencies = [
+    # Зеркало requirements.txt (репо-корень) — единый источник pip-разрешения в CI.
+    "yt-dlp>=2024.10.0",
+    "faster-whisper>=1.0.0",
+    "piper-tts>=1.2.0",
+    "lancedb>=0.6.0",
+    "pyarrow>=15.0.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.setuptools]
+# Плоский layout: config.py, start.py, setup_models.py, ... живут прямо здесь.
+packages = ["lancedb_mcp", "RepoMapper"]
+py-modules = [
+    "config",
+    "llama_client",
+    "setup_models",
+    "start",
+    "check_local",
+]

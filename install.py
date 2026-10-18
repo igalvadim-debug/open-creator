@@ -19,6 +19,7 @@ activate без лишней оболочки), ставит requirements.txt Л
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -270,12 +271,19 @@ endlocal
 
 
 def write_start_bat() -> None:
-    """Create or overwrite ROOT/start.bat with the UTF-8 Windows launcher.
+    """Ensure ROOT/start.bat matches START_BAT encoded as UTF-8 with LF newlines.
 
-    File write errors propagate as OSError.
+    Leave a matching launcher untouched; otherwise create or overwrite it.
+    Then touch INSTALL_COMPLETE inside the venv, creating its parent directory
+    if needed. Filesystem errors propagate as OSError; an existing completion
+    marker is not removed on failure.
     """
     bat = ROOT / "start.bat"
-    bat.write_text(START_BAT, encoding="utf-8")
+    data = START_BAT.encode("utf-8")
+    if not bat.exists() or bat.read_bytes() != data:
+        bat.write_bytes(data)
+    INSTALL_COMPLETE.parent.mkdir(parents=True, exist_ok=True)
+    INSTALL_COMPLETE.touch()
     print(f"[ok    ] Создан {bat.name}: двойной клик или .\\start.bat")
 
 
@@ -287,14 +295,14 @@ def main(argv: list[str]) -> int:
     with '-'. Otherwise DEFAULT_PYTHON is used,
     including when --python has no following value.
 
+    Clear the completion marker after preparing the venv.
     Return the nonzero model setup status (1 if its script is missing),
     skipping web dependency installation and launcher creation. Otherwise,
-    attempt web dependency installation, create or overwrite start.bat, and
-    return 0 even if corepack/pnpm returns a nonzero status. Individual model
-    download errors are caught by the setup script, so a zero status does not
-    guarantee that all models are present. Setup SystemExit,
-    subprocess.CalledProcessError, and OSError exceptions propagate, including
-    web process launch errors and launcher write errors.
+    attempt web dependency installation, ensure start.bat is up to date, mark
+    installation complete, and return 0 even if web dependencies fail to install.
+    Web process launch errors are converted to nonzero statuses; other setup
+    SystemExit, subprocess.CalledProcessError, and OSError exceptions propagate,
+    including launcher and completion marker filesystem errors.
     """
     base_python = DEFAULT_PYTHON
     if "--python" in argv:
@@ -307,6 +315,9 @@ def main(argv: list[str]) -> int:
     print("=== open-creator LOCAL installer (всё в этой папке) ===")
     py = ensure_venv(base_python)
     INSTALL_COMPLETE.unlink(missing_ok=True)
+    # Шаги установки: 1) обновление pip/setuptools/wheel, 2) requirements.txt,
+    # 3) скачивание моделей. Веб-зависимости ставятся отдельной функцией через
+    # subprocess напрямую и сюда не входят.
     activate_and_install(py)
     models_rc = download_models(py)
     if models_rc != 0:

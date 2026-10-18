@@ -1,7 +1,6 @@
 """安装失败恢复、解释器选择和模型下载退出状态的离线回归测试。"""
 import importlib.util
 import io
-import os
 import sys
 import tempfile
 import unittest
@@ -77,13 +76,13 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse((self.root / 'start.bat').exists())
             return 0
 
-        with patch.object(installer, 'run', side_effect=run_step) as run:
+        with patch.object(installer, 'run', side_effect=run_step) as run, \
+                patch.object(installer, 'install_web_deps', return_value=0):
             self.assertEqual(installer.main([]), 0)
         self.assertEqual(run.call_count, 3)
         self.assertTrue(installer.INSTALL_COMPLETE.is_file())
         launcher = (self.root / 'start.bat').read_bytes()
-        self.assertEqual(launcher, installer.START_BAT.replace('\n', os.linesep).encode('utf-8'))
-        self.assertNotIn(b'\r\r\n', launcher)
+        self.assertEqual(launcher, installer.START_BAT.encode('utf-8'))
         self.assertIn('Готово', self.output.getvalue())
 
     def test_model_failure_returns_status_without_launcher_or_stale_marker(self):
@@ -102,7 +101,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertFalse(installer.INSTALL_COMPLETE.exists())
         self.assertFalse((self.root / 'start.bat').exists())
-        with patch.object(installer, 'run', return_value=0):
+        with patch.object(installer, 'run', return_value=0), \
+                patch.object(installer, 'install_web_deps', return_value=0):
             self.assertEqual(installer.main([]), 0)
         self.assertTrue(installer.INSTALL_COMPLETE.is_file())
 
