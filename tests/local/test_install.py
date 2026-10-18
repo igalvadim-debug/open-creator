@@ -124,6 +124,132 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn('Готово', self.output.getvalue())
 
 
+class LauncherWriteTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name) / '项目 with spaces'
+        self.root.mkdir()
+        self.launcher = self.root / 'start.bat'
+        self.marker = self.root / 'venv/.install-complete'
+        for name, value in {'ROOT': self.root, 'INSTALL_COMPLETE': self.marker}.items():
+            patcher = patch.object(installer, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch('sys.stdout', new_callable=io.StringIO)
+        self.output = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_new_launcher_uses_exact_utf8_lf_bytes_and_creates_marker_directory(self):
+        self.assertFalse(self.marker.parent.exists())
+        installer.write_start_bat()
+        data = self.launcher.read_bytes()
+        self.assertEqual(data, installer.START_BAT.encode('utf-8'))
+        self.assertNotIn(b'\r', data)
+        self.assertFalse(data.startswith(b'\xef\xbb\xbf'))
+        self.assertTrue(self.marker.is_file())
+        self.assertEqual(self.marker.read_bytes(), b'')
+
+    def test_outdated_launchers_are_replaced_with_exact_current_bytes(self):
+        expected = installer.START_BAT.encode('utf-8')
+        for old in (b'', b'@echo off\nrem obsolete launcher\n',
+                    expected.replace(b'\n', b'\r\n'), b'\xef\xbb\xbf' + expected):
+            with self.subTest(old=old[:40]):
+                self.marker.unlink(missing_ok=True)
+                self.launcher.write_bytes(old)
+                installer.write_start_bat()
+                self.assertEqual(self.launcher.read_bytes(), expected)
+                self.assertTrue(self.marker.is_file())
+
+    def test_identical_launcher_is_not_rewritten_but_missing_marker_is_restored(self):
+        self.launcher.write_bytes(installer.START_BAT.encode('utf-8'))
+        before = self.launcher.stat().st_mtime_ns
+        with patch.object(Path, 'write_bytes', side_effect=AssertionError('unnecessary rewrite')):
+            installer.write_start_bat()
+            installer.write_start_bat()
+        self.assertEqual(self.launcher.stat().st_mtime_ns, before)
+        self.assertTrue(self.marker.is_file())
+
+    def test_completion_marker_is_created_only_after_complete_launcher_write(self):
+        write_bytes = Path.write_bytes
+
+        def write(path, data):
+            self.assertEqual(path, self.launcher)
+            self.assertFalse(self.marker.exists())
+            return write_bytes(path, data)
+
+        with patch.object(Path, 'write_bytes', autospec=True, side_effect=write) as written:
+            installer.write_start_bat()
+        written.assert_called_once_with(self.launcher, installer.START_BAT.encode('utf-8'))
+        self.assertTrue(self.marker.is_file())
+
+    def test_launcher_write_errors_propagate_without_creating_marker_or_success_message(self):
+        for old in (None, b'obsolete launcher'):
+            with self.subTest(old=old):
+                if old is not None:
+                    self.launcher.write_bytes(old)
+                error = PermissionError('launcher is not writable')
+                with patch.object(Path, 'write_bytes', side_effect=error), \
+                        self.assertRaises(PermissionError) as raised:
+                    installer.write_start_bat()
+                self.assertIs(raised.exception, error)
+                self.assertFalse(self.marker.exists())
+                self.assertNotIn('[ok', self.output.getvalue())
+                if old is None:
+                    self.assertFalse(self.launcher.exists())
+                else:
+                    self.assertEqual(self.launcher.read_bytes(), old)
+
+    def test_existing_launcher_read_error_does_not_overwrite_it_or_mark_complete(self):
+        self.launcher.write_bytes(b'existing launcher')
+        error = PermissionError('launcher is not readable')
+        with patch.object(Path, 'read_bytes', side_effect=error), \
+                patch.object(Path, 'write_bytes') as write, \
+                self.assertRaises(PermissionError) as raised:
+            installer.write_start_bat()
+        self.assertIs(raised.exception, error)
+        write.assert_not_called()
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.launcher.read_bytes(), b'existing launcher')
+        self.assertNotIn('[ok', self.output.getvalue())
+
+    def test_marker_directory_failure_propagates_after_launcher_write(self):
+        self.marker.parent.write_bytes(b'a file blocks the venv directory')
+        with self.assertRaises(OSError):
+            installer.write_start_bat()
+        self.assertEqual(self.launcher.read_bytes(), installer.START_BAT.encode('utf-8'))
+        self.assertFalse(self.marker.exists())
+        self.assertNotIn('[ok', self.output.getvalue())
+
+    def test_marker_touch_failure_propagates_and_can_be_retried_without_rewriting(self):
+        error = PermissionError('completion marker is not writable')
+        with patch.object(Path, 'touch', side_effect=error), \
+                self.assertRaises(PermissionError) as raised:
+            installer.write_start_bat()
+        self.assertIs(raised.exception, error)
+        self.assertEqual(self.launcher.read_bytes(), installer.START_BAT.encode('utf-8'))
+        self.assertFalse(self.marker.exists())
+        self.assertNotIn('[ok', self.output.getvalue())
+        with patch.object(Path, 'write_bytes', side_effect=AssertionError('unnecessary rewrite')):
+            installer.write_start_bat()
+        self.assertTrue(self.marker.is_file())
+
+    def test_main_removes_stale_marker_before_real_launcher_write_fails(self):
+        self.marker.parent.mkdir()
+        self.marker.touch()
+        self.launcher.write_bytes(b'obsolete launcher')
+        with patch.object(installer, 'ensure_venv', return_value=self.root / 'venv/python'), \
+                patch.object(installer, 'activate_and_install'), \
+                patch.object(installer, 'download_models', return_value=0), \
+                patch.object(installer, 'install_web_deps', return_value=0), \
+                patch.object(Path, 'write_bytes', side_effect=OSError('disk full')), \
+                self.assertRaisesRegex(OSError, 'disk full'):
+            installer.main([])
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.launcher.read_bytes(), b'obsolete launcher')
+        self.assertNotIn('Готово', self.output.getvalue())
+
+
 class ModelSetupTests(unittest.TestCase):
     def test_download_failure_sets_failure_status_and_continues_other_models(self):
         downloads = [('test/repo', 'first.gguf'), ('test/repo', 'second.gguf')]
