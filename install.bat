@@ -11,6 +11,7 @@ title open-creator LOCAL install
 
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
+set "PYARGS="
 
 if not exist "install.py" (
     echo [fail] Не найден install.py в этой папке.
@@ -35,12 +36,14 @@ where py >nul 2>&1
 if errorlevel 1 goto try_python
 py -3.12 -c "import sys" >nul 2>&1
 if not errorlevel 1 (
-    set "PYEXE=py -3.12"
+    set "PYEXE=py"
+    set "PYARGS=-3.12"
     goto run
 )
 py -3 -c "import sys" >nul 2>&1
 if not errorlevel 1 (
-    set "PYEXE=py -3"
+    set "PYEXE=py"
+    set "PYARGS=-3"
     goto run
 )
 
@@ -51,7 +54,7 @@ set "PYEXE=python"
 
 :run
 echo === Установка open-creator LOCAL (всё локально в этой папке) ===
-%PYEXE% install.py %*
+"%PYEXE%" %PYARGS% install.py %*
 if errorlevel 1 (
     echo.
     echo [fail] Установка не завершена. См. сообщения выше.
