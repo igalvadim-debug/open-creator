@@ -11,6 +11,7 @@ title open-creator LOCAL install
 
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
+set "PYARGS="
 
 if not exist "install.py" (
     echo [fail] Не найден install.py в этой папке.
