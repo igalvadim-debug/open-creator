@@ -19,6 +19,7 @@ activate без лишней оболочки), ставит requirements.txt Л
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import venv
@@ -156,15 +157,23 @@ def download_models(py: Path) -> int:
 def install_web_deps() -> int:
     """Install the web UI JS dependencies via corepack/pnpm; return exit status.
 
-    Runs `corepack enable` then `pnpm install` from the repository root
-    (packageManager in package.json pins pnpm). Nonzero statuses are returned
-    without raising; process launch errors (e.g. missing Corepack executable)
-    are converted to a nonzero status (1) instead of propagating, so callers
-    can keep their warning flow and still write start.bat.
+    Runs `corepack enable`, then on success `pnpm install`, from the
+    repository root (packageManager in package.json pins pnpm). Executables
+    are resolved with shutil.which() so Windows .cmd shims (corepack.cmd,
+    pnpm.cmd) can be launched; missing Corepack returns 1, while unresolved
+    pnpm is launched by name. Nonzero statuses are
+    returned without raising; process launch errors (e.g. missing Corepack
+    executable) are converted to a nonzero status (1) instead of propagating,
+    so callers can keep their warning flow and still write start.bat.
     """
     print("[web   ] Ставлю JS-зависимости веб-интерфейса (corepack + pnpm) ...")
+    corepack = shutil.which("corepack")
+    if corepack is None:
+        print("[fail  ] corepack не найден в PATH — нужен Node.js 16.13+ "
+              "(https://nodejs.org); веб-интерфейс можно поставить позже: pnpm install")
+        return 1
     try:
-        rc = run(["corepack", "enable"])
+        rc = run([corepack, "enable"])
     except OSError as e:
         print(f"[fail  ] corepack не запущен ({e}) — нужен Node.js 16.13+ "
               "(https://nodejs.org); веб-интерфейс можно поставить позже: pnpm install")
@@ -173,8 +182,9 @@ def install_web_deps() -> int:
         print("[fail  ] corepack enable не удался — нужен Node.js 16.13+ "
               "(https://nodejs.org); веб-интерфейс можно поставить позже: pnpm install")
         return rc
+    pnpm = shutil.which("pnpm") or "pnpm"
     try:
-        rc = run(["pnpm", "install"])
+        rc = run([pnpm, "install"])
     except OSError as e:
         print(f"[fail  ] pnpm не запущен ({e}); повторите позже: pnpm install")
         return 1
