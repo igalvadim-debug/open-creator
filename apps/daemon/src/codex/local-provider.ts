@@ -1,7 +1,6 @@
 import { parse } from '@iarna/toml';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isLocalMode } from '../local-mode.js';
 
 type TomlValue = ReturnType<typeof parse>[string];
 
@@ -23,22 +22,6 @@ export async function readLocalCodexModelConfiguration(input: {
   codexHome: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<LocalCodexModelConfiguration> {
-  const env = input.env ?? process.env;
-
-  // LOCAL-FIRST: текстовый агент ходит на llama.cpp (LOCAL_LLM_BASE_URL),
-  // но конфигурация изображений берётся отдельно — llama.cpp умеет только
-  // текст, картинки локально генерирует ComfyUI.
-  if (isLocalMode(env)) {
-    return {
-      authentication: 'api_key',
-      provider: {
-        baseUrl: env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1',
-        apiKey: 'local',
-        model: env.LOCAL_LLM_MODEL ?? 'Qwen3-8B-Q4_K_M.gguf'
-      }
-    };
-  }
-
   const image = await readLocalCodexImageConfiguration(input);
   const config = await readToml(join(input.codexHome, 'config.toml'), true);
   const model = readString(config.model) || 'codex';
@@ -58,29 +41,6 @@ export async function readLocalCodexImageConfiguration(input: {
   codexHome: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<LocalCodexImageConfiguration> {
-  const env = input.env ?? process.env;
-
-  // LOCAL-FIRST: llama.cpp (LOCAL_LLM_BASE_URL) умеет генерировать только
-  // текст. Локальная генерация изображений идёт строго на ComfyUI
-  // (COMFY_IMAGE_BASE_URL). Если ComfyUI не настроен — явная ошибка,
-  // запросы к текстовой модели (Qwen3-8B и т.п.) не отправляются никогда.
-  if (isLocalMode(env)) {
-    const comfyBaseUrl = (env.COMFY_IMAGE_BASE_URL ?? '').trim();
-    if (comfyBaseUrl.length === 0) {
-      throw new LocalCodexProviderError(
-        'Image generation is unavailable in local mode: set COMFY_IMAGE_BASE_URL to a running ComfyUI server (the local llama.cpp endpoint only supports text).'
-      );
-    }
-    return {
-      authentication: 'api_key',
-      provider: {
-        baseUrl: comfyBaseUrl.replace(/\/+$/, ''),
-        apiKey: 'local',
-        model: env.COMFY_IMAGE_MODEL ?? 'comfyui'
-      }
-    };
-  }
-
   const auth = await readJson(join(input.codexHome, 'auth.json'), true);
   const tokens = readRecord(auth?.tokens);
   if (auth?.auth_mode !== 'apikey' && (auth?.auth_mode === 'chatgpt' || readString(tokens?.access_token))) {
@@ -92,36 +52,11 @@ export async function readLocalCodexImageConfiguration(input: {
   return { authentication: 'api_key', provider: await readLocalCodexProvider(input) };
 }
 
-/**
- * Resolve an API provider from local Codex settings and credentials.
- *
- * With OPENCREATOR_LOCAL set to 1, true, or yes (case-insensitive), return
- * LOCAL_LLM_BASE_URL/LOCAL_LLM_MODEL defaults and a placeholder key without
- * reading files. Otherwise, prefer the provider bearer token, then its
- * environment key, then auth.json; use gpt-image-1 unless an image model is set.
- *
- * @throws {LocalCodexProviderError} If config.toml cannot be read or parsed,
- * or the resolved base URL or API key is missing. Unreadable auth.json is ignored.
- */
 export async function readLocalCodexProvider(input: {
   codexHome: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<LocalCodexProvider> {
   const env = input.env ?? process.env;
-
-  // LOCAL-FIRST (open-creator localization): OPENCREATOR_LOCAL=1 переключает
-  // Codex-агента на локальный llama.cpp сервер (OpenAI-совместимый :8484).
-  // Это ТЕКСТОВЫЙ эндпоинт: для генерации изображений он использоваться не
-  // должен (см. readLocalCodexImageConfiguration — там строго ComfyUI).
-  // Cloud-эндпоинты в этом режиме не используются.
-  if (isLocalMode(env)) {
-    return {
-      baseUrl: env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1',
-      apiKey: 'local',
-      model: env.LOCAL_LLM_MODEL ?? 'Qwen3-8B-Q4_K_M.gguf'
-    };
-  }
-
   const config = await readToml(join(input.codexHome, 'config.toml'), true);
   const providerId = readString(config.model_provider);
   const providers = readRecord(config.model_providers);
