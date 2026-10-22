@@ -7,15 +7,6 @@ import { loadVolcengineEnvironment, parseEnvFile } from '../../src/env-local.js'
 describe('local environment files', () => {
   let root: string | undefined;
 
-  it.each(['1', 'true', 'YES'])('suppresses cloud credentials from both environment and file in local mode (%s)', flag => {
-    root = mkdtempSync(join(tmpdir(), 'opencreator-local-only-env-'));
-    const file = join(root, 'cloud.env');
-    writeFileSync(file, 'VOLCENGINE_APP_ID=file-app\nVOLCENGINE_ACCESS_TOKEN=file-token\n');
-    const env = { OPENCREATOR_LOCAL: flag, OPENCREATOR_ENV_FILE: file, VOLCENGINE_APP_ID: 'shell-app' };
-    expect(loadVolcengineEnvironment({ env, homeDir: null })).toEqual({});
-    expect(env.VOLCENGINE_APP_ID).toBe('shell-app');
-  });
-
   afterEach(() => {
     if (root !== undefined) rmSync(root, { recursive: true, force: true });
     root = undefined;

@@ -9,7 +9,7 @@ import {
   type CreatorResultSnapshot
 } from '@opencreator/protocol';
 import type { ComponentProps } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LanguageProvider } from '../../i18n/LanguageProvider.js';
 import { ApiClientError } from '../../runtime/errors.js';
 import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
@@ -32,6 +32,16 @@ function openBlankWorkspace(moduleName: string, _blankName: string) {
   fireEvent.click(screen.getByRole('button', {
     name: new RegExp(`^${moduleName}`)
   }));
+}
+
+beforeEach(() => {
+  Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:preview') });
+  Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+});
+
+function openSubtitleEditor() {
+  const entry = screen.queryByRole('button', { name: '深度编辑' });
+  if (entry) fireEvent.click(entry);
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -317,6 +327,7 @@ function createTtsServices(options?: {
   return {
     service: {
       getConfig,
+      getCapabilities: vi.fn(async () => ({ transcription: { providers: [] } })),
       getTtsVoices,
       previewTtsVoice
     } as unknown as CreatorServicesSettingsService,
@@ -883,17 +894,18 @@ describe('DashboardPage', () => {
     const videoTranslationCard = screen.getByRole('button', { name: /^视频翻译/ });
     expect(within(videoTranslationCard).getByText('HOT')).toBeInTheDocument();
     const appCards = Array.from(container.querySelectorAll('.dashboard-app-card'));
-    expect(appCards).toHaveLength(4);
+    expect(appCards).toHaveLength(5);
     expect(appCards.map(card => card.querySelector('strong')?.textContent)).toEqual([
       '视频下载',
       '视频翻译',
       '视频生成',
-      '图像生成'
+      '图像生成',
+      '文本转语音'
     ]);
     expect(screen.queryByRole('button', { name: /^火柴人动画 角色、分镜与完整动画/ }))
       .not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^自动剪辑/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^智能配音/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^文本转语音/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^视频生成/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^文章写作/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^数字人口播/ })).not.toBeInTheDocument();
@@ -907,7 +919,7 @@ describe('DashboardPage', () => {
     expect(Array.from(container.querySelectorAll('.dashboard-app-card strong')).map(card => card.textContent))
       .toEqual([
         '视频下载', '视频翻译', '视频生成', '图像生成', '文章写作', '火柴人动画',
-        '视频切片', '封面生成', '小红书帖子', '短视频脚本', '智能配音'
+        '视频切片', '封面生成', '小红书帖子', '短视频脚本', '文本转语音'
       ]);
     expect(screen.queryByRole('button', { name: /^数字人口播/ })).not.toBeInTheDocument();
 
@@ -917,7 +929,7 @@ describe('DashboardPage', () => {
 
     fireEvent.change(screen.getByRole('searchbox', { name: '搜索应用' }), { target: { value: '' } });
     fireEvent.click(screen.getByRole('tab', { name: '推荐' }));
-    expect(container.querySelectorAll('.dashboard-app-card')).toHaveLength(4);
+    expect(container.querySelectorAll('.dashboard-app-card')).toHaveLength(5);
     expect(screen.queryByRole('button', { name: /^小红书帖子/ })).not.toBeInTheDocument();
   });
 
@@ -1033,9 +1045,10 @@ describe('DashboardPage', () => {
     expect(screen.getByRole('combobox', { name: '源语言' })).toHaveValue('en');
     expect(screen.getByRole('combobox', { name: '翻译为' })).toHaveValue('zh_cn');
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
-    expect(screen.getByRole('heading', { name: '视频与字幕' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '视频与字幕' })).toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: '字幕字体' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('switch', { name: '合成字幕视频' }));
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
     fireEvent.change(screen.getByRole('combobox', { name: '字幕字体' }), { target: { value: 'rounded' } });
     fireEvent.change(screen.getByRole('combobox', { name: '字幕大小' }), { target: { value: 'large' } });
     fireEvent.click(screen.getByRole('button', { name: '选择译文颜色' }));
@@ -1056,16 +1069,16 @@ describe('DashboardPage', () => {
     expect(screen.getByLabelText('任务摘要').parentElement).toHaveClass('creator-collaboration-task-summary');
     expect(screen.getByRole('region', { name: '视频翻译操作区' })).not.toContainElement(screen.getByLabelText('任务摘要'));
     expect(screen.getByRole('complementary', { name: 'OpenCreator' })).toContainElement(screen.getByLabelText('任务摘要'));
+    fireEvent.click(screen.getByRole('button', { name: '完成' }));
     await startVideoTranslation();
 
     expect(onSelectPrompt).not.toHaveBeenCalled();
     expect(screen.getByRole('heading', { name: '视频翻译项目' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '作品' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByText('项目 V1')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: '字幕' }));
-    expect(screen.getByRole('button', { name: '保存横屏字幕' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('tab', { name: '任务设置' }));
-    expect(within(screen.getByRole('region', { name: '视频翻译操作区' })).getByText('圆体 · 粗体 · 大 · #FFE45C')).toBeInTheDocument();
+    openSubtitleEditor();
+    expect(screen.getByRole('button', { name: '保存字幕' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '返回项目' })).toBeInTheDocument();
     expect(screen.queryByText(/之前的版本仍可查看/)).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: '生成新版本' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '生成新版本' })).not.toBeInTheDocument();
@@ -1098,7 +1111,9 @@ describe('DashboardPage', () => {
     expect(creatorService.openSubtitlePreview).toHaveBeenLastCalledWith(expect.objectContaining({
       bilingual: true, subtitlePosition: 'bottom'
     }), { signal: expect.any(AbortSignal) });
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
     expect(screen.getByRole('button', { name: '选择原文颜色' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '完成' }));
 
     fireEvent.click(within(steps).getByRole('button', { name: /翻译设置$/ }));
     fireEvent.click(screen.getByRole('switch', { name: '双语字幕' }));
@@ -1108,15 +1123,18 @@ describe('DashboardPage', () => {
     expect(creatorService.openSubtitlePreview).toHaveBeenLastCalledWith(expect.objectContaining({
       bilingual: false, subtitlePosition: 'bottom'
     }), { signal: expect.any(AbortSignal) });
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
     expect(screen.queryByRole('button', { name: '选择原文颜色' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '选择译文颜色' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '完成' }));
     expect(screen.getByLabelText('任务摘要')).toBeInTheDocument();
 
     fireEvent.click(within(steps).getByRole('button', { name: /翻译设置$/ }));
     expect(screen.getByRole('heading', { name: '设置翻译语言' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('switch', { name: '双语字幕' }));
     fireEvent.click(within(steps).getByRole('button', { name: /视频与字幕$/ }));
-    expect(screen.getByRole('heading', { name: '视频与字幕' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '视频与字幕' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
     expect(screen.getByRole('button', { name: '选择原文颜色' })).toBeInTheDocument();
   });
 
@@ -1137,7 +1155,9 @@ describe('DashboardPage', () => {
     expect(screen.queryByRole('switch', { name: '生成目标语言配音' })).not.toBeInTheDocument();
     fireEvent.click(rendering);
     expect(screen.getByRole('combobox', { name: '输出画幅' }).closest('.video-translation-option-block')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
     fireEvent.change(screen.getByRole('combobox', { name: '字幕字体' }), { target: { value: 'rounded' } });
+    fireEvent.click(screen.getByRole('button', { name: '完成' }));
     fireEvent.change(screen.getByRole('combobox', { name: '输出画幅' }), { target: { value: 'vertical' } });
     fireEvent.change(screen.getByRole('textbox', { name: /竖屏主标题/ }), { target: { value: '保留标题' } });
     expect(screen.getByRole('region', { name: '字幕样式预览' })).toHaveAttribute('data-ratio', '9:16');
@@ -1149,7 +1169,9 @@ describe('DashboardPage', () => {
     expect(screen.getByLabelText('任务摘要')).not.toHaveTextContent('字幕样式');
     expect(screen.getByLabelText('任务摘要')).not.toHaveTextContent('配音');
     fireEvent.click(screen.getByRole('switch', { name: '合成字幕视频' }));
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
     expect(screen.getByRole('combobox', { name: '字幕字体' })).toHaveValue('rounded');
+    fireEvent.click(screen.getByRole('button', { name: '完成' }));
     expect(screen.getByRole('combobox', { name: '输出画幅' })).toHaveValue('vertical');
     expect(screen.getByRole('textbox', { name: /竖屏主标题/ })).toHaveValue('保留标题');
     expect(screen.getByLabelText('任务摘要')).toHaveTextContent('字幕样式');
@@ -1356,21 +1378,20 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     await startVideoTranslation();
 
-    fireEvent.click(screen.getByRole('tab', { name: '字幕' }));
+    openSubtitleEditor();
     const firstSubtitle = screen.getByRole('textbox', { name: '横屏字幕 1' });
     fireEvent.change(firstSubtitle, { target: { value: 'A manually edited subtitle.' } });
     expect(screen.getByLabelText('有未保存的字幕修改')).toBeInTheDocument();
-    const subtitleEditor = screen.getByRole('region', { name: '生成新版本' })
-      .previousElementSibling as HTMLElement;
+    const subtitleEditor = screen.getByRole('list', { name: '横屏字幕内容' });
     expect(subtitleEditor).toContainElement(firstSubtitle);
-    fireEvent.click(screen.getByRole('button', { name: '保存横屏字幕' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存字幕' }));
 
     expect(await screen.findByRole('button', { name: '项目 V1' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: '字幕' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('textbox', { name: '横屏字幕 1' })).toBeInTheDocument();
     expect(screen.getAllByRole('status').some(status => (
       status.textContent?.includes('横屏字幕已保存，项目仍为 V1')
     ))).toBe(true);
-    expect(screen.getByRole('button', { name: '保存横屏字幕' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '保存字幕' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: '项目 V2' })).not.toBeInTheDocument();
   });
 
@@ -1384,7 +1405,7 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     await startVideoTranslation();
 
-    fireEvent.click(screen.getByRole('tab', { name: '字幕' }));
+    openSubtitleEditor();
     fireEvent.change(screen.getByRole('textbox', { name: '横屏字幕 2' }), {
       target: { value: 'Welcome back to OpenCreator.' }
     });
@@ -1400,7 +1421,7 @@ describe('DashboardPage', () => {
     const versionTrigger = await screen.findByRole('button', { name: '项目 V2' });
     expect(versionTrigger).toHaveAttribute('aria-haspopup', 'menu');
     expect(versionTrigger.querySelector('.video-result-version-chevron')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: '字幕' }));
+    openSubtitleEditor();
     expect(screen.getByRole('textbox', { name: '横屏字幕 2' })).toHaveValue('Welcome back to OpenCreator.');
   });
 
@@ -1414,7 +1435,7 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     await startVideoTranslation();
 
-    fireEvent.click(screen.getByRole('tab', { name: '字幕' }));
+    openSubtitleEditor();
     fireEvent.change(screen.getByRole('textbox', { name: '横屏字幕 1' }), {
       target: { value: 'The manually revised opening.' }
     });
@@ -1426,7 +1447,7 @@ describe('DashboardPage', () => {
     fireEvent.click(within(confirmation).getByRole('button', { name: '确认生成 V2' }));
 
     expect(await screen.findByRole('button', { name: '项目 V2' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: '字幕' }));
+    openSubtitleEditor();
     expect(screen.getByRole('textbox', { name: '横屏字幕 1' })).toHaveValue('The manually revised opening.');
   });
 
@@ -1450,27 +1471,17 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     await startVideoTranslation();
 
-    fireEvent.click(screen.getByRole('tab', { name: '配音' }));
-    fireEvent.click(screen.getByRole('button', { name: '开启配音并生成新版本' }));
+    fireEvent.click(screen.getByRole('button', { name: '调整任务设置' }));
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     fireEvent.click(screen.getByRole('switch', { name: '合成字幕视频' }));
     fireEvent.click(screen.getByRole('switch', { name: '生成目标语言配音' }));
-    fireEvent.click(screen.getByRole('button', { name: '返回 V1 成品' }));
-    const regenerationRegion = screen.getByRole('region', { name: '生成新版本' });
-    expect(regenerationRegion).toHaveTextContent('生成 V2');
-    expect(regenerationRegion).not.toHaveTextContent('配置草稿');
     fireEvent.click(screen.getByRole('button', { name: '生成 V2' }));
-    fireEvent.click(screen.getByRole('button', { name: '确认生成 V2' }));
 
     expect(await screen.findByRole('button', { name: '项目 V2' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: '配音' }));
-    expect(screen.getByText('配音文件已生成')).toBeInTheDocument();
     expect(screen.getByText('目标语言配音-V2.wav')).toBeInTheDocument();
-    expect(await screen.findByLabelText('目标语言配音试听')).toHaveAttribute(
-      'src',
-      'blob:video-translation-dubbing'
-    );
-    expect(createObjectURL).toHaveBeenCalledOnce();
+    openSubtitleEditor();
+    await waitFor(() => expect(document.querySelector('audio')).toHaveAttribute('src', 'blob:video-translation-dubbing'));
+    expect(createObjectURL).toHaveBeenCalled();
 
     rendered.unmount();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:video-translation-dubbing');
@@ -1486,8 +1497,7 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     await startVideoTranslation();
 
-    fireEvent.click(screen.getByRole('tab', { name: '任务设置' }));
-    fireEvent.click(screen.getByRole('button', { name: '调整设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '调整任务设置' }));
     fireEvent.change(screen.getByRole('combobox', { name: '翻译为' }), {
       target: { value: 'ja' }
     });
@@ -1503,8 +1513,7 @@ describe('DashboardPage', () => {
     expect(screen.getByText('项目 V1')).toBeInTheDocument();
     expect(screen.getByText('https://www.youtube.com/watch?v=test')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('tab', { name: '任务设置' }));
-    fireEvent.click(screen.getByRole('button', { name: '调整设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '调整任务设置' }));
     expect(screen.getByRole('combobox', { name: '翻译为' })).toHaveValue('ja');
     fireEvent.click(screen.getByRole('button', { name: '添加素材' }));
     expect(screen.getByRole('img', { name: 'YouTube 视频缩略图' })).toHaveAttribute(
@@ -1531,11 +1540,8 @@ describe('DashboardPage', () => {
     expect(await screen.findByRole('button', { name: '项目 V1' })).toBeInTheDocument();
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     expect(screen.queryByText('正在查看 V1')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: '任务设置' }));
-    const settings = screen.getByText('目标语言').closest('dl');
-    expect(settings).not.toBeNull();
-    expect(within(settings as HTMLElement).getByText('简体中文')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: '字幕' }));
+    expect(screen.getByRole('heading', { name: '视频翻译项目' }).parentElement).toHaveTextContent('https://www.youtube.com/watch?v=test');
+    openSubtitleEditor();
     expect(screen.getByRole('textbox', { name: '横屏字幕 1' })).toHaveValue('Welcome to OpenCreator.');
   });
 
@@ -1560,8 +1566,7 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     await startVideoTranslation();
 
-    fireEvent.click(screen.getByRole('tab', { name: '任务设置' }));
-    fireEvent.click(screen.getByRole('button', { name: '调整设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '调整任务设置' }));
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     fireEvent.click(screen.getByRole('switch', { name: '合成字幕视频' }));
     fireEvent.click(screen.getByRole('button', { name: '生成 V2' }));
@@ -1605,8 +1610,7 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     await startVideoTranslation();
 
-    fireEvent.click(screen.getByRole('tab', { name: '任务设置' }));
-    fireEvent.click(screen.getByRole('button', { name: '调整设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '调整任务设置' }));
     fireEvent.click(screen.getByRole('button', { name: '添加素材' }));
     fireEvent.click(screen.getByRole('button', { name: '清除当前视频来源' }));
     fireEvent.change(screen.getByRole('textbox', { name: '视频链接' }), {
@@ -1648,8 +1652,7 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('switch', { name: '合成字幕视频' }));
     await startVideoTranslation();
 
-    fireEvent.click(screen.getByRole('tab', { name: '任务设置' }));
-    fireEvent.click(screen.getByRole('button', { name: '调整设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '调整任务设置' }));
     fireEvent.click(screen.getByRole('button', { name: '继续' }));
     fireEvent.click(screen.getByRole('switch', { name: '合成字幕视频' }));
     fireEvent.click(screen.getByRole('button', { name: '生成 V2' }));
@@ -1685,7 +1688,7 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('switch', { name: '合成字幕视频' }));
     await startVideoTranslation();
 
-    fireEvent.click(screen.getByRole('tab', { name: '字幕' }));
+    openSubtitleEditor();
     fireEvent.change(screen.getByRole('textbox', { name: '横屏字幕 1' }), {
       target: { value: 'Edited before rendering.' }
     });
@@ -1789,7 +1792,8 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('switch', { name: '生成目标语言配音' }));
 
     expect(screen.getByText('demo.mp4')).toBeInTheDocument();
-    expect(await screen.findByRole('combobox', { name: '配音音色' })).toHaveValue('marin');
+    const voice = await screen.findByRole('combobox', { name: '配音音色' });
+    await waitFor(() => expect(voice).toHaveAttribute('data-value', 'marin'));
     expect(tts.getTtsVoices).toHaveBeenCalledWith('openai', 'gpt-4o-mini-tts');
     expect(screen.getByRole('switch', { name: '合成字幕视频' })).toHaveAttribute('aria-checked', 'true');
   });
@@ -1959,7 +1963,7 @@ describe('DashboardPage', () => {
     expect(within(directory).getByRole('button', { name: /^封面生成/ })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: '音频处理' }));
-    expect(within(directory).getByRole('button', { name: /^智能配音/ })).toBeInTheDocument();
+    expect(within(directory).getByRole('button', { name: /^文本转语音/ })).toBeInTheDocument();
     expect(directory.querySelectorAll('.dashboard-app-card')).toHaveLength(1);
   });
 
@@ -1987,24 +1991,24 @@ describe('DashboardPage', () => {
       />
     );
 
-    expect(screen.getByRole('heading', { name: '智能配音' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '文本转语音' })).toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox', { name: '配音文案内容' }), {
       target: { value: '这是一段需要生成语音的测试文案。' }
     });
-    fireEvent.click(screen.getByRole('button', { name: '继续' }));
-    expect(await screen.findByRole('combobox', { name: '配音音色' })).toHaveValue('nova');
-    fireEvent.click(screen.getByRole('button', { name: '试听当前音色' }));
-    expect(await screen.findByRole('button', { name: '暂停音色试听' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '配音音色 星语' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '配音音色 星语' }));
+    fireEvent.click(screen.getByRole('button', { name: '试听 · 星语' }));
+    expect(await screen.findByRole('button', { name: '暂停 · 星语' })).toBeInTheDocument();
     expect(tts.previewTtsVoice).toHaveBeenCalledWith({
       provider: 'openai',
       model: 'gpt-4o-mini-tts',
       voiceId: 'nova'
     });
     expect(play).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole('button', { name: '暂停音色试听' }));
+    fireEvent.click(screen.getByRole('button', { name: '暂停 · 星语' }));
     expect(pause).toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole('dialog', { name: '配音音色' }), { key: 'Escape' });
     fireEvent.click(screen.getByRole('radio', { name: '温暖' }));
-    fireEvent.click(screen.getByRole('button', { name: '继续' }));
 
     const summary = screen.getByLabelText('任务摘要');
     expect(summary).toHaveTextContent('星语');
@@ -2013,7 +2017,7 @@ describe('DashboardPage', () => {
     expect(summary).toHaveTextContent('MP3');
     fireEvent.click(screen.getByRole('button', { name: '开始生成' }));
 
-    expect(await screen.findByLabelText('智能配音试听')).toHaveAttribute('src', 'blob:smart-dubbing');
+    expect(await screen.findByLabelText('文本转语音试听')).toHaveAttribute('src', 'blob:smart-dubbing');
     expect(screen.getByText('OpenCreator-dubbing-V1.mp3')).toBeInTheDocument();
     expect(screen.queryByText('Creator Runtime 未连接，Agent 不会生成替代回复。')).not.toBeInTheDocument();
     expect(applyAction).toHaveBeenCalledWith(
@@ -2053,13 +2057,12 @@ describe('DashboardPage', () => {
     fireEvent.change(screen.getByRole('textbox', { name: '配音文案内容' }), {
       target: { value: '这是一段需要配置服务后生成的配音文案。' }
     });
-    fireEvent.click(screen.getByRole('button', { name: '继续' }));
-    expect(await screen.findByRole('combobox', { name: '配音音色' })).toHaveValue('nova');
-    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    expect(await screen.findByRole('button', { name: '配音音色 星语' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '配音音色 星语' }));
     fireEvent.click(screen.getByRole('button', { name: '开始生成' }));
 
-    expect(await screen.findByText('请先在设置的配音服务中配置当前服务商的 API Key'))
-      .toBeInTheDocument();
+    expect(await screen.findAllByText('请先在设置的配音服务中配置当前服务商的 API Key'))
+      .not.toHaveLength(0);
     expect(screen.getByRole('complementary', { name: 'OpenCreator' })).toHaveTextContent('请先在设置的配音服务中配置当前服务商的 API Key');
   });
 
@@ -2223,16 +2226,11 @@ describe('DashboardPage', () => {
     fireEvent.change(screen.getByRole('textbox', { name: '提示词' }), {
       target: { value: prompt }
     });
-    fireEvent.click(screen.getByRole('button', { name: '继续' }));
-    expect(screen.getByRole('radio', { name: 'GPT Image' })).toHaveAttribute('aria-checked', 'true');
-    expect(screen.getByRole('radio', { name: '即梦' })).toHaveAttribute('aria-checked', 'false');
-    expect(screen.getByRole('radio', { name: '可灵' })).toHaveAttribute('aria-checked', 'false');
-    expect(screen.getByRole('radio', { name: 'Gemini' })).toHaveAttribute('aria-checked', 'false');
-    fireEvent.click(screen.getByRole('radio', { name: /横向/ }));
-    fireEvent.click(screen.getByRole('radio', { name: '高清' }));
-    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    expect(screen.getByRole('combobox', { name: /^模型$/ })).toHaveValue('GPT Image');
+    fireEvent.change(screen.getByRole('combobox', { name: '图片画幅' }), { target: { value: '3:2' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '图片质量' }), { target: { value: 'high' } });
 
-    expect(screen.getByLabelText('任务摘要')).toHaveTextContent('横向 · 3:2');
+    expect(screen.getByLabelText('任务摘要')).toHaveTextContent('3:2');
     expect(screen.getByLabelText('任务摘要')).toHaveTextContent('高清');
     fireEvent.click(screen.getByRole('button', { name: '开始生成' }));
 
@@ -2460,28 +2458,26 @@ describe('DashboardPage', () => {
     fireEvent.change(referenceImageInput, {
       target: { files: [referenceImage] }
     });
-    fireEvent.click(screen.getByRole('button', { name: '继续' }));
-    const providerSelect = screen.getByRole('combobox', { name: '视频服务' });
+    const providerSelect = screen.getByRole('combobox', { name: /^模型$/ });
     const modelSelect = screen.getByRole('combobox', { name: '模型版本' });
     const formatSelect = screen.getByRole('combobox', { name: '画幅' });
     const durationSelect = screen.getByRole('combobox', { name: '视频时长' });
     expect(providerSelect).toHaveValue('seedance');
-    expect(modelSelect).toHaveValue('doubao-seedance-2-5-260628');
+    expect(modelSelect).toHaveValue('Seedance 2.5');
     fireEvent.change(providerSelect, { target: { value: 'veo' } });
     expect(providerSelect).toHaveValue('veo');
-    expect(modelSelect).toHaveValue('veo-3.1-generate-preview');
+    expect(modelSelect).toHaveValue('Veo 3.1');
     expect(durationSelect).toHaveValue('4');
     fireEvent.change(formatSelect, { target: { value: '720x1280' } });
     fireEvent.change(durationSelect, { target: { value: '8' } });
-    fireEvent.click(screen.getByRole('button', { name: '继续' }));
 
     expect(screen.getByLabelText('任务摘要')).toHaveTextContent('竖屏 · 9:16');
     expect(screen.getByLabelText('任务摘要')).toHaveTextContent('Veo 3.1');
     expect(screen.getByLabelText('任务摘要')).toHaveTextContent('8 秒');
     expect(screen.getByLabelText('任务摘要')).toHaveTextContent('coast-reference.png');
-    const generationActions = screen.getByLabelText('视频生成操作');
+    const generationActions = screen.getByRole('form', { name: '视频生成' });
     const generateButton = within(generationActions).getByRole('button', { name: '开始生成' });
-    expect(screen.getByText('准备生成视频')).not.toContainElement(generateButton);
+    expect(generationActions).toContainElement(generateButton);
     fireEvent.click(generateButton);
 
     expect(await screen.findByLabelText('生成视频预览')).toHaveAttribute('src', 'blob:generated-video');
