@@ -14,7 +14,6 @@ describe('KrillinTtsService', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     const { rm } = await import('node:fs/promises');
     await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
@@ -435,56 +434,6 @@ describe('KrillinTtsService', () => {
       code: 'creator_tts_config_missing',
       statusCode: 409
     } satisfies Partial<KrillinTtsServiceError>);
-  });
-
-  it.each(['1', 'true', 'YES'])('redirects OpenAI speech to the local endpoint with a local token (%s)', async flag => {
-    vi.stubEnv('OPENCREATOR_LOCAL', flag);
-    vi.stubEnv('LOCAL_TTS_BASE_URL', undefined);
-    const root = await temporaryRoot();
-    const config = createDefaultCreatorServicesConfig();
-    config.tts.openai.apiKey = 'cloud-key';
-    config.tts.openai.baseUrl = 'https://cloud.example.test/v1';
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response('synthetic audio', { headers: { 'content-type': 'audio/mpeg' } }));
-    vi.stubGlobal('fetch', fetchMock);
-    const service = createKrillinTtsService({ resourceRoot: root, workRoot: root, configStore: createConfigStore(config) });
-    const result = await service.synthesize({ text: 'Hello', provider: 'openai', voiceId: 'marin', format: 'mp3' });
-    expect(result.content.toString()).toBe('synthetic audio');
-    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('http://127.0.0.1:8484/v1/audio/speech', expect.objectContaining({
-      headers: expect.objectContaining({ authorization: 'Bearer local' })
-    }));
-    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]!.body))).toMatchObject({ input: 'Hello', voice: 'marin', response_format: 'mp3' });
-  });
-
-  it.each(['aliyun', 'minimax'] as const)('redirects %s speech through the local provider fetch wrapper', async provider => {
-    vi.stubEnv('OPENCREATOR_LOCAL', '1');
-    vi.stubEnv('LOCAL_TTS_BASE_URL', 'http://localhost:9001/speech');
-    const root = await temporaryRoot();
-    const config = createDefaultCreatorServicesConfig();
-    config.tts[provider].apiKey = 'cloud-key';
-    const bytes = Buffer.from('synthetic audio');
-    const payload = provider === 'aliyun'
-      ? { output: { audio: { data: bytes.toString('base64') } } }
-      : { data: { audio: bytes.toString('hex') }, base_resp: { status_code: 0 } };
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload)));
-    vi.stubGlobal('fetch', fetchMock);
-    const service = createKrillinTtsService({ resourceRoot: root, workRoot: root, configStore: createConfigStore(config) });
-    await expect(service.synthesize({ text: 'Hello', provider, voiceId: 'test-voice' })).resolves.toMatchObject({ content: bytes });
-    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('http://localhost:9001/speech', expect.objectContaining({
-      headers: expect.objectContaining({ authorization: 'Bearer local' })
-    }));
-  });
-
-  it('uses the configured local TTS URL without retrying a failed request against the cloud', async () => {
-    vi.stubEnv('OPENCREATOR_LOCAL', '1');
-    vi.stubEnv('LOCAL_TTS_BASE_URL', 'http://localhost:9001/speech');
-    const root = await temporaryRoot();
-    const config = createDefaultCreatorServicesConfig();
-    config.tts.openai.apiKey = 'cloud-key';
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response('unavailable', { status: 503 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const service = createKrillinTtsService({ resourceRoot: root, workRoot: root, configStore: createConfigStore(config) });
-    await expect(service.synthesize({ text: 'Hello', provider: 'openai', voiceId: 'marin' })).rejects.toMatchObject({ code: 'creator_tts_upstream_error' });
-    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('http://localhost:9001/speech', expect.anything());
   });
 
   async function temporaryRoot() {

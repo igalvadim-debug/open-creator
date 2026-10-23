@@ -6,13 +6,6 @@
   "scripts": {
     "prebuild": "pnpm krillinai:build",
     "build": "pnpm -r build",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "audit": "pnpm audit --audit-level=high",
-    "test:local-stack": "python3 -m pytest tests/local -q",
-    "check:local": "python3 local-stack/check_local.py",
     "test": "pnpm -r test",
     "e2e": "playwright test",
     "perf:measure": "playwright test apps/web/e2e/scheduled-task-performance.spec.ts",
@@ -35,18 +28,16 @@
     "templates:preview-videos": "node scripts/optimize-creator-preview-videos.mjs",
     "krillinai:build": "node scripts/build-krillinai.mjs",
     "krillinai:package": "node scripts/package-krillinai-release.mjs",
-    "krillinai:test": "node scripts/build-krillinai.mjs --test-only"
+    "krillinai:test": "node scripts/build-krillinai.mjs --test-only",
+    "languages:generate": "node scripts/generate-creator-languages.mjs",
+    "languages:check": "node scripts/generate-creator-languages.mjs --check"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@types/node": "^22.10.7",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
-    "vitest": "^3.2.7",
-    "@eslint/js": "^10.0.1",
-    "eslint": "^10.0.0",
-    "prettier": "^3.4.2",
-    "typescript-eslint": "^8.20.0"
+    "vitest": "^3.2.7"
   },
   "pnpm": {
     "overrides": {

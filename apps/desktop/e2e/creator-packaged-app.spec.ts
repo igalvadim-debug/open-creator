@@ -136,6 +136,50 @@ test('Remotion 组件不随 App 内嵌，首次渲染按需下载后自动继续
 
 function rootDirForFixture(): string { return resolve(desktopDir, '../..'); }
 
+test('打包 App 的视频翻译支持多语言检索、保存和内置字体', async () => {
+  const fixture = await launchCreatorDesktop({ width: 1180, height: 850 });
+  let currentApp = fixture.app;
+  try {
+    await waitForWorkspace(fixture.app.page);
+    const page = fixture.app.page;
+    const projects = await runtimeRequest<{ projects: Array<{ id: string }> }>(page, 'GET', '/projects');
+    const created = await runtimeRequest<{ job: { id: string } }>(page, 'POST', '/creator/jobs', {
+      projectId: projects.body.projects[0]!.id, templateId: 'video-translation',
+      state: { sourceLanguage: 'hi', targetLanguage: 'zh_cn', currentStep: 1, furthestStep: 1, workspacePhase: 'configure' }
+    });
+    expect(created.status).toBe(201);
+    await page.evaluate(jobId => { window.location.hash = `#/workbench?tool=video-translation&jobId=${jobId}`; }, created.body.job.id);
+    const source = page.getByRole('combobox', { name: '源语言', exact: true });
+    await expect(source).toHaveValue('hi');
+    await expect(source.locator('option')).toHaveCount(123);
+    await expect(page.getByRole('combobox', { name: '翻译为', exact: true }).locator('option')).toHaveCount(124);
+    const search = page.getByRole('searchbox', { name: '搜索源语言' });
+    await search.fill('阿拉伯');
+    await expect(source).toHaveValue('hi');
+    await expect(source.locator('option[value="ar"]')).toHaveText('العربية');
+    await source.selectOption('ar');
+    await expect.poll(async () => (await runtimeRequest<{ job: { state: { sourceLanguage: string } } }>(page, 'GET', `/creator/jobs/${created.body.job.id}`)).body.job.state.sourceLanguage).toBe('ar');
+    await page.reload();
+    await expect(source).toHaveValue('ar');
+    const font = await page.evaluate(async () => {
+      const response = await fetch('/fonts/opencreator/NotoSansArabic-Regular.woff2');
+      return { status: response.status, bytes: (await response.arrayBuffer()).byteLength };
+    });
+    expect(font.status).toBe(200);
+    expect(font.bytes).toBeGreaterThan(10_000);
+    await closePackagedApp(currentApp);
+    currentApp = await relaunchPackagedApp(currentApp, 45_000);
+    await waitForWorkspace(currentApp.page);
+    const restored = await runtimeRequest<{ job: { state: { sourceLanguage: string } } }>(currentApp.page, 'GET', `/creator/jobs/${created.body.job.id}`);
+    expect(restored.body.job.state.sourceLanguage).toBe('ar');
+    await currentApp.page.evaluate(jobId => { window.location.hash = `#/workbench?tool=video-translation&jobId=${jobId}`; }, created.body.job.id);
+    await expect(currentApp.page.getByRole('combobox', { name: '源语言', exact: true })).toHaveValue('ar');
+  } finally {
+    await closePackagedApp(currentApp).catch(() => undefined);
+    rmSync(fixture.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 test('打包 App 的 YouTube 视频嵌入请求带有有效 HTTP 来源标识', async () => {
   const fixture = await launchCreatorDesktop({ width: 1180, height: 850 });
   try {
@@ -643,9 +687,15 @@ test('@package-smoke 实际 Desktop 包创建并重启恢复 Creator Job，且�
         runtimeManifest.ytDlp.certificateBundle
       ])
     );
+    const buildManifest = JSON.parse(readFileSync(
+      process.env.OPENCREATOR_DESKTOP_BUILD_MANIFEST
+        ?? join(desktopDir, 'release', 'opencreator-desktop-build-manifest.json'),
+      'utf8'
+    )) as { ytDlpVersion: string };
+    expect(buildManifest.ytDlpVersion).toMatch(/^\d{4}\.\d{2}\.\d{2}\.\d{6}$/);
     expect(runtimeManifest.ytDlp).toMatchObject({
       mode: 'python',
-      version: '2026.08.29.232711',
+      version: buildManifest.ytDlpVersion,
       pythonVersion: '3.13.15',
       javascriptRuntime: { name: 'node', version: '22.23.2' }
     });
@@ -807,8 +857,8 @@ test('@package-smoke 实际 Desktop 包创建并重启恢复 Creator Job，且�
     expect(ytDlpStatus.body.ytDlp).toMatchObject({
       channel: 'nightly',
       source: 'bundled',
-      currentVersion: '2026.08.29.232711',
-      bundledVersion: '2026.08.29.232711'
+      currentVersion: buildManifest.ytDlpVersion,
+      bundledVersion: buildManifest.ytDlpVersion
     });
     expect(typeof ytDlpStatus.body.ytDlp.updateAvailable).toBe('boolean');
     if (ytDlpStatus.body.ytDlp.updateAvailable) {
@@ -866,20 +916,18 @@ test('@package-smoke 实际 Desktop 包创建并重启恢复 Creator Job，且�
     const providerSelect = currentApp.page.getByRole('combobox', { name: '服务商' });
     await expect(providerSelect).toHaveText('OpenAI TTS');
     await expect(currentApp.page.getByRole('combobox', { name: '默认音色' }))
-      .toHaveValue('marin');
+      .toHaveAttribute('data-value', 'marin');
     await providerSelect.click();
     await currentApp.page.getByRole('option', { name: '阿里云百炼' }).click();
     await expect(currentApp.page.getByLabel('Base URL'))
       .toHaveValue('https://dashscope.aliyuncs.com/api/v1');
     await expect(currentApp.page.getByLabel('模型')).toHaveValue('qwen3-tts-flash');
-    await expect.poll(async () => (
-      currentApp.page.getByRole('combobox', { name: '默认音色' })
-        .locator('option')
-        .allTextContents()
-    )).toEqual(expect.arrayContaining([
-      expect.stringContaining('Cherry'),
-      expect.stringContaining('Kiki')
-    ]));
+    const defaultVoice = currentApp.page.getByRole('combobox', { name: '默认音色' });
+    await expect(defaultVoice).toBeEnabled();
+    await defaultVoice.click();
+    await expect(currentApp.page.getByRole('option', { name: /Cherry/ })).toBeVisible();
+    await expect(currentApp.page.getByRole('option', { name: /Kiki/ })).toBeVisible();
+    await defaultVoice.press('Escape');
 
     await currentApp.page.getByRole('button', { name: '工作台' }).click();
     await expect(currentApp.page.getByRole('heading', { name: '工作台' })).toBeVisible();
