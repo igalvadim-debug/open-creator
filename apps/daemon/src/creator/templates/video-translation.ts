@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { CreatorTemplateDefinition } from './types.js';
 import { creatorSubtitleStyleSchema } from '../presets/module-schemas.js';
 import { validateTranslationOutputLanguage } from '../output-validation.js';
@@ -27,6 +27,7 @@ function createVideoTranslationTemplateDefinition(version: 1 | 2): CreatorTempla
       sourceLanguage: z.string().default('zh_cn'),
       targetLanguage: z.string().default('en'),
       preferPlatformCaptions: z.boolean().default(true),
+      skipVideoDownload: z.boolean().default(false),
       bilingual: z.boolean().default(true),
       subtitlePosition: z.enum(['top', 'bottom']).default('top'),
       ...(version === 2
@@ -100,6 +101,7 @@ function createVideoTranslationTemplateDefinition(version: 1 | 2): CreatorTempla
         allowedJobStatuses: ['draft', 'running', 'needs_input', 'failed'],
         inputArtifacts: [
           { kind: 'source_video', selector: 'latest-completed', optional: true },
+          { kind: 'source_subtitle', selector: 'latest-completed', optional: true },
           { kind: 'target_subtitle', selector: 'latest-completed' },
           { kind: 'bilingual_subtitle', selector: 'latest-completed', optional: true },
           { kind: 'dubbed_audio', selector: 'latest-completed', optional: true },
@@ -115,6 +117,7 @@ function createVideoTranslationTemplateDefinition(version: 1 | 2): CreatorTempla
         allowedJobStatuses: ['draft', 'running', 'needs_input', 'failed'],
         inputArtifacts: [
           { kind: 'source_video', selector: 'latest-completed', optional: true },
+          { kind: 'source_subtitle', selector: 'latest-completed', optional: true },
           { kind: 'vertical_subtitle', selector: 'latest-completed', optional: true },
           { kind: 'target_subtitle', selector: 'latest-completed' },
           { kind: 'bilingual_subtitle', selector: 'latest-completed', optional: true },
@@ -130,7 +133,7 @@ function createVideoTranslationTemplateDefinition(version: 1 | 2): CreatorTempla
         resultVersionPolicy: 'none',
         jobCompletionPolicy: 'preserve',
         invalidateDependentArtifacts: false,
-        allowedJobStatuses: ['draft', 'needs_input', 'failed', 'completed', 'canceled'],
+        allowedJobStatuses: ['draft', 'running', 'needs_input', 'failed', 'completed', 'canceled'],
         inputArtifacts: [],
         outputArtifacts: [{ kind: 'source_video', status: 'completed' }]
       },
@@ -188,7 +191,7 @@ function createVideoTranslationTemplateDefinition(version: 1 | 2): CreatorTempla
     ],
     agentGuidance: [
       '仅翻译字幕文件时设置 sourceType 为 subtitle，使用 import-subtitle 导入 source_subtitle，只运行 subtitle 阶段，不需要 sourceUrl、视频、ASR、配音、合成或字幕样式。',
-      '导入用户提供的 UTF-8 SRT 使用 import-subtitle，input 包含 fileName、contentBase64（原文件字节的 base64，最多512 KiB）、kind（source_subtitle 或 target_subtitle）和 language。原文跳过 ASR，译文跳过 ASR 与翻译。不要编造字幕。',
+      '导入用户提供的 UTF-8 SRT 使用 import-subtitle，input 包含 fileName、contentBase64（原文件字节的 base64，最多512 KiB）、kind（source_subtitle 或 target_subtitle）和 language。未知原文语言时 language 传 auto，由本地正文识别；返回仍为 auto 时需请用户选择源语言再翻译。用户明确指定语言时传对应代码。原文跳过 ASR，译文跳过 ASR 与翻译。不要编造字幕。',
       '帮助用户调整视频翻译内容与参数，修改前读取最新 revision。',
       '更新设置必须写入 input.patch。',
       version === 2

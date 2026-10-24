@@ -33,6 +33,49 @@ afterEach(async () => {
 });
 
 describe('creator api', () => {
+  it('detects imported source subtitle language and persists it without changing the target', async () => {
+    await setupServer();
+    const created = await request('POST', '/creator/jobs', { projectId: 'project_detect_srt', templateId: 'video-translation', state: {
+      sourceType: 'subtitle', sourceLanguage: 'en', targetLanguage: 'ja'
+    } });
+    const job = created.json().job;
+    const imported = await request('POST', `/creator/jobs/${job.id}/actions`, {
+      action: 'import-subtitle', expectedRevision: job.revision, input: {
+        kind: 'source_subtitle', language: 'auto', fileName: 'unknown.en.srt',
+        contentBase64: Buffer.from('1\n00:00:00,000 --> 00:00:04,000\nयह वीडियो 11Reader के साथ साझेदारी में बनाया गया है, और आगे मैं आपको इनके बारे में और बताऊंगा। एक पूर्णकालिक डॉक्टर के तौर पर, मेरी असली मुश्किलों में से एक है पढ़ने के लिए समय निकालना।\n').toString('base64')
+      }
+    });
+    expect(imported.statusCode).toBe(200);
+    const detected = imported.json().job;
+    expect(detected.state).toMatchObject({ sourceLanguage: 'hi', targetLanguage: 'ja' });
+    expect(detected.artifacts[0].metadata).toMatchObject({ language: 'hi', languageDetection: 'detected' });
+    expect((await request('GET', `/creator/jobs/${job.id}`)).json().job.state.sourceLanguage).toBe('hi');
+    const manual = await request('POST', `/creator/jobs/${job.id}/actions`, {
+      action: 'update-settings', expectedRevision: detected.revision, input: { patch: { sourceLanguage: 'mr' } }
+    });
+    expect(manual.json().job.state).toMatchObject({ sourceLanguage: 'mr', targetLanguage: 'ja' });
+  });
+
+  it('keeps an uncertain import unresolved and requires a manual language before running', async () => {
+    await setupServer();
+    const created = await request('POST', '/creator/jobs', { projectId: 'project_short_srt', templateId: 'video-translation', state: {
+      sourceType: 'subtitle', sourceLanguage: 'en'
+    } });
+    const job = created.json().job;
+    const imported = await request('POST', `/creator/jobs/${job.id}/actions`, { action: 'import-subtitle', expectedRevision: job.revision, input: {
+      kind: 'source_subtitle', language: 'auto', fileName: 'short.srt',
+      contentBase64: Buffer.from('1\n00:00:00,000 --> 00:00:01,000\nHello\n').toString('base64')
+    } });
+    expect(imported.statusCode).toBe(200);
+    const unresolved = imported.json().job;
+    expect(unresolved.state.sourceLanguage).toBe('auto');
+    expect(unresolved.artifacts[0].metadata).toMatchObject({ language: 'auto', languageDetection: 'uncertain' });
+    const started = await request('POST', `/creator/jobs/${job.id}/actions`, { action: 'run-stage', expectedRevision: unresolved.revision, input: { stageId: 'subtitle' } });
+    expect(started.statusCode).toBe(400);
+    expect(started.json().error.code).toBe('creator_action_invalid');
+    expect((await request('GET', `/creator/jobs/${job.id}`)).json().job.stages).toHaveLength(0);
+  });
+
   it('translates a standalone SRT without video and stops after the subtitle stage', async () => {
     const calls: string[] = [];
     await setupServer({ creatorExecutors: [{ id: 'krillinai', async run(stage) {
@@ -247,6 +290,7 @@ describe('creator api', () => {
         sourceType: 'url',
         sourceUrl: 'https://www.youtube.com/watch?v=job-control',
         targetLanguage: 'zh_cn',
+        skipVideoDownload: true,
         composeVideo: true,
         videoFormat: 'horizontal'
       }
@@ -774,6 +818,33 @@ describe('creator api', () => {
     expect((await request('GET', `/creator/jobs/${job.id}`)).json().job.stages).toEqual([]);
   });
 
+  it('returns the authoritative Agent issue with its provider reason instead of a second HTTP error', async () => {
+    await setupServer({ agentRuntime: {
+      id: 'provider-failure', available: true,
+      async runTurn() {
+        throw Object.assign(new Error('The selected model is not supported by this account.'), {
+          publicFacts: { kind: 'http-rejected', provider: 'codex',
+            upstreamMessage: 'The selected model is not supported by this account.' }
+        });
+      }
+    } });
+    const created = await request('POST', '/creator/jobs', {
+      projectId: 'project_agent_failure', templateId: 'video-download'
+    });
+    const job = created.json().job;
+    const response = await request('POST', `/creator/jobs/${job.id}/agent-turns`, { message: 'hello' });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({ error: {
+      code: 'creator_agent_failed',
+      issue: { code: 'creator_agent_failed', publicFacts: {
+        provider: 'codex', upstreamMessage: 'The selected model is not supported by this account.'
+      } }
+    } });
+    const current = (await request('GET', `/creator/jobs/${job.id}`)).json().job;
+    expect(current.issues).toHaveLength(1);
+    expect(current.issues[0].id).toBe(response.json().error.issue.id);
+  });
+
   it('returns the persisted Agent timeline and resolves approvals by generation', async () => {
     let observedDecision = '';
     const agentRuntime: AgentRuntimeAdapter = {
@@ -1064,13 +1135,15 @@ async function waitForCreatorJob(
   jobId: string,
   predicate: (job: any) => boolean
 ): Promise<any> {
+  let lastJob: any;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const response = await request('GET', `/creator/jobs/${jobId}`);
     const job = response.json().job;
+    lastJob = job;
     if (predicate(job)) return job;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  throw new Error(`Timed out waiting for Creator job ${jobId}`);
+  throw new Error(`Timed out waiting for Creator job ${jobId}: ${JSON.stringify({ status: lastJob?.status, stages: lastJob?.stages })}`);
 }
 
 async function waitForApiApproval(jobId: string) {

@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import * as fontkit from 'fontkit';
 import { verifyRuntimeExecutable } from './runtime-executable-check.mjs';
 import { stripMacNodeRuntime } from './prepare-creator-node.mjs';
+import { creatorNlpLockPath, prepareCreatorNlpRuntime } from './creator-nlp-runtime.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, '..');
@@ -75,6 +76,20 @@ for (const [name, configured, vendored] of externalInputs) {
   copyExecutable(source, target);
 }
 const ytDlpRuntime = prepareYtDlpRuntime(vendorVersions);
+const nlpPythonRoot = ytDlpRuntime.descriptor.mode === 'python'
+  ? join(outputRoot, 'yt-dlp-runtime', 'python')
+  : join(outputRoot, 'nlp-runtime', 'python');
+if (ytDlpRuntime.descriptor.mode !== 'python') {
+  mkdirSync(dirname(nlpPythonRoot), { recursive: true });
+  extractPythonRuntime(join(vendorRoot, 'python-runtime.tar.gz'), dirname(nlpPythonRoot));
+  removePythonBytecodeCaches(nlpPythonRoot);
+  clearMacOSFileMetadata(nlpPythonRoot, true);
+}
+const nlpExecutable = portablePythonExecutable(nlpPythonRoot, targetPlatform);
+const nlpRuntime = prepareCreatorNlpRuntime({
+  vendorRoot, outputRoot, pythonRoot: nlpPythonRoot, pythonExecutable: nlpExecutable,
+  platform: targetPlatform, arch: targetArch
+});
 const javascriptRuntime = prepareYtDlpJavascriptRuntime(vendorVersions);
 ytDlpRuntime.descriptor.javascriptRuntime = javascriptRuntime.descriptor;
 ytDlpRuntime.resourcePaths.push(...javascriptRuntime.resourcePaths);
@@ -96,16 +111,21 @@ const buildRecord = {
   sourceCommit,
   sourceSha256,
   ytDlp: ytDlpRuntime.descriptor,
+  nlp: nlpRuntime.descriptor,
   subtitleFonts: {
     manifestSha256: subtitleFonts.manifestSha256,
     resourceCount: subtitleFonts.resourcePaths.length
   },
   integrationPatchSha256: hashFiles([
     join(rootDir, 'scripts', 'build-krillinai.mjs'),
+    join(rootDir, 'scripts', 'download-go-modules.mjs'),
     join(scriptDir, 'install-creator-runtime-dependencies.mjs'),
     join(scriptDir, 'creator-runtime-releases.mjs'),
     join(scriptDir, 'prepare-creator-runtime.mjs'),
     join(scriptDir, 'prepare-creator-node.mjs'),
+    join(scriptDir, 'creator-nlp-runtime.mjs'),
+    join(scriptDir, 'install-creator-nlp-wheels.py'),
+    creatorNlpLockPath,
     join(rootDir, 'apps', 'daemon', 'src', 'creator', 'krillin', 'adapter.ts'),
     join(rootDir, 'apps', 'daemon', 'src', 'creator', 'krillin', 'cli-runner.ts'),
     join(rootDir, 'apps', 'daemon', 'src', 'creator', 'krillin', 'config-bridge.ts'),
@@ -119,14 +139,16 @@ const buildRecord = {
 const buildRecordPath = join(outputRoot, 'build-record.json');
 writeFileSync(buildRecordPath, `${JSON.stringify(buildRecord, null, 2)}\n`);
 
-const resourcePaths = [
+const resourcePaths = [...new Set([
   primaryExecutablePath,
   ...externalInputs.map(([name]) => join(binDir, `${name}${executableSuffix}`)),
   ...ytDlpRuntime.resourcePaths,
+  ...nlpRuntime.resourcePaths,
+  ...(ytDlpRuntime.descriptor.mode === 'python' ? [] : listFiles(dirname(nlpPythonRoot))),
   ...subtitleFonts.resourcePaths,
   subtitleStylePath,
   buildRecordPath
-];
+])];
 const manifest = {
   version: 1,
   runtimeMode,
@@ -137,10 +159,11 @@ const manifest = {
   platform: targetPlatform,
   arch: targetArch,
   ytDlp: ytDlpRuntime.descriptor,
+  nlp: nlpRuntime.descriptor,
   resources: resourcePaths.map(path => ({
     path: relative(outputRoot, path).replaceAll('\\', '/'),
     sha256: hashFile(path),
-    kind: path.startsWith(binDir) || ytDlpRuntime.executablePaths.includes(path)
+    kind: path.startsWith(binDir) || ytDlpRuntime.executablePaths.includes(path) || path === nlpExecutable
       ? 'executable'
       : 'asset'
   }))
@@ -155,7 +178,7 @@ function prepareSubtitleFonts() {
   }
   const sourceManifest = JSON.parse(readFileSync(sourceManifestPath, 'utf8'));
   if (
-    sourceManifest?.version !== 1
+    ![1, 2].includes(sourceManifest?.version)
     || !Array.isArray(sourceManifest.fonts)
     || sourceManifest.fonts.length !== 9
     || !Array.isArray(sourceManifest.licenses)
@@ -170,10 +193,13 @@ function prepareSubtitleFonts() {
   mkdirSync(runtimeLicensesDir, { recursive: true });
   const resourcePaths = [];
   const runtimeFonts = [];
+  const runtimeFallbackFonts = [];
+  if (sourceManifest.version === 2 && (!Array.isArray(sourceManifest.fallbackFonts) || !sourceManifest.fallbackFonts.length)) throw new Error('Creator fallback font manifest is invalid');
   const seenAliases = new Set();
-  for (const entry of sourceManifest.fonts) {
+  for (const entry of [...sourceManifest.fonts, ...(sourceManifest.fallbackFonts ?? [])]) {
+    const fallback = Array.isArray(entry.scripts);
     if (
-      !['sans', 'serif', 'rounded'].includes(entry?.preset)
+      (!fallback && !['sans', 'serif', 'rounded'].includes(entry?.preset))
       || !['regular', 'medium', 'bold'].includes(entry?.weight)
       || ![400, 500, 700].includes(entry?.weightValue)
       || typeof entry?.family !== 'string'
@@ -212,7 +238,8 @@ function prepareSubtitleFonts() {
     const target = join(runtimeFontsDir, targetName);
     copyFileSync(desktopSource, target);
     resourcePaths.push(target);
-    runtimeFonts.push({
+    (fallback ? runtimeFallbackFonts : runtimeFonts).push({
+      ...(fallback ? { scripts: entry.scripts, sample: entry.sample } : {}),
       preset: entry.preset,
       weight: entry.weight,
       weightValue: entry.weightValue,
@@ -260,6 +287,7 @@ function prepareSubtitleFonts() {
     version: sourceManifest.version,
     sources: sourceManifest.sources,
     fonts: runtimeFonts,
+    ...(sourceManifest.version === 2 ? { fallbackFonts: runtimeFallbackFonts } : {}),
     licenses: runtimeLicenses
   }, null, 2)}\n`);
   resourcePaths.push(runtimeManifestPath);
@@ -279,6 +307,14 @@ function assertSubtitleFontMetadata(path, entry) {
   ) {
     throw new Error(`Creator subtitle font metadata mismatch: ${path}`);
   }
+  if (entry.scripts) {
+    if (!entry.scripts.length || !entry.sample || (!entry.scripts.includes('Hang') && (!font.GSUB || !font.GPOS))) throw new Error(`Creator fallback font shaping metadata missing: ${path}`);
+    for (const character of entry.sample) {
+      if (!character.trim()) continue;
+      if (!font.hasGlyphForCodePoint(character.codePointAt(0))) throw new Error(`Creator fallback font lacks ${character}: ${path}`);
+    }
+  }
+
 }
 
 function resolveAssetPath(root, path) {
@@ -338,7 +374,7 @@ function ensureExternalDependencies() {
     [process.env.OPENCREATOR_FFMPEG_PATH, join(vendorRoot, `ffmpeg${executableSuffix}`)],
     [process.env.OPENCREATOR_FFPROBE_PATH, join(vendorRoot, `ffprobe${executableSuffix}`)],
     [configuredYtDlpPath, join(vendorRoot, 'yt-dlp')],
-    [configuredYtDlpPath, join(vendorRoot, 'python-runtime.tar.gz')],
+    [undefined, join(vendorRoot, 'python-runtime.tar.gz')],
     [configuredYtDlpPath, join(vendorRoot, 'cacert.pem')],
     [process.env.OPENCREATOR_YT_DLP_NODE_PATH, join(vendorRoot, targetPlatform === 'win32' ? 'node-runtime.zip' : 'node-runtime.tar.gz')]
   ];
