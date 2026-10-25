@@ -1,6 +1,7 @@
 import { defaultVideoGenerationModels } from './media-generation.js';
 import { publicErrorKindForCode, safePublicErrorMessage } from './errors.js';
 import type { PublicErrorFacts } from './issues.js';
+import type { GatewayVoiceProfile } from './gateway-account.js';
 
 export type OpenAiCompatibleConfig = {
   baseUrl: string;
@@ -41,11 +42,12 @@ export type VolcengineAsrConfig = VolcengineSpeechCredentials & {
   baseUrl: string;
 };
 
-export type CreatorTtsVoice = {
+export type CreatorTtsVoice = Omit<GatewayVoiceProfile, 'gender'> & {
   id: string;
   name: string;
   provider: CreatorTtsProvider;
   language?: string;
+  previewLanguages?: string[];
   gender?: string;
   scenario?: string;
   kind?: 'builtin' | 'custom' | 'designed';
@@ -64,6 +66,7 @@ export type CreatorTtsPreviewRequest = {
   model?: string;
   voiceId: string;
   text?: string;
+  language?: string;
 };
 
 export type KlingAiConfig = {
@@ -158,6 +161,7 @@ export type CreatorTranscriptionProviderCapability = {
   available: boolean;
   models: string[];
   modelDetails?: Record<string, { diskBytes: number }>;
+  languageCapabilities?: Record<string, import('./creator-languages.js').TranscriptionLanguageCapability>;
   gpuAcceleration: boolean;
   unavailableReason?: 'unsupported_platform' | 'installer_unavailable';
 };
@@ -219,6 +223,8 @@ export function creatorPreflightFailure(result: CreatorPreflightResponse): {
     'video-provider': 'VIDEO_GENERATION_CONFIG_REQUIRED',
     'reference-image-capability': 'unsupported_capability',
     'transcription-config': 'creator_transcription_config_missing',
+    'transcription-language': 'creator_transcription_language_unsupported',
+    'transcription-timestamps': 'creator_transcription_timestamps_unavailable',
     'input-file': 'creator_stage_input_missing',
     'managed-directory': 'creator_storage_failed'
   };
@@ -329,7 +335,7 @@ export function createDefaultCreatorServicesConfig(): CreatorServicesConfig {
       openai: {
         baseUrl: '',
         apiKey: '',
-        model: 'gpt-image-1'
+        model: 'gpt-image-2'
       },
       jimeng: {
         baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',

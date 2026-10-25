@@ -101,6 +101,7 @@ export type KrillinTtsSynthesisResult = {
   model: string;
   voiceId: string;
   format: 'mp3' | 'wav';
+  language?: string;
 };
 
 export type KrillinTtsService = ReturnType<typeof createKrillinTtsService>;
@@ -131,6 +132,8 @@ export function createKrillinTtsService(input: {
   ensureRuntimeReady?(): Promise<void>;
   executeUtility?: (input: ExecuteUtilityInput) => Promise<KrillinUtilityResponse>;
   executeSynthesis?: (input: ExecuteSynthesisInput) => Promise<ExecuteSynthesisResult>;
+  officialPreview?: (request: CreatorTtsPreviewRequest) => Promise<KrillinTtsSynthesisResult | undefined>;
+  officialPreviewLanguages?: (model: string) => Promise<Record<string, string[]>>;
 }) {
   const runUtility = input.executeUtility ?? (async utility => {
     return await executePackagedKrillinUtility({
@@ -159,7 +162,11 @@ export function createKrillinTtsService(input: {
       const selected = gateway.catalog?.find(candidate => candidate.modality === 'speech' && candidate.id === (model || gateway.models.speech));
       if (model && model !== gateway.models.speech && !selected) throw new KrillinTtsServiceError('VALIDATION_FAILED', 'Select an official speech model', 400);
       const defaultVoice = selected?.capabilities.includes('default_voice') ?? gateway.capabilities?.speech?.includes('default_voice');
-      return { provider: 'openai', model: selected?.id ?? gateway.models.speech ?? '', voices: (defaultVoice ? [gatewayDefaultVoiceId] : selected?.voices ?? gateway.speechVoices ?? []).map(id => ({ id, name: id === gatewayDefaultVoiceId ? 'Default voice' : id, provider: 'openai' as const, kind: 'builtin' as const })) };
+      const selectedModel = selected?.id ?? gateway.models.speech ?? '';
+      // Sample discovery must not hide voices used for ordinary speech generation.
+      const languages: Record<string, string[]> | undefined = await input.officialPreviewLanguages?.(selectedModel).catch(() => ({}));
+      return { provider: 'openai', model: selectedModel, voices: (defaultVoice ? [gatewayDefaultVoiceId] : selected?.voices ?? gateway.speechVoices ?? []).map(id => ({ ...selected?.voiceProfiles?.[id], id, name: id === gatewayDefaultVoiceId ? 'Default voice' : id, provider: 'openai' as const, kind: 'builtin' as const,
+        ...(languages ? { previewLanguages: languages[id] ?? [] } : {}) })) };
     }
     if (provider === 'edge-tts') {
       return { provider, model: '', voices: [] };
@@ -284,7 +291,12 @@ export function createKrillinTtsService(input: {
 
   return {
     listVoices,
-    preview(request: CreatorTtsPreviewRequest) {
+    async preview(request: CreatorTtsPreviewRequest) {
+      const stored = await input.officialPreview?.(request);
+      if (stored) return stored;
+      if (gatewayCreatorBinding(await input.configStore.read())) {
+        throw new KrillinTtsServiceError('creator_tts_upstream_error', 'This voice sample is temporarily unavailable', 503);
+      }
       return synthesize({
         text: request.text?.trim() || '你好，这是当前音色的试听效果。',
         provider: request.provider,
@@ -376,51 +388,10 @@ function ensureSuccessfulResponse(response: KrillinUtilityResponse): void {
 async function executeProviderSynthesis(
   input: ExecuteSynthesisInput & { timeoutMs: number }
 ): Promise<ExecuteSynthesisResult> {
-  // LOCAL-FIRST: обработку локального режима нужно выполнить ДО сборки
-  // специфичных провайдерских тел запросов (Aliyun, MiniMax, Volcengine).
-  // В локальном режиме синтез идёт на сервис, который действительно
-  // поддерживает OpenAI-совместимый /v1/audio/speech (Kokoro-FastAPI,
-  // llama.cpp c TTS-адаптером и т.п.), а НЕ на базовый LLM-инференс
-  // (LOCAL_LLM_BASE_URL — это текстовая модель, она не умеет озвучку).
-  if (/^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '')) {
-    return synthesizeLocal(input);
-  }
   if (input.provider === 'aliyun') return synthesizeAliyun(input);
   if (input.provider === 'minimax') return synthesizeMinimax(input);
   if (input.provider === 'volcengine') return synthesizeVolcengine(input);
   return synthesizeOpenAi(input);
-}
-
-function localTtsEndpoint(): string {
-  const base = (process.env.LOCAL_TTS_BASE_URL ?? 'http://127.0.0.1:8880/v1').trim();
-  return appendPath(base, '/audio/speech');
-}
-
-async function synthesizeLocal(
-  input: ExecuteSynthesisInput & { timeoutMs: number }
-): Promise<ExecuteSynthesisResult> {
-  // Стандартное OpenAI-совместимое тело запроса для /v1/audio/speech.
-  const body = {
-    model: process.env.LOCAL_TTS_MODEL || 'tts-1',
-    input: input.text,
-    voice: input.voiceId,
-    response_format: input.format,
-    ...(input.speed === 1 ? {} : { speed: input.speed })
-  };
-  const response = await timedFetch(localTtsEndpoint(), {
-    method: 'POST',
-    headers: {
-      authorization: 'Bearer local',
-      'content-type': 'application/json',
-      ...(input.logicalId ? { 'Idempotency-Key': input.logicalId } : {})
-    },
-    body: JSON.stringify(body)
-  }, input);
-  if (!response.ok) await throwProviderHttpError(response, input.provider);
-  return {
-    content: await readAudioResponse(response),
-    format: audioFormat(response.headers.get('content-type'), undefined, input.format)
-  };
 }
 
 async function synthesizeVolcengine(
@@ -613,25 +584,12 @@ async function synthesizeMinimax(
   return { content, format: detectAudioFormat(content, input.format) };
 }
 
-/**
- * POST a TTS payload with cancellation and a timeout in milliseconds.
- *
- * Local mode replaces the complete endpoint with LOCAL_TTS_BASE_URL or the
- * localhost speech endpoint and uses a placeholder key; the payload is unchanged.
- * Forward a valid request ID to onGatewayRequest for official requests.
- *
- * @throws {KrillinTtsServiceError} On a non-success HTTP response. Fetch,
- * serialization, and request callback errors propagate.
- */
 async function providerFetch(
   url: string,
   apiKey: string,
   body: unknown,
   input: ExecuteSynthesisInput & { timeoutMs: number }
 ): Promise<Response> {
-  // LOCAL-FIRST: локальный режим обрабатывается раньше — в
-  // executeProviderSynthesis (см. synthesizeLocal), поэтому сюда попадают
-  // только настоящие cloud-запросы.
   const response = await timedFetch(url, {
     method: 'POST',
     headers: {

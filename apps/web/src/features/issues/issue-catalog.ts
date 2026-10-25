@@ -1,3 +1,4 @@
+import { gatewayRelayIdentity } from '@opencreator/protocol';
 import { safePublicErrorCode, safePublicErrorMessage, sanitizePublicErrorFacts, type OpenCreatorIssue, type PublicErrorFacts } from '@opencreator/protocol';
 import type { AppLanguage } from '../../i18n/language.js';
 import { createLocalizedCopy, type LocalizeCopy } from '../../i18n/localized-copy.js';
@@ -80,6 +81,8 @@ function issuePublicFacts(issue: OpenCreatorIssue): PublicErrorFacts | undefined
 }
 
 function localizedIssueSummary(issue: OpenCreatorIssue, localize: LocalizeCopy): string {
+  if (issue.code === 'creator_codex_config_resynced') return localize('已重新同步本机 Codex 配置，请重试本次操作。', 'Local Codex configuration has been re-synchronized. Retry this operation.', 'Konfigurationen för lokala Codex har synkroniserats igen. Försök igen.');
+  if (issue.code === 'creator_codex_config_check_failed') return localize('本机 Codex 配置检查失败，请检查配置文件和登录信息。', 'Local Codex configuration could not be checked. Check the configuration files and sign-in details.', 'Konfigurationen för lokala Codex kunde inte kontrolleras. Kontrollera konfigurationsfilerna och inloggningsuppgifterna.');
   if (issue.code === 'platform_request_signature_required') return localize('当前下载器尚未兼容抖音的请求签名校验。', 'The current downloader does not support Douyin request signature verification.', 'Den nuvarande nedladdaren stöder inte Douyins verifiering av begäranssignaturer.');
   if (issue.code === 'platform_session_required') return localize('视频平台未接受浏览器会话或需要网页验证。', 'The video platform did not accept the browser session or requires website verification.', 'Videoplattformen accepterade inte webbläsarsessionen eller kräver webbplatsverifiering.');
   const transcription = transcriptionIssueCopy(issue.code, localize) ?? transcriptionIssueCopy(issue.publicFacts?.upstreamCode, localize);
@@ -98,6 +101,11 @@ function localizedIssueSummary(issue: OpenCreatorIssue, localize: LocalizeCopy):
 
 function transcriptionIssueCopy(code: string | undefined, localize: LocalizeCopy): { message: string; nextStep: string } | undefined {
   switch (code) {
+    case 'creator_transcription_language_unsupported':
+      return {
+        message: localize('当前识别模型不支持所选源语言。', 'The speech recognition model does not support the selected source language.', 'Taligenkänningsmodellen stöder inte det valda källspråket.'),
+        nextStep: localize('请更换识别服务或导入原文字幕后重试。', 'Change the speech recognition service or import source subtitles and retry.', 'Byt taligenkänningstjänst eller importera källundertexter och försök igen.')
+      };
     case 'audio_no_speech':
       return {
         message: localize('音频为静音或音量过低，未识别到可用语音。', 'The audio is silent or extremely quiet; no usable speech was transcribed.', 'Ljudet är tyst eller mycket svagt; inget användbart tal transkriberades.'),
@@ -113,6 +121,7 @@ function transcriptionIssueCopy(code: string | undefined, localize: LocalizeCopy
         message: localize('语音识别服务返回了无效结果。', 'The speech recognition service returned an invalid response.', 'Taligenkänningstjänsten returnerade ett ogiltigt svar.'),
         nextStep: localize('请检查服务返回的错误，或更换语音识别模型后重试。', 'Review the provider error, or choose another speech recognition model and retry.', 'Kontrollera leverantörens fel, eller välj en annan taligenkänningsmodell och försök igen.')
       };
+    case 'creator_transcription_timestamps_unavailable':
     case 'audio_transcription_timestamps_missing':
       return {
         message: localize('已识别到文字，但当前模型未提供可用的字幕时间戳。', 'Text was recognized, but the current model did not provide usable subtitle timestamps.', 'Text identifierades, men den aktuella modellen gav inga användbara tidsstämplar för undertexter.'),
@@ -210,6 +219,10 @@ export function issueConversationText(
     ? localize('请重试当前步骤；如果仍然失败，可先切分视频，并向 Agent 提供文件大小和诊断编号。', 'Retry the current step. If it still fails, split the video and provide the file size and diagnostic ID to the Agent.', 'Försök igen. Om det fortfarande misslyckas, dela videon och ge filstorleken och diagnostik-ID till Agent.')
     : issue.publicFacts?.upstreamCode === 'IMAGE_REFERENCE_MISSING'
     ? localize('请先上传参考图；如需纯文字生图，请移除对上传图片或原图的要求后重试。', 'Upload a reference image, or remove the uploaded/original image requirements for text-only generation, then retry.', 'Ladda upp en referensbild, eller ta bort kraven på en uppladdad eller ursprunglig bild för textgenerering och försök igen.')
+    : issue.code === 'creator_codex_config_resynced'
+    ? localize('配置已同步，请重新发送刚才的请求。', 'The configuration is synchronized. Send the previous request again.', 'Konfigurationen är synkroniserad. Skicka den föregående begäran igen.')
+    : issue.code === 'creator_codex_config_check_failed'
+    ? localize('请检查本机 Codex 的配置文件和登录信息，修正后重试。', 'Check local Codex configuration files and sign-in details, then retry.', 'Kontrollera konfigurationsfilerna och inloggningsuppgifterna för lokala Codex och försök igen.')
     : issue.code === 'creator_template_version_mismatch'
     ? localize('请刷新页面以加载当前模板版本；如果仍然失败，请重新启动本地服务。', 'Refresh the page to load the current template version. If the problem persists, restart the local service.', 'Uppdatera sidan för att läsa in den aktuella mallversionen. Om problemet kvarstår, starta om den lokala tjänsten.')
     : issue.publicFacts?.kind === 'http-rejected' || issue.publicFacts?.kind === 'provider-failed'
@@ -229,7 +242,7 @@ export function issueConversationText(
       : issue.category === 'input'
       ? localize('请检查输入内容后重试。', 'Check the input and try again.', 'Kontrollera indata och försök igen.')
         : localize('请检查当前任务状态后重试。', 'You can retry after checking the current task state.', 'Kontrollera den aktuella uppgiftsstatusen innan du försöker igen.');
-  return language !== 'zh-CN'
+  return language !== 'zh-CN' && language !== 'zh-TW'
     ? {
         message: `${detail} ${nextStep}`,
         nextStep
@@ -260,7 +273,7 @@ export function issueDiagnosticText(issue: OpenCreatorIssue, language: AppLangua
 }
 
 function safeFallback(value: string, language: AppLanguage): string {
-  const normalized = value
+  const normalized = (gatewayRelayIdentity.test(value) ? '' : value)
     .replace(/authorization\s*[:=]\s*(?:Bearer|Basic)\s+\S+/gi, '[redacted]')
     .replace(/(?:authorization|api[-_ ]?key|token|secret)\s*[:=]\s*\S+/gi, '[redacted]')
     .replace(/[A-Za-z]:\\Users\\[^\\\s]+/gi, '[user directory]')

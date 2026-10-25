@@ -16,9 +16,10 @@ type RenderRequest struct {
 	Video               string
 	SourceURL           string
 	MediaWorkdir        string
-	ReportProgress      func(string, int, string)
+	ReportProgress      ProgressReporter
 	Audio               string
 	Subtitle            string
+	DocumentFile        string
 	Horizontal          bool
 	Dubbed              bool
 	MajorTitle          string
@@ -32,6 +33,7 @@ type RenderRequest struct {
 }
 
 func Render(ctx context.Context, svc StageService, req RenderRequest) (Response, error) {
+	req.ReportProgress = monotonicProgress(req.ReportProgress)
 	manifest, err := renderManifest(req)
 	if err != nil {
 		return renderFailureResponse(req, nil, ErrorKindInternal, "load_manifest_failed", err), err
@@ -63,12 +65,15 @@ func Render(ctx context.Context, svc StageService, req RenderRequest) (Response,
 		VerticalVideoMajorTitle: req.MajorTitle,
 		VerticalVideoMinorTitle: req.MinorTitle,
 		SubtitleStyle:           req.SubtitleStyle,
+		RenderLineMode:          string(req.LineMode),
 		SubtitleResultType:      types.SubtitleResultTypeBilingualTranslationOnTop,
 	}
 	if req.LineMode == LineModeBilingualTargetBottom {
 		stepParam.SubtitleResultType = types.SubtitleResultTypeBilingualTranslationOnBottom
 	}
-	if req.MixedTargetSubtitle != "" {
+	if req.DocumentFile != "" {
+		// Structured editor cues already carry explicit language roles.
+	} else if req.MixedTargetSubtitle != "" {
 		normalized := filepath.Join(req.Workdir, "render_subtitles.srt")
 		err = normalizeMixedRenderSRT(subtitle, req.MixedTargetSubtitle, normalized, req.LineMode, req.TargetOnly)
 		if err != nil {
@@ -82,11 +87,13 @@ func Render(ctx context.Context, svc StageService, req RenderRequest) (Response,
 		}
 		subtitle = normalized
 	}
+	forwardTaskProgress(stepParam.TaskPtr, req.ReportProgress, nil)
 	rendered, err := svc.RenderVideo(ctx, service.RenderVideoRequest{
 		Workdir:       req.Workdir,
 		InputVideo:    inputVideo,
 		AudioFile:     req.Audio,
 		SubtitleFile:  subtitle,
+		DocumentFile:  req.DocumentFile,
 		OutputFile:    output,
 		Horizontal:    req.Horizontal,
 		StepParam:     stepParam,

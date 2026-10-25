@@ -33,7 +33,15 @@ func importSubtitleFile(ctx context.Context, svc StageService, req SubtitleReque
 		}
 	}
 	if !req.SRTTranslated {
-		reportSubtitleProgress(req, "translating_subtitles", 40, "正在翻译导入的原文字幕")
+		startPercent := 5
+		if req.PrepareVideo {
+			startPercent = 30
+		}
+		// Import translation has no download/ASR work. Its progress must not use
+		// the video preparation reporter or the legacy 40–90 translation range.
+		step.TaskPtr.SetProgressReporter(nil)
+		forwardSubtitleTranslationProgress(step.TaskPtr, req.ReportProgress, startPercent, 95, "正在翻译导入的原文字幕")
+		reportSubtitleProgress(req, "translating_subtitles", startPercent, "正在准备字幕翻译")
 		blocks, err = svc.TranslateSubtitleBlocks(ctx, blocks, step)
 		if err != nil {
 			return err
@@ -42,6 +50,7 @@ func importSubtitleFile(ctx context.Context, svc StageService, req SubtitleReque
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	reportSubtitleProgress(req, "collecting_subtitles", 96, "正在生成字幕文件")
 	var source, target, bilingual strings.Builder
 	for _, block := range blocks {
 		if strings.TrimSpace(block.TargetLanguageSentence) == "" {
