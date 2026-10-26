@@ -8,26 +8,27 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"krillin-ai/internal/storage"
 	subtitlestyle "krillin-ai/internal/subtitle_style"
 	"krillin-ai/internal/types"
+	"math"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 )
 
 type RenderVideoRequest struct {
-	Workdir       string
-	InputVideo    string
-	AudioFile     string
-	SubtitleFile  string
-	OutputFile    string
-	Horizontal    bool
-	StepParam     *types.SubtitleTaskStepParam
-	PreviewWidth  int
-	PreviewHeight int
+	Workdir           string
+	InputVideo        string
+	AudioFile         string
+	SubtitleFile      string
+	DocumentFile      string
+	CompositionFilter string
+	OutputFile        string
+	Horizontal        bool
+	StepParam         *types.SubtitleTaskStepParam
+	PreviewWidth      int
+	PreviewHeight     int
 }
 
 type resolutionProbe func(inputVideo string) (int, int, error)
@@ -60,6 +61,13 @@ func escapeAssFilterPath(path string) string {
 func buildEmbedSubtitleArgs(req RenderVideoRequest) ([]string, string) {
 	assPath := renderAssPath(req)
 	filter := buildAssFilterExpression(assPath, packagedSubtitleFontsDir())
+	if req.PreviewWidth == 0 && req.StepParam != nil && req.StepParam.RenderWidth > 0 && req.StepParam.RenderHeight > 0 {
+		if req.CompositionFilter != "" {
+			filter = req.CompositionFilter + ",setsar=1," + filter
+		} else {
+			filter = fmt.Sprintf("scale=%d:%d,setsar=1,", req.StepParam.RenderWidth, req.StepParam.RenderHeight) + filter
+		}
+	}
 	if req.PreviewWidth > 0 && req.PreviewHeight > 0 {
 		// Recover straight alpha from opaque renders: libass alpha=1 differs at blended edges.
 		previewFilter := fmt.Sprintf("[0:v]split[black][white];[black]%s[b];[white]lutrgb=r=255:g=255:b=255,%s[w];[b][w]vstack", filter, filter)
@@ -122,21 +130,46 @@ func renderSubtitleFile(ctx context.Context, req RenderVideoRequest) (string, er
 		req.StepParam.RenderWidth = req.PreviewWidth
 		req.StepParam.RenderHeight = req.PreviewHeight
 	} else {
-		preparedReq, err := prepareSubtitleRenderLayout(req, getResolution, convertToVertical)
+		width, height, err := getResolution(req.InputVideo)
 		if err != nil {
-			return "", fmt.Errorf("renderSubtitleFile prepare subtitle layout error: %w", err)
+			return "", err
 		}
-		req = preparedReq
+		if !req.Horizontal && width > height {
+			scaledHeight := int(math.Round(float64(height)*720/float64(width)/2)) * 2
+			req.CompositionFilter = fmt.Sprintf("scale=720:%d,pad=720:1280:0:250:black", scaledHeight)
+			width, height = 720, 1280
+		}
+		stepParam.RenderWidth, stepParam.RenderHeight = width, height
 	}
+
+	stepParam.TaskPtr.ReportProgress(types.TaskProgress{Phase: "preparing_render", Percent: 30, Message: "正在准备字幕样式和视频编码"})
 	if err := validatePackagedSubtitleFonts(req.StepParam.SubtitleStyle); err != nil {
 		return "", fmt.Errorf("renderSubtitleFile subtitle fonts error: %w", err)
 	}
-	if err := srtToAss(req.SubtitleFile, assPath, req.Horizontal, req.StepParam); err != nil {
-		return "", fmt.Errorf("renderSubtitleFile srtToAss error: %w", err)
+	var compileErr error
+	if req.DocumentFile != "" {
+		data, err := os.ReadFile(req.DocumentFile)
+		var doc SubtitleDocument
+		if err == nil {
+			err = json.Unmarshal(data, &doc)
+		}
+		if err == nil {
+			doc.Width, doc.Height, doc.Horizontal = stepParam.RenderWidth, stepParam.RenderHeight, req.Horizontal
+			var ass string
+			ass, err = CompileSubtitleDocument(doc, stepParam.SubtitleStyle)
+			if err == nil {
+				err = os.WriteFile(assPath, []byte(ass), 0600)
+			}
+		}
+		compileErr = err
+	} else {
+		compileErr = srtToAss(req.SubtitleFile, assPath, req.Horizontal, req.StepParam)
+	}
+	if compileErr != nil {
+		return "", fmt.Errorf("renderSubtitleFile srtToAss error: %w", compileErr)
 	}
 	args, _ := buildEmbedSubtitleArgs(req)
-	cmd := exec.CommandContext(ctx, storage.FfmpegPath, args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runFFmpegProgress(ctx, args, req.InputVideo, "rendering_video", "正在编码并合成字幕视频", stepParam.TaskPtr, 35, 98)
 	if err != nil {
 		return "", fmt.Errorf("renderSubtitleFile ffmpeg error: %w, output: %s", err, string(output))
 	}
@@ -145,6 +178,7 @@ func renderSubtitleFile(ctx context.Context, req RenderVideoRequest) (string, er
 			return "", fmt.Errorf("renderSubtitleFile preview alpha error: %w", err)
 		}
 	}
+	stepParam.TaskPtr.ReportProgress(types.TaskProgress{Phase: "collecting_outputs", Percent: 99, Message: "视频编码完成，正在整理输出文件"})
 	return req.OutputFile, nil
 }
 
@@ -195,19 +229,26 @@ func transparentSubtitlePreview(filename string, width, height int) error {
 	return closeErr
 }
 
+type subtitleFontEntry struct {
+	Family  string   `json:"family"`
+	File    string   `json:"file"`
+	SHA256  string   `json:"sha256"`
+	Scripts []string `json:"scripts"`
+}
+
 type subtitleFontManifest struct {
-	Version int `json:"version"`
-	Fonts   []struct {
-		Family string `json:"family"`
-		File   string `json:"file"`
-		SHA256 string `json:"sha256"`
-	} `json:"fonts"`
+	Version       int                 `json:"version"`
+	Fonts         []subtitleFontEntry `json:"fonts"`
+	FallbackFonts []subtitleFontEntry `json:"fallbackFonts"`
 }
 
 func validatePackagedSubtitleFonts(styleSet *subtitlestyle.StyleSet) error {
 	resourceRoot := strings.TrimSpace(os.Getenv("KRILLINAI_RESOURCE_ROOT"))
-	if resourceRoot == "" || styleSet == nil {
+	if resourceRoot == "" {
 		return nil
+	}
+	if styleSet == nil {
+		styleSet = subtitlestyle.DefaultStyleSet()
 	}
 	fontsDir := filepath.Join(resourceRoot, "fonts")
 	manifestPath := filepath.Join(fontsDir, "manifest.json")
@@ -219,11 +260,11 @@ func validatePackagedSubtitleFonts(styleSet *subtitlestyle.StyleSet) error {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return fmt.Errorf("creator subtitle font manifest invalid: %w", err)
 	}
-	if manifest.Version != 1 || len(manifest.Fonts) == 0 {
+	if (manifest.Version != 1 && manifest.Version != 2) || len(manifest.Fonts) == 0 || (manifest.Version == 2 && len(manifest.FallbackFonts) == 0) {
 		return fmt.Errorf("creator subtitle font manifest invalid")
 	}
 	available := make(map[string]bool, len(manifest.Fonts))
-	for _, font := range manifest.Fonts {
+	for _, font := range append(manifest.Fonts, manifest.FallbackFonts...) {
 		if strings.TrimSpace(font.Family) == "" || strings.TrimSpace(font.File) == "" || len(font.SHA256) != 64 {
 			return fmt.Errorf("creator subtitle font manifest contains an invalid entry")
 		}
@@ -235,6 +276,9 @@ func validatePackagedSubtitleFonts(styleSet *subtitlestyle.StyleSet) error {
 		actual := fmt.Sprintf("%x", sha256.Sum256(content))
 		if !strings.EqualFold(actual, font.SHA256) {
 			return fmt.Errorf("creator subtitle font hash mismatch: %s", font.File)
+		}
+		if available[font.Family] {
+			return fmt.Errorf("creator subtitle font alias duplicated: %s", font.Family)
 		}
 		available[font.Family] = true
 	}

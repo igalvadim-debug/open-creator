@@ -1,9 +1,0 @@
-# open-creator LOCAL — только локальные движки. Внешних AI API нет.
-# LLM/Embeddings: llama.cpp бинарь ./local-stack/bin/llama-server (не pip)
-yt-dlp>=2024.10.0          # загрузка видео (утилита, внешний сервис допустим)
-faster-whisper>=1.0.0      # STT локально (Whisper, веса в ./local-stack/models/whisper)
-piper-tts>=1.2.0           # TTS локально (голоса .onnx в ./local-stack/models/tts)
-lancedb>=0.6.0             # векторная база локально (./lancedb_context)
-pyarrow>=15.0.0
-numpy>=1.26
-# опционально: coqui-tts (XTTS-v2), f5-tts, whisperx — см. README_LOCAL.md
