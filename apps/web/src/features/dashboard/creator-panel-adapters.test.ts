@@ -4,6 +4,7 @@ import { createLocalizedCopy } from '../../i18n/localized-copy.js';
 import {
   videoTranslationPanelAdapter,
   videoGenerationPanelAdapter,
+  videoDownloadPanelAdapter,
   creatorPanelAdapterFor,
   stickmanVideoPanelAdapter,
   type CreatorPanelLocalize
@@ -11,6 +12,18 @@ import {
 
 const zh: CreatorPanelLocalize = value => value;
 const en: CreatorPanelLocalize = (_zh, value) => value;
+
+describe('video download controls', () => {
+  it('describes live pause and process recovery without calling them active transfer', () => {
+    const paused = { ...stage('download', '', 'running', null, 'download'),
+      progress: { phase: 'downloading', percent: 42, downloadControl: 'paused' } };
+    expect(videoDownloadPanelAdapter.runningProgressText?.(paused, videoDownloadPanelAdapter.readStageProgress(paused, zh), zh))
+      .toBe('下载已暂停，可继续下载');
+    const reconnecting = { ...paused, progress: { phase: 'preparing_download', percent: 42, resumedFromStageRunId: 'previous' } };
+    expect(videoDownloadPanelAdapter.runningProgressText?.(reconnecting, videoDownloadPanelAdapter.readStageProgress(reconnecting, en), en))
+      .toBe('Reconnecting to resume download');
+  });
+});
 
 describe('Remotion preparation progress', () => {
   it('uses the shared stickman adapter without exposing transcription or internal dependency fields', () => {
@@ -82,6 +95,97 @@ describe('shared native image progress', () => {
 });
 
 describe('video translation component progress', () => {
+  it.each(['zh-CN', 'en-US', 'sv-SE'] as const)('shows saved drafts and pending review without claiming final completion in %s', language => {
+    const localize = createLocalizedCopy(language);
+    const running = { ...stage('subtitle', '', 'running', null, 'subtitle'), progress: {
+      phase: 'translating_subtitles', percent: 30, completed: 0, total: 56,
+      message: '初译 30/56；字幕完成 0/56；正在审校、排版'
+    } };
+    const progress = videoTranslationPanelAdapter.readStageProgress(running, localize);
+    expect(progress).toMatchObject({ percent: 30, completed: 0, total: 56, showMessage: true, showTiming: true });
+    expect(progress.message).toContain('30/56');
+    expect(progress.message).toContain('0/56');
+    expect(progress.message).not.toContain('Waiting for the translation service');
+    expect(videoTranslationPanelAdapter.runningProgressText?.(running, progress, localize)).toContain('0/56');
+    if (language !== 'zh-CN') expect(progress.message).not.toMatch(/\p{Script=Han}/u);
+    for (const message of ['正在整理原文翻译单元', '初译 0/56；字幕完成 0/56；正在整理字幕语境 1/2 段', '初译 30/56；字幕完成 0/56；翻译服务暂时失败，正在重试']) {
+      const detail = videoTranslationPanelAdapter.readStageProgress({ ...running, progress: { ...running.progress, message } }, localize);
+      expect(detail.message).not.toContain('Waiting for the translation service');
+      if (language !== 'zh-CN') expect(detail.message).not.toMatch(/\p{Script=Han}/u);
+    }
+  });
+
+  it('does not display unrecognized translation service messages', () => {
+    const running = { ...stage('subtitle', '', 'running', null, 'subtitle'), progress: {
+      phase: 'translating_subtitles', percent: 15, message: '初译 1/56；字幕完成 0/56；private provider route'
+    } };
+    expect(videoTranslationPanelAdapter.readStageProgress(running, en).message).not.toContain('private provider route');
+  });
+
+  it('keeps saved sentence counts and timing visible during legacy translation recovery', () => {
+    const running = { ...stage('subtitle', '', 'running', null, 'subtitle'), progress: {
+      phase: 'recovering_translation', percent: 62, completed: 38, total: 56, message: 'private provider diagnostic'
+    } };
+    const progress = videoTranslationPanelAdapter.readStageProgress(running, zh);
+    expect(progress).toMatchObject({ percent: 62, completed: 38, total: 56, showTiming: true, showMessage: true });
+    expect(progress.message).toContain('已有结果已保留');
+    expect(progress.message).not.toContain('private provider');
+    expect(videoTranslationPanelAdapter.runningProgressText?.(running, progress, zh)).toContain('38/56');
+  });
+
+  it('shows actual completed sentence counts and elapsed time while translating', () => {
+    const running = { ...stage('subtitle', '', 'running', null, 'subtitle'), progress: {
+      phase: 'translating_subtitles', percent: 5, completed: 0, total: 52
+    } };
+    const initial = videoTranslationPanelAdapter.readStageProgress(running, zh);
+    expect(initial).toMatchObject({ percent: 5, completed: 0, total: 52, showTiming: true, showMessage: true });
+    expect(videoTranslationPanelAdapter.runningProgressText?.(running, initial, zh)).toBe('翻译字幕，已完成 0/52 句');
+    const later = videoTranslationPanelAdapter.readStageProgress({ ...running, progress: {
+      ...running.progress, percent: 50, completed: 26
+    } }, en);
+    expect(videoTranslationPanelAdapter.runningProgressText?.(running, later, en)).toBe('Translating subtitles, 26/52 sentences completed');
+    expect(later.message).toContain('Waiting for the translation service');
+    expect(videoTranslationPanelAdapter.readStageProgress({ ...running, progress: { phase: 'collecting_outputs', percent: 98 } }, zh).showTiming).toBe(false);
+  });
+
+  it.each(['zh-CN', 'en-US', 'sv-SE'] as const)('shows overlapping audio work and current sentence progress in %s', language => {
+    const localize = createLocalizedCopy(language);
+    const running = { ...stage('subtitle', '', 'running', null, 'subtitle'), progress: {
+      phase: 'processing_audio', percent: 46, completed: 1, total: 4,
+      message: '音频分段 4/4；语音识别 3/4 段；字幕翻译 1/4 段；第 4 段识别 45%；第 2 段已翻译 5/12 句'
+    } };
+    const progress = videoTranslationPanelAdapter.readStageProgress(running, localize);
+    expect(progress).toMatchObject({ showMessage: true, showTiming: true, percent: 46, completed: 1, total: 4 });
+    expect(progress.message).toContain('3/4');
+    expect(progress.message).toContain('5/12');
+    expect(progress.message).toContain('45%');
+    expect(videoTranslationPanelAdapter.runningProgressText?.(running, progress, localize)).toContain('1/4');
+    if (language !== 'zh-CN') expect(progress.message).not.toMatch(/\p{Script=Han}/u);
+  });
+
+  it.each([
+    ['downloading_media', '正在下载视频：12.0 MiB / 24.0 MiB；2.0 MiB/s；预计剩余 6 秒', '12.0 MiB / 24.0 MiB'],
+    ['extracting_audio', '正在提取音频；已处理 12 秒 / 60 秒', '12 s / 60 s'],
+    ['preparing_render', '正在转换竖屏画面；已处理 12 秒 / 60 秒', '12 s / 60 s'],
+    ['rendering_video', '正在编码并合成字幕视频；已处理 12 秒 / 60 秒', '12 s / 60 s'],
+    ['assembling_voice', '正在拼接配音音频；已处理 12 秒', '12 s'],
+    ['muxing_voice', '正在合并配音和视频；已处理 12 秒 / 60 秒', '12 s / 60 s']
+  ])('shows real media details and timing for %s', (phase, message, expected) => {
+    const running = { ...stage('render', '', 'running', null, 'render-horizontal'), progress: { phase, percent: 45, message } };
+    const progress = videoTranslationPanelAdapter.readStageProgress(running, en);
+    expect(progress).toMatchObject({ showMessage: true, showTiming: true, percent: 45 });
+    expect(progress.message).toContain(expected);
+    expect(progress.message).not.toMatch(/\p{Script=Han}/u);
+  });
+
+  it('reports actual generated voice segments from standard fields', () => {
+    const running = { ...stage('tts', '', 'running', null, 'tts'), progress: { phase: 'generating_voice', percent: 45, completed: 7, total: 20, message: '已生成配音 7/20 段' } };
+    const progress = videoTranslationPanelAdapter.readStageProgress(running, en);
+    expect(progress).toMatchObject({ showTiming: true, showMessage: true, completed: 7, total: 20 });
+    expect(videoTranslationPanelAdapter.runningProgressText?.(running, progress, en)).toBe('Generating dubbing, 7/20 segments completed');
+    expect(progress.message).toContain('7/20');
+  });
+
   it.each(['zh-CN', 'en-US', 'sv-SE'] as const)('keeps caption fallback visible during preparation, transcription and after success in %s', language => {
     const localize = createLocalizedCopy(language);
     const running = { ...stage('subtitle', '', 'running', null, 'subtitle'), progress: {

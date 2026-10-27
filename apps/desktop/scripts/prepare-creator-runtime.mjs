@@ -20,6 +20,9 @@ import { fileURLToPath } from 'node:url';
 import * as fontkit from 'fontkit';
 import { verifyRuntimeExecutable } from './runtime-executable-check.mjs';
 import { stripMacNodeRuntime } from './prepare-creator-node.mjs';
+import { creatorNlpLockPath, prepareCreatorNlpRuntime } from './creator-nlp-runtime.mjs';
+import { krillinBuildIdentity, verifyKrillinBuild } from '../../../scripts/krillinai-build-contract.mjs';
+import { verifyCreatorRuntimeBuild } from './creator-runtime-build.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, '..');
@@ -54,6 +57,10 @@ const vendorVersions = readVendorVersions();
 const cliVersion = krillinBuild.componentVersion;
 const sourceCommit = krillinBuild.sourceCommit;
 const sourceSha256 = krillinBuild.sourceSha256;
+const krillinBuildRecord = {
+  buildRecipeSha256: krillinBuild.buildRecipeSha256,
+  cliSha256: krillinBuild.binaries['krillinai-cli'].sha256
+};
 rmSync(outputRoot, { recursive: true, force: true });
 mkdirSync(binDir, { recursive: true });
 const subtitleFonts = prepareSubtitleFonts();
@@ -75,6 +82,20 @@ for (const [name, configured, vendored] of externalInputs) {
   copyExecutable(source, target);
 }
 const ytDlpRuntime = prepareYtDlpRuntime(vendorVersions);
+const nlpPythonRoot = ytDlpRuntime.descriptor.mode === 'python'
+  ? join(outputRoot, 'yt-dlp-runtime', 'python')
+  : join(outputRoot, 'nlp-runtime', 'python');
+if (ytDlpRuntime.descriptor.mode !== 'python') {
+  mkdirSync(dirname(nlpPythonRoot), { recursive: true });
+  extractPythonRuntime(join(vendorRoot, 'python-runtime.tar.gz'), dirname(nlpPythonRoot));
+  removePythonBytecodeCaches(nlpPythonRoot);
+  clearMacOSFileMetadata(nlpPythonRoot, true);
+}
+const nlpExecutable = portablePythonExecutable(nlpPythonRoot, targetPlatform);
+const nlpRuntime = prepareCreatorNlpRuntime({
+  vendorRoot, outputRoot, pythonRoot: nlpPythonRoot, pythonExecutable: nlpExecutable,
+  platform: targetPlatform, arch: targetArch
+});
 const javascriptRuntime = prepareYtDlpJavascriptRuntime(vendorVersions);
 ytDlpRuntime.descriptor.javascriptRuntime = javascriptRuntime.descriptor;
 ytDlpRuntime.resourcePaths.push(...javascriptRuntime.resourcePaths);
@@ -95,17 +116,25 @@ const buildRecord = {
   cliVersion,
   sourceCommit,
   sourceSha256,
+  krillinBuild: krillinBuildRecord,
   ytDlp: ytDlpRuntime.descriptor,
+  nlp: nlpRuntime.descriptor,
   subtitleFonts: {
     manifestSha256: subtitleFonts.manifestSha256,
     resourceCount: subtitleFonts.resourcePaths.length
   },
   integrationPatchSha256: hashFiles([
     join(rootDir, 'scripts', 'build-krillinai.mjs'),
+    join(rootDir, 'scripts', 'download-go-modules.mjs'),
+    join(rootDir, 'scripts', 'krillinai-build-contract.mjs'),
+    join(scriptDir, 'creator-runtime-build.mjs'),
     join(scriptDir, 'install-creator-runtime-dependencies.mjs'),
     join(scriptDir, 'creator-runtime-releases.mjs'),
     join(scriptDir, 'prepare-creator-runtime.mjs'),
     join(scriptDir, 'prepare-creator-node.mjs'),
+    join(scriptDir, 'creator-nlp-runtime.mjs'),
+    join(scriptDir, 'install-creator-nlp-wheels.py'),
+    creatorNlpLockPath,
     join(rootDir, 'apps', 'daemon', 'src', 'creator', 'krillin', 'adapter.ts'),
     join(rootDir, 'apps', 'daemon', 'src', 'creator', 'krillin', 'cli-runner.ts'),
     join(rootDir, 'apps', 'daemon', 'src', 'creator', 'krillin', 'config-bridge.ts'),
@@ -119,33 +148,38 @@ const buildRecord = {
 const buildRecordPath = join(outputRoot, 'build-record.json');
 writeFileSync(buildRecordPath, `${JSON.stringify(buildRecord, null, 2)}\n`);
 
-const resourcePaths = [
+const resourcePaths = [...new Set([
   primaryExecutablePath,
   ...externalInputs.map(([name]) => join(binDir, `${name}${executableSuffix}`)),
   ...ytDlpRuntime.resourcePaths,
+  ...nlpRuntime.resourcePaths,
+  ...(ytDlpRuntime.descriptor.mode === 'python' ? [] : listFiles(dirname(nlpPythonRoot))),
   ...subtitleFonts.resourcePaths,
   subtitleStylePath,
   buildRecordPath
-];
+])];
 const manifest = {
   version: 1,
   runtimeMode,
   cliVersion,
   sourceCommit,
   sourceSha256,
+  krillinBuild: krillinBuildRecord,
   integrationPatchSha256: buildRecord.integrationPatchSha256,
   platform: targetPlatform,
   arch: targetArch,
   ytDlp: ytDlpRuntime.descriptor,
+  nlp: nlpRuntime.descriptor,
   resources: resourcePaths.map(path => ({
     path: relative(outputRoot, path).replaceAll('\\', '/'),
     sha256: hashFile(path),
-    kind: path.startsWith(binDir) || ytDlpRuntime.executablePaths.includes(path)
+    kind: path.startsWith(binDir) || ytDlpRuntime.executablePaths.includes(path) || path === nlpExecutable
       ? 'executable'
       : 'asset'
   }))
 };
 writeFileSync(join(outputRoot, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+verifyCreatorRuntimeBuild(outputRoot, targetPlatform, targetArch, { buildRoot: krillinBuildRoot });
 console.log(JSON.stringify({ ok: true, outputRoot, resources: manifest.resources.length }));
 
 function prepareSubtitleFonts() {
@@ -155,7 +189,7 @@ function prepareSubtitleFonts() {
   }
   const sourceManifest = JSON.parse(readFileSync(sourceManifestPath, 'utf8'));
   if (
-    sourceManifest?.version !== 1
+    ![1, 2].includes(sourceManifest?.version)
     || !Array.isArray(sourceManifest.fonts)
     || sourceManifest.fonts.length !== 9
     || !Array.isArray(sourceManifest.licenses)
@@ -170,10 +204,13 @@ function prepareSubtitleFonts() {
   mkdirSync(runtimeLicensesDir, { recursive: true });
   const resourcePaths = [];
   const runtimeFonts = [];
+  const runtimeFallbackFonts = [];
+  if (sourceManifest.version === 2 && (!Array.isArray(sourceManifest.fallbackFonts) || !sourceManifest.fallbackFonts.length)) throw new Error('Creator fallback font manifest is invalid');
   const seenAliases = new Set();
-  for (const entry of sourceManifest.fonts) {
+  for (const entry of [...sourceManifest.fonts, ...(sourceManifest.fallbackFonts ?? [])]) {
+    const fallback = Array.isArray(entry.scripts);
     if (
-      !['sans', 'serif', 'rounded'].includes(entry?.preset)
+      (!fallback && !['sans', 'serif', 'rounded'].includes(entry?.preset))
       || !['regular', 'medium', 'bold'].includes(entry?.weight)
       || ![400, 500, 700].includes(entry?.weightValue)
       || typeof entry?.family !== 'string'
@@ -212,7 +249,8 @@ function prepareSubtitleFonts() {
     const target = join(runtimeFontsDir, targetName);
     copyFileSync(desktopSource, target);
     resourcePaths.push(target);
-    runtimeFonts.push({
+    (fallback ? runtimeFallbackFonts : runtimeFonts).push({
+      ...(fallback ? { scripts: entry.scripts, sample: entry.sample } : {}),
       preset: entry.preset,
       weight: entry.weight,
       weightValue: entry.weightValue,
@@ -260,6 +298,7 @@ function prepareSubtitleFonts() {
     version: sourceManifest.version,
     sources: sourceManifest.sources,
     fonts: runtimeFonts,
+    ...(sourceManifest.version === 2 ? { fallbackFonts: runtimeFallbackFonts } : {}),
     licenses: runtimeLicenses
   }, null, 2)}\n`);
   resourcePaths.push(runtimeManifestPath);
@@ -279,6 +318,14 @@ function assertSubtitleFontMetadata(path, entry) {
   ) {
     throw new Error(`Creator subtitle font metadata mismatch: ${path}`);
   }
+  if (entry.scripts) {
+    if (!entry.scripts.length || !entry.sample || (!entry.scripts.includes('Hang') && (!font.GSUB || !font.GPOS))) throw new Error(`Creator fallback font shaping metadata missing: ${path}`);
+    for (const character of entry.sample) {
+      if (!character.trim()) continue;
+      if (!font.hasGlyphForCodePoint(character.codePointAt(0))) throw new Error(`Creator fallback font lacks ${character}: ${path}`);
+    }
+  }
+
 }
 
 function resolveAssetPath(root, path) {
@@ -299,6 +346,9 @@ function ensureKrillinBuild() {
     cwd: rootDir,
     env: {
       ...process.env,
+      OPENCREATOR_VERSION: JSON.parse(readFileSync(join(desktopDir, 'package.json'), 'utf8')).version,
+      OPENCREATOR_KRILLINAI_TARGET_PLATFORM: targetPlatform,
+      OPENCREATOR_KRILLINAI_TARGET_ARCH: targetArch,
       OPENCREATOR_DESKTOP_TARGET_PLATFORM: targetPlatform,
       OPENCREATOR_DESKTOP_TARGET_ARCH: targetArch,
       OPENCREATOR_KRILLINAI_BUILD_OUTPUT: krillinBuildRoot
@@ -308,29 +358,9 @@ function ensureKrillinBuild() {
 }
 
 function readKrillinBuildManifest() {
-  const path = join(krillinBuildRoot, 'manifest.json');
-  if (!existsSync(path)) {
-    throw new Error(`KrillinAI build manifest is missing: ${path}`);
-  }
-  const manifest = JSON.parse(readFileSync(path, 'utf8'));
-  const cli = manifest?.binaries?.['krillinai-cli'];
-  const server = manifest?.binaries?.['krillinai-server'];
-  if (
-    manifest?.version !== 1
-    || manifest.component !== 'opencreator-krillinai'
-    || typeof manifest.componentVersion !== 'string'
-    || typeof manifest.sourceCommit !== 'string'
-    || !/^[a-f0-9]{64}$/i.test(manifest.sourceSha256 ?? '')
-    || !/^[a-f0-9]{64}$/i.test(manifest.buildRecipeSha256 ?? '')
-    || manifest.platform !== targetPlatform
-    || manifest.arch !== targetArch
-    || manifest.buildVcs !== false
-    || typeof cli?.path !== 'string'
-    || typeof server?.path !== 'string'
-  ) {
-    throw new Error('KrillinAI build manifest is invalid or targets another platform');
-  }
-  return manifest;
+  return verifyKrillinBuild(krillinBuildRoot, krillinBuildIdentity({
+    rootDir, platform: targetPlatform, arch: targetArch
+  }));
 }
 
 function ensureExternalDependencies() {
@@ -338,7 +368,7 @@ function ensureExternalDependencies() {
     [process.env.OPENCREATOR_FFMPEG_PATH, join(vendorRoot, `ffmpeg${executableSuffix}`)],
     [process.env.OPENCREATOR_FFPROBE_PATH, join(vendorRoot, `ffprobe${executableSuffix}`)],
     [configuredYtDlpPath, join(vendorRoot, 'yt-dlp')],
-    [configuredYtDlpPath, join(vendorRoot, 'python-runtime.tar.gz')],
+    [undefined, join(vendorRoot, 'python-runtime.tar.gz')],
     [configuredYtDlpPath, join(vendorRoot, 'cacert.pem')],
     [process.env.OPENCREATOR_YT_DLP_NODE_PATH, join(vendorRoot, targetPlatform === 'win32' ? 'node-runtime.zip' : 'node-runtime.tar.gz')]
   ];

@@ -355,6 +355,7 @@ type SubtitleTaskStepParam struct {
 	MaxWordOneLine              int                     // 字幕一行最多显示多少个字
 	VideoWithTtsFilePath        string                  // 替换源视频的音频为tts结果后的视频路径
 	VttSwitch                   bool                    // 是否使用VTT格式字幕文件
+	RenderLineMode              string                  // Explicit language roles for multiline render input.
 	SubtitleStyle               *subtitlestyle.StyleSet // CLI/Agent 传入的字幕样式；nil 时使用默认样式
 	RenderWidth                 int                     // 当前待烧录字幕视频宽度，用于按字号估算自动换行
 	RenderHeight                int                     // 当前待烧录字幕视频高度，用于按字号估算自动换行
@@ -402,7 +403,11 @@ type SubtitleTask struct {
 	SpeechDownloadUrl     string         `json:"speech_download_url" gorm:"column:speech_download_url"` // 语音文件下载地址
 	CreateTime            int64          `json:"create_time" gorm:"column:create_time;autoCreateTime"`  // 创建时间
 	UpdateTime            int64          `json:"update_time" gorm:"column:update_time;autoUpdateTime"`  // 更新时间
-	progressReporter      func(uint8)
+
+	progressReporter            func(uint8)
+	translationProgressReporter func(completed, total int)
+	detailedProgressReporter    func(TaskProgress)
+	translationReports          subtitleTranslationReports
 }
 
 func (t *SubtitleTask) SetProgressReporter(reporter func(uint8)) {
@@ -410,6 +415,26 @@ func (t *SubtitleTask) SetProgressReporter(reporter func(uint8)) {
 		return
 	}
 	t.progressReporter = reporter
+}
+
+func (t *SubtitleTask) SetTranslationProgressReporter(reporter func(completed, total int)) {
+	if t != nil {
+		t.translationProgressReporter = reporter
+	}
+}
+
+func (t *SubtitleTask) SetTranslationProgress(completed, total int) {
+	if t == nil || total <= 0 {
+		return
+	}
+	if t.translationProgressReporter != nil {
+		t.translationProgressReporter(completed, total)
+		return
+	}
+	// Preserve the legacy video pipeline's translation range.
+	if completed > 0 {
+		t.SetProgress(40 + uint8(completed*50/total))
+	}
 }
 
 func (t *SubtitleTask) SetProgress(percent uint8) {
