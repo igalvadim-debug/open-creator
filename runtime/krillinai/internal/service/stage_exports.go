@@ -20,7 +20,10 @@ func (s Service) TranslateSubtitleBlocks(ctx context.Context, blocks []*util.Srt
 	if s.YouTubeSubtitleSrv == nil || s.YouTubeSubtitleSrv.translator == nil {
 		return nil, ErrYouTubeSubtitleServiceNotInitialized
 	}
-	return s.YouTubeSubtitleSrv.translator.BatchTranslateSrtBlocks(ctx, blocks, string(p.OriginLanguage), string(p.TargetLanguage), p.TaskPtr)
+	translator := s.YouTubeSubtitleSrv.translator.withTranslationRecovery(p.TaskBasePath, p.TaskPtr)
+	// 原始 SRT 导入保持原有路径，本轮意群切分只启用在音频与平台 VTT。
+	translator.sourceSegmentation = false
+	return translator.BatchTranslateSrtBlocks(ctx, blocks, string(p.OriginLanguage), string(p.TargetLanguage), p.TaskPtr)
 }
 
 type DownloadMediaResult struct {
@@ -48,6 +51,11 @@ func (s Service) PrepareMedia(ctx context.Context, stepParam *types.SubtitleTask
 }
 
 func (s Service) GenerateSubtitlesFromAudio(ctx context.Context, stepParam *types.SubtitleTaskStepParam) error {
+	if validator, ok := s.Transcriber.(interface{ ValidateLanguage(string) error }); ok && stepParam != nil {
+		if err := validator.ValidateLanguage(string(stepParam.OriginLanguage)); err != nil {
+			return err
+		}
+	}
 	if err := config.ValidateTranscriptionConfig(); err != nil {
 		return err
 	}
