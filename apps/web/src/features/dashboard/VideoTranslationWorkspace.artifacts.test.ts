@@ -7,10 +7,36 @@ import {
   subtitleCuesFromArtifact,
   subtitleCuesWithSource,
   videoTranslationRegenerationStage,
+  videoTranslationReportNotice,
   videoArtifactsForResultVersion
 } from './VideoTranslationWorkspace.js';
 
 describe('video translation result artifact selection', () => {
+  it('shows persisted partial and layout results when reopening a version', () => {
+    const l = (zh: string) => zh;
+    const base = { id: 'translated', kind: 'target_subtitle', version: 1 };
+    expect(videoTranslationReportNotice(artifact({ ...base, metadata: { translationStatus: 'partial', translationFailedCount: 2 } }), l))
+      .toContain('2 条字幕尚未翻译');
+    expect(videoTranslationReportNotice(artifact({ ...base, metadata: { translationStatus: 'layout_pending' } }), l))
+      .toContain('保留完整译文');
+    expect(videoTranslationReportNotice(artifact({ ...base, metadata: { translationStatus: 'complete' } }), l)).toBe('');
+  });
+  it('fills missing version settings with the current setup defaults while retaining explicit choices', () => {
+    const subtitle = artifact({ id: 'subtitles', kind: 'target_subtitle', version: 1, metadata: { resultVersion: 1, cues: [] } });
+    const original = { ...snapshot(1, { target_subtitle: [subtitle.id] }, [subtitle.id]), state: {} };
+    const state = { resultSnapshots: [original] };
+    expect(resultVersionsFromArtifacts([subtitle], state)[0]?.settings).toMatchObject({
+      sourceLanguage: 'en', targetLanguage: 'zh_cn', bilingual: true, subtitlePosition: 'top',
+      preferPlatformCaptions: true, composeVideo: false, dubbing: false, videoFormat: 'horizontal'
+    });
+    const saved = { ...original, state: { sourceLanguage: 'fr', targetLanguage: 'ja', bilingual: false,
+      preferPlatformCaptions: false, composeVideo: false, dubbing: false, videoFormat: 'vertical' } };
+    expect(resultVersionsFromArtifacts([subtitle], { ...fallbackState(), resultSnapshots: [saved] })[0]?.settings).toMatchObject({
+      sourceLanguage: 'fr', targetLanguage: 'ja', bilingual: false, preferPlatformCaptions: false,
+      composeVideo: false, dubbing: false, videoFormat: 'vertical'
+    });
+  });
+
   it('starts a new render from existing subtitles when video composition is enabled', () => {
     const version = resultVersion({
       settings: { composeVideo: false, videoFormat: 'horizontal' }
