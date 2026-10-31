@@ -1,3 +1,4 @@
+import { selectOption } from '../../test/select-option.js';
 import {
   createDefaultCreatorServicesConfig,
   type CodexModelListResponse,
@@ -7,13 +8,35 @@ import {
 } from '@opencreator/protocol';
 import { render, screen, waitFor } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConfirmDialogProvider } from '../../components/dialogs/ConfirmDialogProvider.js';
 import { LanguageProvider } from '../../i18n/LanguageProvider.js';
 import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
+import { readTranslationContinuation, saveTranslationContinuation } from '../dashboard/video-translation-continuation.js';
 import { CreatorServicesSettingsView } from './CreatorServicesSettingsView.js';
 
+afterEach(() => sessionStorage.clear());
+
 describe('CreatorServicesSettingsView', () => {
+  it.each(['valid', 'missing', 'failed'] as const)('returns to the pending composition only after a valid save (%s)', async outcome => {
+    saveTranslationContinuation({ jobId: 'pending', version: 2, type: 'voice', status: 'configure',
+      createdAt: Date.now(), returnPath: '#/workbench?tool=video-translation&jobId=pending' });
+    const service = createService(outcome === 'valid' ? ['tts.openai.apiKey'] : []);
+    if (outcome === 'failed') vi.mocked(service.saveConfig).mockRejectedValue(new Error('Save failed'));
+    const onReturn = vi.fn();
+    render(<LanguageProvider initialPreference="zh-CN"><CreatorServicesSettingsView connected service={service}
+      initialSection="tts" onReturnToTranslation={onReturn} /></LanguageProvider>);
+    await userEvent.click(await screen.findByRole('button', { name: '保存并继续配音合成' }));
+    await waitFor(() => expect(service.saveConfig).toHaveBeenCalledOnce());
+    if (outcome === 'valid') {
+      await waitFor(() => expect(onReturn).toHaveBeenCalledOnce());
+      expect(readTranslationContinuation()?.status).toBe('ready');
+    } else {
+      await waitFor(() => expect(screen.getByRole('button', { name: '保存并继续配音合成' })).toBeEnabled());
+      expect(onReturn).not.toHaveBeenCalled(); expect(readTranslationContinuation()?.status).toBe('configure');
+    }
+  });
+
   it('keeps the saved image service active until a detected local service is manually saved', async () => {
     const user = userEvent.setup();
     const service = createService();
@@ -242,11 +265,13 @@ describe('CreatorServicesSettingsView', () => {
     );
 
     await screen.findByRole('heading', { name: 'AI 服务' });
-    await user.selectOptions(screen.getByLabelText('供应商'), 'deepseek');
+    await selectOption(screen.getByLabelText('供应商'), 'deepseek');
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.deepseek.com');
     expect(screen.getByLabelText('模型')).toHaveValue('deepseek-v4-pro');
+    await user.click(screen.getByRole('combobox', { name: '模型' }));
     expect(screen.getByRole('option', { name: 'deepseek-v4-flash' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'MiniMax-M2.7' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('combobox', { name: '模型' }));
 
     await user.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(service.saveConfig).toHaveBeenCalled());
@@ -276,10 +301,11 @@ describe('CreatorServicesSettingsView', () => {
     );
 
     await screen.findByRole('heading', { name: 'AI 服务' });
-    await user.selectOptions(screen.getByLabelText('供应商'), 'openai');
+    await selectOption(screen.getByLabelText('供应商'), 'openai');
 
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.openai.com/v1');
     expect(screen.getByLabelText('模型')).toHaveValue('gpt-5.6-sol');
+    await user.click(screen.getByRole('combobox', { name: '模型' }));
     expect(screen.getByRole('option', { name: 'gpt-5.5' })).toBeInTheDocument();
   });
 
@@ -294,8 +320,8 @@ describe('CreatorServicesSettingsView', () => {
     );
 
     await screen.findByRole('heading', { name: 'AI 服务' });
-    await user.selectOptions(screen.getByLabelText('供应商'), 'deepseek');
-    await user.selectOptions(screen.getByLabelText('模型'), '__custom__');
+    await selectOption(screen.getByLabelText('供应商'), 'deepseek');
+    await selectOption(screen.getByLabelText('模型'), '__custom__');
 
     const customModel = screen.getByPlaceholderText('gpt-5.6-sol');
     await user.clear(customModel);
@@ -314,8 +340,9 @@ describe('CreatorServicesSettingsView', () => {
     );
 
     await screen.findByRole('heading', { name: 'AI 服务' });
-    await user.selectOptions(screen.getByLabelText('供应商'), 'minimax');
+    await selectOption(screen.getByLabelText('供应商'), 'minimax');
     expect(screen.getByLabelText('模型')).toHaveValue('MiniMax-M2.7');
+    await user.click(screen.getByRole('combobox', { name: '模型' }));
     expect(screen.getByRole('option', { name: 'MiniMax-M2.7-highspeed' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'gpt-5.5' })).not.toBeInTheDocument();
   });
@@ -352,26 +379,96 @@ describe('CreatorServicesSettingsView', () => {
 
     await user.click(screen.getByRole('combobox', { name: '语音识别服务' }));
     await user.click(screen.getByRole('option', { name: '火山引擎' }));
-    expect(screen.getByLabelText('Access Token')).toBeInTheDocument();
+    // Without an App ID the credential field is the newer-console API Key.
+    expect(screen.getByLabelText('API Key')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Access Token')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('App ID')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/X-Api-Key/).length).toBeGreaterThan(0);
     expect(screen.getByLabelText('资源 ID')).toHaveValue('volc.seedasr.auc');
-    expect(screen.getByText(/共用同一套 Access Token/)).toBeInTheDocument();
+    expect(screen.getByText(/旧版填 App ID 和 Access Token/)).toBeInTheDocument();
     expect(screen.queryByText('OSS 存储')).not.toBeInTheDocument();
+
+    // The explicit toggle selects the legacy labels immediately, even before
+    // an App ID is typed and the legacy request headers become active.
+    const legacyToggle = screen.getByRole('switch', { name: /使用旧版凭据/ });
+    expect(legacyToggle).not.toBeChecked();
+    await user.click(legacyToggle);
+    expect(screen.getByLabelText('Access Token')).toBeInTheDocument();
+    expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
+    // Scope by id: the TTS panel renders its own App ID field on the same page.
+    const asrAppId = document.getElementById('transcription-volcengine-app-id');
+    expect(asrAppId).not.toBeNull();
+    expect(asrAppId).toHaveValue('');
+    expect(screen.getByText(/App ID 留空时该凭据仍会作为新版 API Key/)).toBeInTheDocument();
+    // Filling the App ID completes the switch to the legacy pair.
+    await user.type(asrAppId!, '123456');
+    expect(screen.getByLabelText('Access Token')).toBeInTheDocument();
+    expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
+    // Turning the toggle back off clears the App ID and restores API Key mode.
+    await user.click(legacyToggle);
+    expect(document.getElementById('transcription-volcengine-app-id')).toBeNull();
+    expect(screen.getByLabelText('API Key')).toBeInTheDocument();
 
     await user.click(screen.getByRole('tab', { name: '配音服务' }));
     await user.click(screen.getByRole('combobox', { name: '服务商' }));
     await user.click(screen.getByRole('option', { name: '火山引擎' }));
     expect(screen.getByRole('combobox', { name: '接口 / 集群' }))
-      .toHaveTextContent('小模型 TTS（volcano_tts）');
-    expect(screen.getByLabelText('Access Token')).toBeInTheDocument();
+      .toHaveTextContent('豆包语音 2.0（推荐音质）');
+    expect(screen.getByLabelText('API Key')).toBeInTheDocument();
+    expect(screen.queryByLabelText('App ID')).not.toBeInTheDocument();
     expect(screen.getByLabelText('克隆 / 自定义 Speaker ID')).toBeInTheDocument();
-    expect(screen.getByText(/使用与语音识别相同的豆包语音控制台/)).toBeInTheDocument();
-    expect(screen.getByText(/豆包 2.0 \/ 声音复刻走 V3/)).toBeInTheDocument();
+    expect(screen.getByText(/豆包语音 2.0 使用 API Key/)).toBeInTheDocument();
+    const ttsLegacyToggle = screen.getByRole('switch', { name: /使用旧版凭据/ });
+    await user.click(ttsLegacyToggle);
+    expect(screen.getByLabelText('Access Token')).toBeInTheDocument();
+    expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
+    await user.click(ttsLegacyToggle);
+    expect(screen.getByLabelText('API Key')).toBeInTheDocument();
 
     await user.click(screen.getByRole('combobox', { name: '服务商' }));
     await user.click(screen.getByRole('option', { name: 'Edge TTS' }));
     expect(screen.getByText('无需填写凭据。运行时会使用本地 Edge TTS 服务。'))
       .toBeInTheDocument();
     expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
+  });
+
+  it('shows the legacy App ID and Access Token pair for a stored App ID', async () => {
+    const user = userEvent.setup();
+    const service = createService(['transcription.volcengine.appId', 'transcription.volcengine.accessToken']);
+    render(<CreatorServicesSettingsView connected service={service} modelService={createModelService()} initialSection="transcription" />);
+
+    await user.click(await screen.findByRole('combobox', { name: '语音识别服务' }));
+    await user.click(screen.getByRole('option', { name: '火山引擎' }));
+
+    // A stored App ID means the config is still on the legacy console, so the
+    // toggle starts on and the pair is shown instead of the API Key.
+    const legacyToggle = screen.getByRole('switch', { name: /使用旧版凭据/ });
+    expect(legacyToggle).toBeChecked();
+    expect(screen.getByLabelText('App ID')).toBeInTheDocument();
+    expect(screen.getByLabelText('Access Token')).toBeInTheDocument();
+    expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
+  });
+
+  it('clears a stored TTS App ID when switching to the API Key credential mode', async () => {
+    const user = userEvent.setup();
+    const service = createService(['tts.volcengine.appId', 'tts.volcengine.accessToken']);
+    render(<CreatorServicesSettingsView connected service={service} modelService={createModelService()} initialSection="tts" />);
+
+    await user.click(await screen.findByRole('combobox', { name: '服务商' }));
+    await user.click(screen.getByRole('option', { name: '火山引擎' }));
+    const legacyToggle = screen.getByRole('switch', { name: /使用旧版凭据/ });
+    expect(legacyToggle).toBeChecked();
+    expect(screen.getByLabelText('App ID')).toBeInTheDocument();
+    expect(screen.getByLabelText('Access Token')).toBeInTheDocument();
+
+    await user.click(legacyToggle);
+    expect(screen.queryByLabelText('App ID')).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText('API Key'), 'new-api-key');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => expect(service.saveConfig).toHaveBeenCalledOnce());
+    expect(vi.mocked(service.saveConfig).mock.calls[0]?.[0].tts.volcengine.appId).toBe('');
+    expect(vi.mocked(service.saveConfig).mock.calls[0]?.[1]).toEqual(['tts.volcengine.appId']);
   });
 
   it('confirms before saving a newly selected local Whisper provider', async () => {
@@ -496,7 +593,7 @@ describe('CreatorServicesSettingsView', () => {
     expect(screen.queryByLabelText('模型')).not.toBeInTheDocument();
     await user.click(screen.getByRole('combobox', { name: '服务商' }));
     await user.click(screen.getByRole('option', { name: 'GPT Image' }));
-    expect(screen.getByLabelText('模型')).toHaveValue('gpt-image-1');
+    expect(screen.getByLabelText('模型')).toHaveValue('gpt-image-2');
     await user.click(screen.getByRole('combobox', { name: '服务商' }));
     await user.click(screen.getByRole('option', { name: '可灵' }));
     expect(screen.getByLabelText('Access Key')).toHaveAttribute('type', 'password');
@@ -505,6 +602,7 @@ describe('CreatorServicesSettingsView', () => {
     await user.click(screen.getByRole('tab', { name: '视频生成' }));
     expect(screen.getByRole('combobox', { name: '服务商' })).toHaveTextContent('Seedance');
     expect(screen.getByLabelText('默认模型')).toHaveValue('doubao-seedance-2-5-260628');
+    await user.click(screen.getByRole('combobox', { name: '默认模型' }));
     expect(screen.getByRole('option', { name: 'doubao-seedance-2-5-260628' })).toBeInTheDocument();
     expect(screen.getByLabelText('API Key')).toHaveAttribute('type', 'password');
     await user.click(screen.getByRole('combobox', { name: '服务商' }));

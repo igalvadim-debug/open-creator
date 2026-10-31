@@ -16,6 +16,25 @@ import {
 } from '../../src/creator-services/config-store.js';
 
 describe('CreatorServicesConfigStore', () => {
+  it('migrates saved image settings and persists the replacement while retaining credentials and other models', async () => {
+    const legacy = createDefaultCreatorServicesConfig();
+    legacy.image.openai = { model: 'gpt-image-1', baseUrl: 'https://images.example.test/v1', apiKey: 'image-secret' };
+    legacy.llm.model = 'custom-text';
+    let saved = JSON.stringify(legacy);
+    const store = createCreatorServicesConfigStore({
+      getPassword: async () => saved,
+      setPassword: async value => { saved = value; },
+      deletePassword: async () => undefined
+    });
+    const loaded = await store.read();
+    expect(loaded.image.openai).toEqual({ ...legacy.image.openai, model: 'gpt-image-2' });
+    expect(loaded.llm.model).toBe('custom-text');
+    expect(legacy.image.openai.model).toBe('gpt-image-1');
+    await store.write(legacy);
+    expect(JSON.parse(saved).image.openai.model).toBe('gpt-image-2');
+    expect((await store.read()).image.openai.apiKey).toBe('image-secret');
+  });
+
   it('migrates legacy OSS settings and retains a custom region and endpoint across reloads', async () => {
     const legacy = createDefaultCreatorServicesConfig();
     const { region: _region, endpoint: _endpoint, ...oldOss } = legacy.transcription.aliyun.oss;
@@ -261,6 +280,25 @@ describe('CreatorServicesConfigStore', () => {
       .toEqual(current.tts.volcengine);
   });
 
+  it('clears an explicitly removed Volcengine App ID while retaining the API key', () => {
+    const current = createDefaultCreatorServicesConfig();
+    current.transcription.volcengine.appId = 'legacy-app-id';
+    current.transcription.volcengine.accessToken = 'new-api-key';
+    const presented = presentCreatorServicesConfig(current);
+
+    // `presented.config` has every credential blanked, which is what the client
+    // sends back; blank normally means "keep", so the App ID only disappears
+    // when it is explicitly listed.
+    const retained = retainCreatorServicesCredentials(
+      presented.config,
+      current,
+      ['transcription.volcengine.appId']
+    );
+
+    expect(retained.transcription.volcengine.appId).toBe('');
+    expect(retained.transcription.volcengine.accessToken).toBe('new-api-key');
+  });
+
   it('redacts and retains a configured FunASR API key', () => {
     const current = createDefaultCreatorServicesConfig();
     current.transcription.funasr.apiKey = 'funasr-secret';
@@ -432,7 +470,7 @@ describe('CreatorServicesConfigStore', () => {
     await expect(store.read()).resolves.toMatchObject({
       image: {
         provider: 'openai',
-        openai: { baseUrl: 'https://images.example.test/v1', apiKey: 'old-image-key', model: 'gpt-image-1' }
+        openai: { baseUrl: 'https://images.example.test/v1', apiKey: 'old-image-key', model: 'gpt-image-2' }
       },
       video: {
         provider: 'seedance',
