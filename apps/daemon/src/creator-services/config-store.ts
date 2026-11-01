@@ -3,8 +3,8 @@ import type {
   CreatorServicesConfigResponse,
   CreatorServicesCredentialField
 } from '@opencreator/protocol';
-import { createDefaultCreatorServicesConfig } from '@opencreator/protocol';
-import { z } from 'zod';
+import { createDefaultCreatorServicesConfig, migrateOpenAiImageModel } from '@opencreator/protocol';
+import { z } from 'zod/v3';
 import {
   readOpenCreatorConfig,
   updateOpenCreatorConfig
@@ -66,6 +66,9 @@ const volcengineAsrSchema = z.object({
   baseUrl: boundedString(2048)
 }).strict();
 const creatorServicesDefaults = createDefaultCreatorServicesConfig();
+const openAiImageSchema = openAiCompatibleSchema.extend({
+  model: boundedString(128).transform(migrateOpenAiImageModel)
+}).strict();
 const imageConfigDefault = creatorServicesDefaults.image;
 const videoConfigDefault = creatorServicesDefaults.video;
 const llmConfigSchema = openAiCompatibleSchema.extend({
@@ -77,7 +80,7 @@ const llmConfigSchema = openAiCompatibleSchema.extend({
 }));
 const imageConfigSchema = z.object({
   provider: z.enum(['openai', 'jimeng', 'kling', 'gemini', 'codex-native']),
-  openai: openAiCompatibleSchema,
+  openai: openAiImageSchema,
   jimeng: openAiCompatibleSchema,
   kling: klingAiSchema,
   gemini: openAiCompatibleSchema,
@@ -85,7 +88,7 @@ const imageConfigSchema = z.object({
 }).strict();
 const legacyImageConfigSchema = z.object({
   provider: z.literal('openai-compatible'),
-  openai: openAiCompatibleSchema
+  openai: openAiImageSchema
 }).strict().transform(value => ({
   ...structuredClone(imageConfigDefault),
   provider: 'openai' as const,
@@ -310,7 +313,7 @@ export function parseCreatorServicesConfig(value: unknown): CreatorServicesConfi
   return creatorServicesConfigSchema.parse(value) as CreatorServicesConfig;
 }
 
-const creatorCredentialPaths = [
+export const creatorCredentialPaths = [
   'llm.apiKey',
   'transcription.openai.apiKey',
   'transcription.aliyun.oss.accessKeyId',
@@ -442,7 +445,8 @@ export function presentCreatorServicesConfig(
 
 export function retainCreatorServicesCredentials(
   next: CreatorServicesConfig,
-  current: CreatorServicesConfig
+  current: CreatorServicesConfig,
+  clearCredentials: readonly CreatorServicesCredentialField[] = []
 ): CreatorServicesConfig {
   const merged = structuredClone(next);
   retainBlank(() => merged.llm.apiKey, value => { merged.llm.apiKey = value; }, current.llm.apiKey);
@@ -483,6 +487,7 @@ export function retainCreatorServicesCredentials(
   retainBlank(() => merged.video.kling.accessKey, value => { merged.video.kling.accessKey = value; }, current.video.kling.accessKey);
   retainBlank(() => merged.video.kling.secretKey, value => { merged.video.kling.secretKey = value; }, current.video.kling.secretKey);
   retainBlank(() => merged.video.veo.apiKey, value => { merged.video.veo.apiKey = value; }, current.video.veo.apiKey);
+  for (const path of clearCredentials) writePath(merged, path, '');
   return merged;
 }
 

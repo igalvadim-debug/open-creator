@@ -1,5 +1,77 @@
+import type { Locator } from '@playwright/test';
 import { createDefaultCreatorServicesConfig, type CreatorRuntimeComponentsResponse, type CreatorServicesCapabilitiesResponse, type CreatorYtDlpStatusResponse, type YouTubeConnectionState } from '@opencreator/protocol';
 import { test, expect, stubVideoDownloadProbe } from './fixtures/runtime.js';
+
+async function selectChoice(control: Locator, value: string) {
+  await control.click();
+  const listId = await control.getAttribute('aria-controls');
+  expect(listId).toBeTruthy();
+  await control.page().locator(`[id="${listId}"]`).locator(`[role="option"][data-value="${value}"]`).click();
+}
+
+test('视频翻译语言检索和选项在 Browser/Desktop 使用相同目录', async ({ browser, runtime }, testInfo) => {
+  const results: unknown[] = [];
+  const viewport = testInfo.project.name === 'chromium-mobile' ? { width: 390, height: 844 } : { width: 1280, height: 800 };
+  for (const platform of ['browser', 'desktop']) {
+    const context = await browser.newContext({ viewport, reducedMotion: 'reduce' });
+    const page = await context.newPage();
+    if (platform === 'desktop') await installDesktopBridge(page);
+    const { job } = await runtime.api<{ job: { id: string } }>('POST', '/creator/jobs', {
+      projectId: runtime.projectId, templateId: 'video-translation', templateVersion: 2,
+      state: { sourceLanguage: 'hi', targetLanguage: 'zh_cn', currentStep: 1, furthestStep: 1, workspacePhase: 'configure' }
+    });
+    try {
+      await runtime.openApp(page);
+      await page.goto(`${runtime.origin}/#/workbench?tool=video-translation&jobId=${encodeURIComponent(job.id)}`);
+      const source = page.getByRole('combobox', { name: '源语言', exact: true });
+      const target = page.getByRole('combobox', { name: '翻译为', exact: true });
+      await expect(source).toHaveAttribute('data-value', 'hi');
+      await source.click();
+      const options = page.getByRole('option');
+      await expect(options).toHaveCount(123);
+      for (const value of ['bo', 'si', 'am', 'nn', 'yue']) {
+        await expect(options.and(page.locator(`[data-value="${value}"]`))).toHaveCount(1);
+      }
+      await expect(options.and(page.locator('[data-value="pinyin"]'))).toHaveCount(0);
+      const sourceOptions = await options.evaluateAll(items => items.map(item => ({
+        value: item.getAttribute('data-value'), text: item.textContent
+      })));
+      await source.press('Escape');
+      await target.click();
+      await expect(options).toHaveCount(124);
+      const targetOptions = await options.allTextContents();
+      await target.press('Escape');
+      const loadedFonts = await page.evaluate(async () => Promise.all([
+        ['Noto Sans Ethiopic', 'አማርኛ'], ['Noto Sans Javanese', 'ꦧꦱꦗꦮ'],
+        ['Noto Sans Malayalam', 'മലയാളം'], ['Noto Sans Kannada', 'ಕನ್ನಡ'],
+        ['Noto Sans Oriya', 'ଓଡ଼ିଆ'], ['Noto Sans Georgian', 'ქართული'],
+        ['Noto Sans Armenian', 'Հայերեն'], ['Noto Sans Sinhala', 'සිංහල'],
+        ['Noto Serif Tibetan', 'བོད་སྐད་']
+      ].map(async ([family, sample]) => (await document.fonts.load(`16px "${family}"`, sample)).length)));
+      expect(loadedFonts).toEqual(Array(9).fill(1));
+      await source.click();
+      const search = page.getByRole('searchbox', { name: '搜索选项' });
+      await search.fill('阿拉伯');
+      const arabic = options.and(page.locator('[data-value="ar"]'));
+      await expect(arabic).toHaveText('العربية');
+      await expect(source).toHaveAttribute('data-value', 'hi');
+      await arabic.click();
+      await source.click();
+      await search.fill('हिन्दी');
+      await expect(options.and(page.locator('[data-value="hi"]'))).toBeVisible();
+      await expect(source).toHaveAttribute('data-value', 'ar');
+      for (const input of [source, target, search]) {
+        const box = await input.boundingBox();
+        expect(box).not.toBeNull();
+        expect(box!.x).toBeGreaterThanOrEqual(0);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      }
+      await source.press('Escape');
+      results.push({ source: sourceOptions, target: targetOptions, box: await source.boundingBox() });
+    } finally { await context.close(); }
+  }
+  expect(results[1]).toEqual(results[0]);
+});
 
 test('Windows YouTube 专用登录和完成在 Browser/Desktop 下保持一致', async ({ browser, runtime }, testInfo) => {
   const results: unknown[] = [];
@@ -191,11 +263,13 @@ test('扩展源语言与巴西葡萄牙语设置在 Browser/Desktop 下保存并
       const request = page.waitForRequest(req => req.url().endsWith('/actions')
         && req.postDataJSON()?.input?.patch?.sourceLanguage === 'pt');
       const source = page.getByRole('combobox', { name: '源语言', exact: true });
-      await expect(source.locator('option')).toHaveCount(14);
+      await source.click();
+      const options = page.getByRole('option');
+      await expect(options).toHaveCount(123);
       for (const value of ['es', 'fr', 'it', 'pt', 'id', 'th']) {
-        await expect(source.locator(`option[value="${value}"]`)).toHaveCount(1);
+        await expect(options.and(page.locator(`[data-value="${value}"]`))).toHaveCount(1);
       }
-      await source.selectOption('pt');
+      await options.and(page.locator('[data-value="pt"]')).click();
       const action = (await request).postDataJSON();
       const readSettings = async () => {
         const { job } = await runtime.api<{ job: { state: { sourceLanguage: string; targetLanguage: string; bilingual: boolean } } }>('GET', `/creator/jobs/${created.job.id}`);
@@ -203,9 +277,9 @@ test('扩展源语言与巴西葡萄牙语设置在 Browser/Desktop 下保存并
       };
       await expect.poll(readSettings).toEqual({ sourceLanguage: 'pt', targetLanguage: 'zh_cn', bilingual: true });
       await page.reload();
-      await expect(source).toHaveValue('pt');
-      await expect(page.getByRole('combobox', { name: '翻译为' })).toHaveValue('zh_cn');
-      await expect(page.getByRole('switch', { name: '双语字幕' })).toBeChecked();
+      await expect(source).toHaveAttribute('data-value', 'pt');
+      await expect(page.getByRole('combobox', { name: '翻译为' })).toHaveAttribute('data-value', 'zh_cn');
+      await expect.poll(readSettings).toEqual({ sourceLanguage: 'pt', targetLanguage: 'zh_cn', bilingual: true });
       results.push({ action: action.action, settings: await readSettings(),
         requested: { sourceLanguage: action.input.patch.sourceLanguage, targetLanguage: action.input.patch.targetLanguage, bilingual: action.input.patch.bilingual },
         options: await source.innerText(), sourceBox: await source.boundingBox() });
@@ -334,7 +408,7 @@ test('Agent 面板在 Browser/Desktop Bridge 下均不显示产物版本详情',
     try {
       await runtime.openApp(page);
       await page.goto(`${runtime.origin}/#/workbench?tool=image-generation&jobId=${created.job.id}`);
-      await expect(page.getByText('当前任务', { exact: true })).toBeVisible();
+      await expect(page.locator('.creator-collaboration-panel')).toBeVisible();
       await expect(page.getByText('产物版本与来源', { exact: true })).toHaveCount(0);
       const layout = await page.evaluate(() => {
         const panel = document.querySelector('.creator-collaboration-panel')!;
@@ -372,7 +446,7 @@ test('本地字幕导入在 Browser/Desktop Bridge 下保持相同命令和界�
       await page.goto(`${runtime.origin}/#/workbench?tool=video-translation&jobId=${created.job.id}`);
       const group = page.getByRole('group', { name: '导入已有字幕' });
       await group.getByRole('switch', { name: '导入已有字幕' }).click();
-      await group.getByRole('combobox', { name: '字幕类型' }).selectOption('target_subtitle');
+      await selectChoice(group.getByRole('combobox', { name: '字幕类型' }), 'target_subtitle');
       const request = page.waitForRequest(request => request.url().endsWith('/actions') && request.postDataJSON()?.action === 'import-subtitle');
       await group.getByLabel('UTF-8 SRT 文件').setInputFiles({ name: 'local.srt', mimeType: 'application/x-subrip', buffer: Buffer.from('1\n00:00:00,000 --> 00:00:01,000\nHello\n') });
       const action = (await request).postDataJSON();
@@ -586,19 +660,19 @@ test('各主页面标题行在 Browser/Desktop 下与左侧品牌行同轴', asy
       for (const { route, selector, height } of pages) {
         await page.evaluate(route => { window.location.hash = route; }, route);
         await expect(page.locator(selector).first()).toBeVisible();
-        const measured = await page.evaluate(selector => {
+        const measured = await page.locator(selector).first().evaluate(element => {
           const brand = document.querySelector('.sidebar-brand')?.getBoundingClientRect();
           const main = document.querySelector('.opencreator-main-pane')!;
           const mainBox = main.getBoundingClientRect();
           const referenceCenter = brand && brand.height > 0
             ? (brand.top + brand.bottom) / 2
             : mainBox.top + Number.parseFloat(getComputedStyle(main).paddingTop) + 34;
-          const title = document.querySelector(selector)!.getBoundingClientRect();
+          const title = element.getBoundingClientRect();
           return {
             centerOffset: Math.round((title.top + title.bottom) / 2 - referenceCenter),
             height: Math.round(title.height)
           };
-        }, selector);
+        });
         expect(Math.abs(measured.centerOffset), `${platform}: ${route}`).toBeLessThanOrEqual(1);
         if (height !== undefined) expect(measured.height, `${platform}: ${route}`).toBe(height);
         measurements.push(measured);
@@ -1122,8 +1196,8 @@ test('通用界面设置在 Browser/Desktop Bridge 下读取并写入相同 Runt
       const language = settings.getByRole('combobox', { name: '显示语言' });
       const storagePaths = settings.locator('#settings-default-project-root, #settings-output-root');
       await expect(lightButton).toHaveAttribute('aria-pressed', 'true');
-      await expect(permission).toHaveValue('workspace-write');
-      await expect(language).toHaveValue('zh-CN');
+      await expect(permission).toHaveAttribute('data-value', 'workspace-write');
+      await expect(language).toHaveAttribute('data-value', 'zh-CN');
       await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
       await expect(page.locator('html')).toHaveAttribute('data-accent', 'red');
       const readStoragePaths = () => storagePaths.evaluateAll(inputs => (
@@ -1180,8 +1254,8 @@ test('通用界面设置在 Browser/Desktop Bridge 下读取并写入相同 Runt
         theme: await page.locator('html').getAttribute('data-theme') ?? undefined,
         accent: await page.locator('html').getAttribute('data-accent') ?? undefined,
         lightSelected: await lightButton.getAttribute('aria-pressed'),
-        permission: await permission.inputValue(),
-        language: await language.inputValue(),
+        permission: await permission.getAttribute('data-value') ?? '',
+        language: await language.getAttribute('data-value') ?? '',
         storagePaths: await readStoragePaths(),
         storagePickerCount,
         boxes,
@@ -1345,7 +1419,7 @@ test('视频生成在 Browser/Desktop Bridge 下保持相同界面、请求和�
       state: {
         prompt: '雨夜中的未来城市，镜头平稳向前推进',
         provider: 'seedance',
-        model: 'doubao-seedance-2-0-260128',
+        model: 'doubao-seedance-2-5-260628',
         size: '1280x720',
         duration: 5,
         currentStep: 1,
@@ -1380,18 +1454,18 @@ test('视频生成在 Browser/Desktop Bridge 下保持相同界面、请求和�
 
       const workspace = page.getByRole('region', { name: '视频生成 操作区' });
       const panel = page.getByRole('complementary', { name: 'OpenCreator' });
-      const provider = workspace.getByRole('combobox', { name: '视频服务' });
+      const provider = workspace.getByRole('combobox', { name: '模型', exact: true });
       const model = workspace.getByRole('combobox', { name: '模型版本' });
       const format = workspace.getByRole('combobox', { name: '画幅' });
       const duration = workspace.getByRole('combobox', { name: '视频时长' });
-      await expect(provider).toHaveValue('seedance');
-      await expect(model).toHaveValue('doubao-seedance-2-0-260128');
-      await expect(format).toHaveValue('1280x720');
-      await expect(duration).toHaveValue('5');
-      await provider.selectOption('veo');
-      await expect(model).toHaveValue('veo-3.1-generate-preview');
-      await format.selectOption('720x1280');
-      await duration.selectOption('8');
+      await expect(provider).toHaveAttribute('data-value', 'seedance');
+      await expect(model).toHaveValue('Seedance 2.5');
+      await expect(format).toHaveAttribute('data-value', '1280x720');
+      await expect(duration).toHaveAttribute('data-value', '5');
+      await selectChoice(provider, 'veo');
+      await expect(model).toHaveValue('Veo 3.1');
+      await selectChoice(format, '720x1280');
+      await selectChoice(duration, '8');
 
       await expect.poll(async () => (
         await runtime.api<{
@@ -1406,7 +1480,7 @@ test('视频生成在 Browser/Desktop Bridge 下保持相同界面、请求和�
         currentStep: 1,
         furthestStep: 1
       });
-      await expect(panel).toContainText('竖屏 · 8s');
+      await expect(panel).toContainText('9:16 · 8s');
 
       const boxes: Record<
         string,
@@ -1658,7 +1732,8 @@ test('本地 Whisper 在 Browser/Desktop Bridge 下遵守相同 Runtime 能力�
 
   expect(results[1]!.text).toBe(results[0]!.text);
   expect(results[1]!.boxes).toEqual(results[0]!.boxes);
-  expect([...results[1]!.requests].sort()).toEqual([...results[0]!.requests].sort());
+  expect(normalizeParityRequests(results[1]!.requests))
+    .toEqual(normalizeParityRequests(results[0]!.requests));
   expect(results[1]!.transcription).toEqual(results[0]!.transcription);
   if (localProvider) {
     expect(results[0]!.transcription.provider).toBe(localProvider.provider);
@@ -1703,8 +1778,9 @@ test('火山引擎语音识别设置在 Browser/Desktop Bridge 下保持相同�
       await page.goto(`${runtime.origin}/#/settings?tab=ai-services&section=transcription`);
       await page.getByRole('combobox', { name: '语音识别服务' }).click();
       await page.getByRole('option', { name: '火山引擎' }).click();
-      await page.getByLabel('App ID').fill('parity-volcengine-app');
-      await page.getByLabel('Access Token').fill('parity-volcengine-token');
+      await page.getByRole('switch', { name: /使用旧版凭据/ }).click();
+      await page.getByLabel('App ID', { exact: true }).fill('parity-volcengine-app');
+      await page.getByLabel('Access Token', { exact: true }).fill('parity-volcengine-token');
       await page.getByRole('button', { name: '保存配置' }).click();
       await expect(page.getByText('配置已安全保存')).toBeVisible();
 
@@ -1721,6 +1797,23 @@ test('火山引擎语音识别设置在 Browser/Desktop Bridge 下保持相同�
         provider: 'volcengine',
         volcengine: { appId: '', accessToken: '' }
       });
+
+      // Switching to the new console must clear the stored legacy App ID,
+      // rather than treating the blank masked field as "keep existing".
+      await page.getByRole('switch', { name: /使用旧版凭据/ }).click();
+      await expect(page.getByLabel('App ID', { exact: true })).toHaveCount(0);
+      await page.getByLabel('API Key', { exact: true }).fill('parity-volcengine-api-key');
+      const saveResponse = page.waitForResponse(response =>
+        response.request().method() === 'PATCH'
+        && new URL(response.url()).pathname.endsWith('/creator-services/config')
+      );
+      await page.getByRole('button', { name: '保存配置' }).click();
+      expect((await saveResponse).ok()).toBe(true);
+      const apiKeySaved = await runtime.api<{ configuredCredentials: string[] }>(
+        'GET', '/creator-services/config'
+      );
+      expect(apiKeySaved.configuredCredentials).not.toContain('transcription.volcengine.appId');
+      expect(apiKeySaved.configuredCredentials).toContain('transcription.volcengine.accessToken');
     } finally {
       await context.close();
     }
@@ -1794,9 +1887,9 @@ test('短视频脚本在 Browser/Desktop Bridge 下保持相同界面、请求�
       const duration = workspace.getByRole('spinbutton', { name: '目标时长（秒）' });
       const tone = workspace.getByRole('combobox', { name: '表达语气' });
       await topic.fill('第一次参与开源项目的真实过程');
-      await platformSelect.selectOption('bilibili');
+      await selectChoice(platformSelect, 'bilibili');
       await duration.fill('90');
-      await tone.selectOption('professional');
+      await selectChoice(tone, 'professional');
 
       await expect.poll(async () => (
         await runtime.api<{
@@ -1848,7 +1941,8 @@ test('短视频脚本在 Browser/Desktop Bridge 下保持相同界面、请求�
 
   expect(results[1]!.text).toBe(results[0]!.text);
   expect(results[1]!.boxes).toEqual(results[0]!.boxes);
-  expect([...results[1]!.requests].sort()).toEqual([...results[0]!.requests].sort());
+  expect(normalizeParityRequests(results[1]!.requests))
+    .toEqual(normalizeParityRequests(results[0]!.requests));
   expect(results[1]!.state).toEqual(results[0]!.state);
 });
 
@@ -1909,10 +2003,10 @@ test('视频切片在 Browser/Desktop Bridge 下保持相同界面、请求和�
       await expect(workspace.getByRole('button', { name: '下一步：切片设置' }))
         .toBeEnabled();
       await workspace.getByRole('button', { name: '下一步：切片设置' }).click();
-      await workspace.getByRole('combobox', { name: '内容重点' }).selectOption('viral');
-      await workspace.getByRole('combobox', { name: '目标时长' }).selectOption('30-60');
+      await selectChoice(workspace.getByRole('combobox', { name: '内容重点' }), 'viral');
+      await selectChoice(workspace.getByRole('combobox', { name: '目标时长' }), '30-60');
       await workspace.getByRole('spinbutton', { name: '切片数量' }).fill('6');
-      await workspace.getByRole('combobox', { name: '输出画幅' }).selectOption('1:1');
+      await selectChoice(workspace.getByRole('combobox', { name: '输出画幅' }), '1:1');
       await expect(workspace.getByLabel('任务摘要')).toContainText('传播潜力优先');
       await expect(workspace.getByLabel('任务摘要')).toContainText('切片数量6');
 
@@ -1965,7 +2059,8 @@ test('视频切片在 Browser/Desktop Bridge 下保持相同界面、请求和�
 
   expect(results[1]!.text).toBe(results[0]!.text);
   expect(results[1]!.boxes).toEqual(results[0]!.boxes);
-  expect([...results[1]!.requests].sort()).toEqual([...results[0]!.requests].sort());
+  expect(normalizeParityRequests(results[1]!.requests))
+    .toEqual(normalizeParityRequests(results[0]!.requests));
   expect(results[1]!.state).toEqual(results[0]!.state);
   expect(results[0]!.requests).toContain('POST /creator/jobs/:jobId/actions');
 });
@@ -2212,12 +2307,12 @@ test('图像生成在桌面和移动视口创建、持久化并从项目中心�
   const prompt = '一间明亮的现代创意工作室，清晨自然光，真实摄影';
   await page.getByRole('textbox', { name: '提示词' }).fill(prompt);
   await expect(page).toHaveURL(/#\/workbench\?tool=image-generation&jobId=creator_job_/);
-  await page.getByRole('button', { name: '继续', exact: true }).click();
-  await expect(page.getByRole('radio', { name: '本机 Codex 生图', exact: true })).toBeChecked();
+  await expect(page.getByRole('combobox', { name: '模型', exact: true })).toHaveValue('本机 Codex 生图');
   await expect(page.getByRole('radio', { name: '4 张', exact: true })).toHaveCount(0);
-  await page.getByRole('radio', { name: 'GPT Image', exact: true }).click();
-  await page.getByRole('radio', { name: /横向/ }).click();
-  await page.getByRole('radio', { name: '高清', exact: true }).click();
+  await page.getByRole('combobox', { name: '模型', exact: true }).click();
+  await page.getByRole('option', { name: 'GPT Image', exact: true }).click();
+  await selectChoice(page.getByRole('combobox', { name: '图片画幅' }), '3:2');
+  await selectChoice(page.getByRole('combobox', { name: '图片质量' }), 'high');
   await page.getByRole('radio', { name: '4 张', exact: true }).click();
 
   const jobId = new URL(page.url()).hash.match(/jobId=([^&]+)/)?.[1];
@@ -2230,18 +2325,16 @@ test('图像生成在桌面和移动视口创建、持久化并从项目中心�
   }).toMatchObject({
     prompt,
     provider: 'openai',
-    size: '1536x1024',
-    quality: 'high',
-    candidateCount: 4,
-    currentStep: 1,
-    furthestStep: 1
+    aspectRatio: '3:2',
+    modelQuality: 'high',
+    candidateCount: 4
   });
   expect(runtime.readInvocationCount()).toBe(0);
 
   await page.reload();
   await expect(page.getByRole('heading', { name: '图像生成' })).toBeVisible();
-  await expect(page.getByRole('radio', { name: /横向/ })).toBeChecked();
-  await expect(page.getByRole('radio', { name: '高清', exact: true })).toBeChecked();
+  await expect(page.getByRole('combobox', { name: '图片画幅' })).toHaveAttribute('data-value', '3:2');
+  await expect(page.getByRole('combobox', { name: '图片质量' })).toHaveAttribute('data-value', 'high');
   await expect(page.getByRole('radio', { name: '4 张', exact: true })).toBeChecked();
 
   await page.goto(`${runtime.origin}/#/projects`);
@@ -2249,8 +2342,8 @@ test('图像生成在桌面和移动视口创建、持久化并从项目中心�
   await page.getByRole('button', { name: `打开项目 ${prompt}` }).click();
   await expect(page).toHaveURL(new RegExp(`jobId=${jobId}`));
   await expect(page.getByRole('heading', { name: '图像生成' })).toBeVisible();
-  await expect(page.getByRole('radio', { name: /横向/ })).toBeChecked();
-  await expect(page.getByRole('radio', { name: '高清', exact: true })).toBeChecked();
+  await expect(page.getByRole('combobox', { name: '图片画幅' })).toHaveAttribute('data-value', '3:2');
+  await expect(page.getByRole('combobox', { name: '图片质量' })).toHaveAttribute('data-value', 'high');
   await expect(page.getByRole('radio', { name: '4 张', exact: true })).toBeChecked();
 });
 
