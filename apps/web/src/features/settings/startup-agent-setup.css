@@ -5,6 +5,19 @@
   padding: 24px;
 }
 
+.startup-agent-setup__language { justify-self: end; width: min(280px, 100%); }
+.startup-agent-setup__language .language-select { width: 100%; }
+.startup-agent-setup__language .language-select-control input { height: 40px; padding-inline: 10px 38px; }
+.startup-agent-setup__language .language-select-control button {
+  width: 38px;
+  height: 38px;
+  min-height: 38px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.startup-agent-setup__language .language-select-search-icon { top: 13px; }
+
 .startup-agent-setup__eyebrow { color: var(--accent-strong); font-size: 13px; font-weight: 700; }
 .startup-agent-setup__card h1 { margin: 0; font-size: 27px; }
 .startup-agent-setup__card > .opencreator-mark { color: var(--accent-strong); }
@@ -26,7 +39,7 @@
 .startup-agent-setup__choices button { flex: 1; }
 .startup-agent-setup__card button,
 .startup-agent-setup__card input,
-.startup-agent-setup__card select {
+.startup-agent-setup__card :is(select, .app-select-trigger) {
   min-height: 40px;
   padding: 8px 12px;
   border: 1px solid var(--border);

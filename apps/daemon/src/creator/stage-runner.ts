@@ -25,11 +25,16 @@ import {
 } from './result-snapshots.js';
 import { currentStickmanScopedArtifacts } from './stickman/lineage.js';
 import type { CreatorTemplateRegistry, CreatorTemplateStage } from './templates/types.js';
+import { attachDownloadedTranslationSource, isBackgroundSourceDownload } from './templates/video-translation-source.js';
 import { videoTranslationArtifactRefsPatch } from './templates/video-translation-results.js';
+import { downloadWorkdirStageId } from './download/resume.js';
+import { createCreatorProcessControl, type CreatorProcessControl } from './process-tree.js';
 import {
   CreatorOutputValidationError,
   validateCreatorStageOutputs
 } from './output-validation.js';
+import type { CreatorTelemetrySink } from '../telemetry/creator.js';
+import { creatorStageTelemetryOutcome } from '../telemetry/creator.js';
 
 export type CreatorStageRunner = ReturnType<typeof createCreatorStageRunner>;
 
@@ -40,6 +45,7 @@ export function createCreatorStageRunner(input: {
   executors: CreatorExecutor[];
   workRoot: string;
   maxConcurrency?: number;
+  telemetry?: CreatorTelemetrySink;
   beforeRun?(job: CreatorJob, stageId: string): void | Promise<void>;
   onJobChanged?(job: CreatorJob): void;
   onStageChanged?(stage: CreatorStageRun): void;
@@ -48,6 +54,7 @@ export function createCreatorStageRunner(input: {
   const executors = new Map(input.executors.map(executor => [executor.id, executor]));
   const providerLedger = new CreatorProviderRequestLedger(input.repository, input.issueService);
   const active = new Map<string, AbortController>();
+  const processControls = new Map<string, CreatorProcessControl>();
   const laneTails = new Map<string, Promise<unknown>>();
   const waiters: Array<() => void> = [];
   let running = 0;
@@ -78,7 +85,9 @@ export function createCreatorStageRunner(input: {
       throw new CreatorExecutorError('creator_stage_not_found', 'Creator stage run was not found');
     }
     const jobId = queued.jobId;
-    const laneKey = queued.scopeKey === null
+    const laneKey = isBackgroundSourceDownload(queued)
+      ? `${jobId}:source-download`
+      : queued.scopeKey === null
       ? jobId
       : `${jobId}:${queued.stageId}:${queued.scopeKey}`;
     const previous = laneTails.get(laneKey) ?? Promise.resolve();
@@ -126,7 +135,10 @@ export function createCreatorStageRunner(input: {
           `Creator result version ${inputResultVersion} was not found`
         );
       }
-      const resolved = resolveCreatorStageInputs(job, stage.inputArtifacts, inputSnapshot?.artifactRefs, inputSnapshot?.state);
+      const pinnedDownloadProbe = job.templateId === 'video-download' && stageId === 'download'
+        && typeof stageRun.progress.probeArtifactId === 'string' ? stageRun.progress.probeArtifactId : undefined;
+      const resolved = resolveCreatorStageInputs(job, stage.inputArtifacts,
+        pinnedDownloadProbe === undefined ? inputSnapshot?.artifactRefs : { download_probe: [pinnedDownloadProbe] }, inputSnapshot?.state);
       updateStageRun({
         id: stageRun.id,
         status: resolved.missing.length === 0 ? 'queued' : 'failed',
@@ -160,28 +172,46 @@ export function createCreatorStageRunner(input: {
             });
           }
         });
+        emitStageFinished(stageRun.id);
         return input.repository.listStageRuns(jobId).find(candidate => candidate.id === stageRun!.id)!;
       }
       await input.beforeRun?.(input.repository.getJob(jobId)!, stageId);
+      const beforeStart = input.repository.getStageRun(stageRun.id);
+      if (beforeStart && ['succeeded', 'failed', 'canceled', 'interrupted'].includes(beforeStart.status)) return beforeStart;
       const controller = new AbortController();
       active.set(stageRun.id, controller);
-      const workdir = join(input.workRoot, jobId, stageRun.id);
+      const processControl = job.templateId === 'video-download' && stageId === 'download' && executor.supportsProcessPause
+        ? createCreatorProcessControl(controller.signal) : undefined;
+      if (processControl) processControls.set(stageRun.id, processControl);
+      const workdirStageId = downloadWorkdirStageId(job, stageRun);
+      const workdir = join(input.workRoot, jobId, workdirStageId);
       await mkdir(workdir, { recursive: true });
       if (controller.signal.aborted) {
         throw new CreatorExecutorError('creator_stage_canceled', 'Creator stage was canceled');
       }
-      updateStageRun({ id: stageRun.id, status: 'running' });
-      updateJob(input.repository, job, stage.jobCompletionPolicy === 'preserve' ? job.status : 'running', { currentStage: stageId }, input.onJobChanged);
+      updateStageRun({ id: stageRun.id, status: 'running',
+        ...(job.templateId === 'video-download' && stageId === 'download'
+          ? { progress: { downloadWorkdirStageRunId: workdirStageId } } : {}) });
+      const startedJob = requireJob(input.repository, jobId);
+      updateJob(input.repository, startedJob, stage.jobCompletionPolicy === 'preserve' ? startedJob.status : 'running',
+        isBackgroundSourceDownload(stageRun) ? {} : { currentStage: stageId }, input.onJobChanged);
+      input.telemetry?.stageStarted(
+        startedJob,
+        input.repository.getStageRun(stageRun.id) ?? stageRun,
+        template.id
+      );
       const result = await executor.run({
         stageRun: input.repository.listStageRuns(jobId).find(candidate => candidate.id === stageRun!.id)!,
         job: input.repository.getJob(jobId)!,
         inputArtifacts: resolved.artifacts,
         workdir,
         signal: controller.signal,
+        processControl,
         reportProgress(progress) {
-          if (!controller.signal.aborted) updateStageRun({ id: stageRun!.id, status: 'running', progress });
+          if (!controller.signal.aborted && !processControl?.isPaused) updateStageRun({ id: stageRun!.id, status: 'running', progress });
         }
       });
+      await processControl?.waitUntilResumed();
       if (controller.signal.aborted) throw new CreatorExecutorError('creator_stage_canceled', 'Creator stage was canceled');
       const declaredOutputs = new Map(stage.outputArtifacts.map(output => [output.kind, output.status]));
       for (const output of result.outputs) {
@@ -213,6 +243,8 @@ export function createCreatorStageRunner(input: {
       const outputHashes = await Promise.all(result.outputs.map(async output => (
         output.path === null ? null : sha256CreatorFile(output.path, controller.signal)
       )));
+      await processControl?.waitUntilResumed();
+      if (controller.signal.aborted) throw new CreatorExecutorError('creator_stage_canceled', 'Creator stage was canceled');
       input.repository.transaction(() => {
         const beforeOutputs = requireJob(input.repository, jobId);
         const createsResultVersion = stage.resultVersionPolicy !== 'none';
@@ -320,8 +352,9 @@ export function createCreatorStageRunner(input: {
                 ? 'draft'
                 : 'completed',
           {
-            currentStage: stageId,
+            ...(isBackgroundSourceDownload(stageRun!) ? {} : { currentStage: stageId }),
             ...snapshotPatch,
+            ...attachDownloadedTranslationSource({ ...latest, state: { ...latest.state, ...snapshotPatch } }),
             ...(!unresolvedScopedFailure && stageRun!.scopeKey !== null
               ? { needsInput: null }
               : {})
@@ -333,6 +366,7 @@ export function createCreatorStageRunner(input: {
       });
       const completed = input.repository.getStageRun(stageRun.id);
       if (completed !== undefined) {
+        emitStageFinished(completed.id);
         try {
           input.onStageSucceeded?.(completed);
         } catch {
@@ -342,9 +376,11 @@ export function createCreatorStageRunner(input: {
     } catch (error) {
       if (stageRun !== undefined) {
         const canceled = active.get(stageRun.id)?.signal.aborted === true;
-        const failureCode = canceled ? 'creator_stage_canceled' : errorCode(error);
+        const downloadControl = input.repository.getStageRun(stageRun.id)?.progress.downloadControl;
+        const paused = canceled && downloadControl === 'paused';
+        const failureCode = paused ? 'creator_download_paused' : canceled ? 'creator_stage_canceled' : errorCode(error);
         const failureMessage = canceled
-          ? 'Creator stage was canceled'
+          ? paused ? 'Download was paused' : 'Creator stage was canceled'
           : publicErrorMessageFromFailure(error) ?? 'Creator stage failed';
         const configurationInput = creatorConfigurationInput(
           error,
@@ -363,7 +399,7 @@ export function createCreatorStageRunner(input: {
         input.repository.transaction(() => {
           updateStageRun({
             id: stageRun!.id,
-            status: canceled ? 'canceled' : 'failed',
+            status: paused ? 'interrupted' : canceled ? 'canceled' : 'failed',
             errorCode: failureCode,
             errorMessage: failureMessage
           });
@@ -377,7 +413,7 @@ export function createCreatorStageRunner(input: {
               input.repository,
               job,
               preserveJob ? job.status : canceled
-                ? 'canceled'
+                ? downloadControlJobStatus(job, stageRun!.id, paused)
                 : outputValidation || scopedFailure || configurationInput !== null
                   ? 'needs_input'
                   : 'failed',
@@ -476,24 +512,49 @@ export function createCreatorStageRunner(input: {
             }
           }
         });
+        emitStageFinished(stageRun.id);
       }
       if (stageRun === undefined) throw error;
     } finally {
       if (stageRun !== undefined) active.delete(stageRun.id);
+      if (stageRun !== undefined) processControls.delete(stageRun.id);
       release();
     }
     return input.repository.listStageRuns(jobId).find(candidate => candidate.id === stageRun!.id)!;
+  }
+
+  function emitStageFinished(stageRunId: string): void {
+    if (input.telemetry === undefined) return;
+    const stage = input.repository.getStageRun(stageRunId);
+    const job = stage === undefined ? undefined : input.repository.getJob(stage.jobId);
+    if (stage === undefined || job === undefined) return;
+    const template = input.templates.get(job.templateId, job.templateVersion);
+    const unknownRemoteAcceptance = providerLedger.requestsForStage(stageRunId)
+      .some(request => request.status === 'unknown_remote_acceptance');
+    const issue = (job.issues ?? []).find(candidate => (
+      candidate.stageRunId === stageRunId && candidate.status !== 'resolved'
+    ));
+    input.telemetry.stageFinished(
+      job,
+      stage,
+      template.id,
+      creatorStageTelemetryOutcome(job, stage, unknownRemoteAcceptance),
+      issue
+    );
   }
 
   function updateStageRun(
     update: Parameters<CreatorRepository['updateStageRun']>[0]
   ): CreatorStageRun {
     const current = input.repository.getStageRun(update.id);
+    const download = current?.stageId === 'download' && current.executor === 'download';
+    const progress = mergeStageProgress(current, update.progress) ?? (download ? current?.progress : undefined);
     input.repository.updateStageRun({
       ...update,
-      ...(update.progress === undefined
+      ...(progress === undefined && !download
         ? {}
-        : { progress: { ...(current?.progress ?? {}), ...update.progress } })
+        : { progress: { ...(progress ?? {}),
+          ...(download ? { downloadProgressSequence: (Number(current.progress.downloadProgressSequence) || 0) + 1 } : {}) } })
     });
     const stage = input.repository.getStageRun(update.id);
     if (stage === undefined) {
@@ -501,6 +562,33 @@ export function createCreatorStageRunner(input: {
     }
     input.onStageChanged?.(stage);
     return stage;
+  }
+
+  function mergeStageProgress(
+    current: CreatorStageRun | undefined,
+    incoming: Record<string, CreatorJson> | undefined
+  ): Record<string, CreatorJson> | undefined {
+    if (incoming === undefined) return undefined;
+    const progress = { ...(current?.progress ?? {}), ...incoming };
+    const currentPercent = current?.progress.percent;
+    const incomingPercent = incoming.percent;
+    if (typeof currentPercent === 'number' && Number.isFinite(currentPercent)
+      && (incomingPercent === null
+        || (typeof incomingPercent === 'number' && Number.isFinite(incomingPercent)
+          && incomingPercent < currentPercent))) {
+      progress.percent = currentPercent;
+    }
+    const currentPhasePercent = current?.progress.phasePercent;
+    const incomingPhasePercent = incoming.phasePercent;
+    if (current?.progress.phase === 'normalizing_media'
+      && incoming.phase === 'normalizing_media'
+      && typeof currentPhasePercent === 'number' && Number.isFinite(currentPhasePercent)
+      && (incomingPhasePercent === null
+        || (typeof incomingPhasePercent === 'number' && Number.isFinite(incomingPhasePercent)
+          && incomingPhasePercent < currentPhasePercent))) {
+      progress.phasePercent = currentPhasePercent;
+    }
+    return progress;
   }
 
   function finishStageIssueResolution(
@@ -527,14 +615,32 @@ export function createCreatorStageRunner(input: {
   return {
     run,
     runStageRun,
+    pauseDownload(stageRunId: string): CreatorStageRun | undefined {
+      const stage = input.repository.getStageRun(stageRunId);
+      const control = processControls.get(stageRunId);
+      if (!control || stage?.status !== 'running' || stage.progress.cancelRequested === true) {
+        return cancelStage(stageRunId, { downloadControl: 'paused' });
+      }
+      control.pause();
+      return updateStageRun({ id: stageRunId, status: 'running',
+        progress: { downloadControl: 'paused', cancelRequested: false, bytesPerSecond: null } });
+    },
+    resumeDownload(stageRunId: string): CreatorStageRun | undefined {
+      const stage = input.repository.getStageRun(stageRunId);
+      const control = processControls.get(stageRunId);
+      if (!control || stage?.status !== 'running' || stage.progress.cancelRequested === true) return undefined;
+      control.resume();
+      return updateStageRun({ id: stageRunId, status: 'running',
+        progress: { downloadControl: null, cancelRequested: false, bytesPerSecond: null } });
+    },
     cancelJob(jobId: string): CreatorStageRun[] {
       return input.repository.listStageRuns(jobId)
         .filter(stage => stage.status === 'queued' || stage.status === 'running')
         .map(stage => cancelStage(stage.id))
         .filter((stage): stage is CreatorStageRun => stage !== undefined);
     },
-    cancel(stageRunId: string): CreatorStageRun | undefined {
-      return cancelStage(stageRunId);
+    cancel(stageRunId: string, options?: { downloadControl: 'paused' | 'canceled' }): CreatorStageRun | undefined {
+      return cancelStage(stageRunId, options);
     },
     retry(stageRunId: string): Promise<CreatorStageRun> {
       const stage = input.repository.getStageRun(stageRunId);
@@ -548,9 +654,19 @@ export function createCreatorStageRunner(input: {
     }
   };
 
-  function cancelStage(stageRunId: string): CreatorStageRun | undefined {
+  function cancelStage(stageRunId: string, options?: { downloadControl: 'paused' | 'canceled' }): CreatorStageRun | undefined {
       const stage = input.repository.getStageRun(stageRunId);
       if (stage === undefined) return undefined;
+      if (options && (input.repository.getJob(stage.jobId)?.templateId !== 'video-download' || stage.stageId !== 'download')) {
+        throw new CreatorExecutorError('creator_action_invalid', 'Download controls require a download stage');
+      }
+      if (options?.downloadControl === 'canceled' && ['canceled', 'interrupted'].includes(stage.status)) {
+        const canceled = updateStageRun({ id: stage.id, status: 'canceled', progress: { downloadControl: 'canceled', cancelRequested: false },
+          errorCode: 'creator_stage_canceled', errorMessage: 'Download was canceled' });
+        const job = input.repository.getJob(stage.jobId);
+        if (job) updateJob(input.repository, job, downloadControlJobStatus(job, stage.id, false), {}, input.onJobChanged);
+        return canceled;
+      }
       if (['succeeded', 'failed', 'canceled', 'interrupted'].includes(stage.status)) {
         return stage;
       }
@@ -559,7 +675,7 @@ export function createCreatorStageRunner(input: {
         const canceling = updateStageRun({
           id: stageRunId,
           status: stage.status,
-          progress: { cancelRequested: true }
+          progress: { cancelRequested: true, downloadControl: null, ...(options ?? {}) }
         });
         controller.abort();
         return canceling;
@@ -574,10 +690,10 @@ export function createCreatorStageRunner(input: {
         }
         canceled = updateStageRun({
           id: stageRunId,
-          status: 'canceled',
-          progress: { cancelRequested: true },
-          errorCode: 'creator_stage_canceled',
-          errorMessage: 'Creator stage was canceled'
+          status: options?.downloadControl === 'paused' ? 'interrupted' : 'canceled',
+          progress: { cancelRequested: true, ...(options ?? {}) },
+          errorCode: options?.downloadControl === 'paused' ? 'creator_download_paused' : 'creator_stage_canceled',
+          errorMessage: options?.downloadControl === 'paused' ? 'Download was paused' : 'Creator stage was canceled'
         });
         const job = input.repository.getJob(current.jobId);
         if (job !== undefined) {
@@ -586,12 +702,13 @@ export function createCreatorStageRunner(input: {
           updateJob(
             input.repository,
             job,
-            preserveJob ? job.status : 'canceled',
+            preserveJob ? job.status : downloadControlJobStatus(job, current.id, options?.downloadControl === 'paused'),
             { currentStage: current.stageId },
             input.onJobChanged
           );
         }
       });
+      if (canceled !== undefined) emitStageFinished(canceled.id);
       return canceled;
   }
 
@@ -608,6 +725,12 @@ export function createCreatorStageRunner(input: {
     running -= 1;
     waiters.shift()?.();
   }
+}
+
+function downloadControlJobStatus(job: CreatorJob, stageRunId: string, paused: boolean): CreatorJob['status'] {
+  if (job.templateId === 'video-download' && job.stages.some(stage => stage.id !== stageRunId
+    && (stage.status === 'queued' || stage.status === 'running'))) return 'running';
+  return paused ? 'needs_input' : 'canceled';
 }
 
 function subtitleOutputSources(kind: string, outputs: CreatorArtifact[], inputs: CreatorArtifact[]): string[] {
@@ -848,7 +971,7 @@ function creatorConfigurationInput(
     : undefined;
   const section = code === 'creator_llm_config_missing'
     ? 'llm'
-    : code === 'creator_transcription_config_missing'
+    : ['creator_transcription_config_missing', 'creator_transcription_language_unsupported', 'creator_transcription_timestamps_unavailable'].includes(code)
       ? 'transcription'
       : code === 'creator_tts_config_missing'
         ? 'tts'
