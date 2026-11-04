@@ -21,8 +21,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Bilibili](https://img.shields.io/badge/dynamic/json?label=Bilibili&query=%24.data.follower&suffix=%E7%B2%89%E4%B8%9D&url=https%3A%2F%2Fapi.bilibili.com%2Fx%2Frelation%2Fstat%3Fvmid%3D242124650&logo=bilibili&color=00A1D6&labelColor=FE7398&logoColor=FFFFFF)](https://space.bilibili.com/242124650)
 [![AtomGit G-Star](https://img.shields.io/badge/AtomGit-G--Star-DA203E?style=flat)](https://atomgit.com/krillinai/OpenCreator)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fUNvbqDaw)
-[![Nhóm QQ](https://img.shields.io/badge/QQ%20群-754069680-green?logo=tencent-qq)](https://qm.qq.com/q/W4YC0PLMeA)
+[![X](https://img.shields.io/badge/X-Follow-000000?logo=x&logoColor=white)](https://x.com/KrillinAIJunxi)
 
 [Điểm nổi bật](#project-highlights) · [Công cụ sáng tạo](#creator-tools) · [Skills](#skills) · [Ví dụ](#examples) · [Bắt đầu](#quick-start) · [Desktop](#desktop) · [Tài liệu](#documentation) · [Cộng đồng](#community)
 
@@ -69,7 +68,7 @@ Web là bản triển khai giao diện duy nhất. Desktop tải cùng bản d�
 
 - 🔐 **Bảo mật cục bộ**: dữ liệu, tệp đính kèm và nhật ký mặc định lưu trên máy, có phê duyệt và chẩn đoán đã che thông tin nhạy cảm.
 
-- 🌐 **Ngôn ngữ giao diện**: Web và Desktop hỗ trợ tiếng Trung giản thể, tiếng Anh, tiếng Thụy Điển; tự nhận ngôn ngữ hệ thống hoặc cho phép chọn thủ công.
+- 🌐 **Giao diện đa ngôn ngữ**: Web và Desktop hỗ trợ 43 ngôn ngữ, nhận diện ngôn ngữ hệ thống, chọn thủ công và bố cục từ phải sang trái cho tiếng Ả Rập, Ba Tư, Urdu và Do Thái.
 
 <a id="creator-tools"></a>
 
@@ -77,13 +76,21 @@ Web là bản triển khai giao diện duy nhất. Desktop tải cùng bản d�
 
 Bản hiện tại có mười công cụ sáng tạo. Mô hình và dịch vụ khả dụng tùy thuộc môi trường Codex cục bộ và thiết lập dịch vụ AI.
 
-Mở Dashboard để viết bài, bài đăng Xiaohongshu, kịch bản video ngắn; làm hoạt hình người que; dịch hoặc tải video; tạo ảnh thu nhỏ, ảnh, video; và tạo lời thuyết minh với Smart Dubbing.
+Mở Dashboard để viết bài, bài đăng Xiaohongshu, kịch bản video ngắn; làm hoạt hình người que; dịch hoặc tải video; tạo ảnh thu nhỏ, ảnh, video; và tạo lời thuyết minh với Text to Speech.
 
 ![Dashboard sáng tạo của OpenCreator](../images/product/opencreator-dashboard-en.png)
 
 > Các công cụ sáng tạo mới tiếp tục được bổ sung.
 
-**Dịch video hỗ trợ 14 ngôn ngữ nguồn và 101 ngôn ngữ đích.** Ngôn ngữ nguồn gồm tiếng Trung giản thể, Anh, Tây Ban Nha, Pháp, Ý, Bồ Đào Nha Brazil, Indonesia, Thái, Nhật, Hàn, Đức, Thổ Nhĩ Kỳ, Nga và Mã Lai.
+**Dịch video cung cấp 123 ngôn ngữ nguồn và 124 tùy chọn đích, bao gồm đầu ra bính âm.** Tìm theo tên bản địa, tên tiếng Anh, tiếng Trung hoặc mã ngôn ngữ. Phạm vi nhận dạng và tổng hợp giọng nói phụ thuộc vào dịch vụ và mô hình đã chọn.
+
+- **Chỉ dịch phụ đề**: Nhập và xem trước SRT rồi dịch mà không cần video nguồn, lồng tiếng hay kết xuất video.
+
+- **Chỉnh sửa phụ đề nâng cao**: Dùng trình chỉnh sửa toàn màn hình với dạng sóng và dòng thời gian đồng bộ phát lại để chỉnh thời gian, tách hoặc gộp phụ đề và tìm thay thế văn bản. Xem trước kiểu chữ trên video, đổi ngôn ngữ, giọng và đầu ra rồi tạo phiên bản mới, giữ lại kết quả cũ.
+
+- **Tạo trên một trang**: Thiết lập tạo ảnh, video và Text to Speech trên một trang với chọn mô hình, xem trước ảnh tham chiếu, tùy chọn ảnh theo mô hình và thư viện giọng nói có tìm kiếm.
+
+- **Đầu ra đa ngôn ngữ và tiến độ**: Phông dự phòng tích hợp cải thiện chữ viết phức tạp và phụ đề từ phải sang trái. Theo dõi chép lời, dịch, lồng tiếng và kết xuất, kèm số mục hoàn thành và tổng số khi có.
 
 <table width="100%">
 <thead>
@@ -95,16 +102,16 @@ Mở Dashboard để viết bài, bài đăng Xiaohongshu, kịch bản video ng
 </thead>
 <tbody>
 <tr><td valign="top">Dịch video</td><td valign="top">✅ Có sẵn</td><td>Nhập video cục bộ hoặc công khai; chép lời bằng Whisper đám mây hoặc cục bộ; dùng ngữ cảnh LLM để phân đoạn, căn chỉnh, xử lý thuật ngữ và dịch phụ đề; cấu hình phụ đề song ngữ, lồng tiếng hoặc mẫu giọng riêng, kiểu phụ đề, bố cục ngang/dọc; xuất SRT, âm thanh hoặc video</td></tr>
-<tr><td valign="top">Tải video</td><td valign="top">✅ Có sẵn</td><td>Phân tích từng video công khai từ YouTube, Bilibili, X, TikTok, Instagram, Douyin, Facebook, Xiaohongshu, Pinterest và Reddit; so sánh định dạng và tải video hoặc âm thanh. Một số nguồn cần cookie nền tảng</td></tr>
+<tr><td valign="top">Tải video</td><td valign="top">✅ Có sẵn</td><td>Phân tích từng video công khai từ YouTube, Bilibili, X, TikTok, Instagram, Douyin, Facebook, Xiaohongshu, Pinterest và Reddit; so sánh định dạng và tải video hoặc âm thanh. Một số nguồn cần cookie nền tảng. Khi nền tảng có phụ đề, xem danh sách và tải SRT; ưu tiên tiếng Anh, sau đó là ngôn ngữ giao diện nếu có.</td></tr>
 <tr><td valign="top">Tạo ảnh thu nhỏ</td><td valign="top">✅ Có sẵn</td><td>Kết hợp chủ đề, liên kết video và ảnh tham chiếu tùy chọn để tạo và so sánh nhiều biến thể ảnh thu nhỏ</td></tr>
-<tr><td valign="top">Tạo ảnh</td><td valign="top">✅ Có sẵn</td><td>Dùng GPT Image với prompt và ảnh tham chiếu tùy chọn; đặt tỷ lệ khung hình, số lượng; xem trước và tải từng ảnh</td></tr>
+<tr><td valign="top">Tạo ảnh</td><td valign="top">✅ Có sẵn</td><td>Dùng GPT Image / Seedream / Kling Image / Gemini với prompt và ảnh tham chiếu tùy chọn; đặt tỷ lệ khung hình, số lượng; xem trước và tải từng ảnh</td></tr>
 <tr><td valign="top">Viết bài</td><td valign="top">✅ Có sẵn</td><td>Biến chủ đề, liên kết, video hoặc tài liệu nguồn thành các đề tài có thể sửa, dàn ý và bài viết hoàn chỉnh; thêm ảnh được tạo và xuất Markdown, HTML hoặc PDF</td></tr>
 <tr><td valign="top">Bài đăng Xiaohongshu</td><td valign="top">✅ Có sẵn</td><td>Tạo bài đăng hoàn chỉnh từ chủ đề hoặc tư liệu, điều chỉnh đối tượng, loại bài và độ dài; sao chép hoặc tải kết quả</td></tr>
 <tr><td valign="top">Kịch bản video ngắn</td><td valign="top">✅ Có sẵn</td><td>Tạo kịch bản chia cảnh sẵn để quay từ chủ đề hoặc tư liệu, theo đối tượng, nền tảng, thời lượng và giọng điệu; sửa, sao chép hoặc tải xuống</td></tr>
 <tr><td valign="top">Hoạt hình người que</td><td valign="top">✅ Có sẵn</td><td>Biến văn bản hoặc nội dung YouTube thành lời kể, giọng đọc, hình phân cảnh có nhân vật nhất quán, phụ đề và hoạt hình có thể tải xuống</td></tr>
 <tr><td valign="top">Cắt clip tự động</td><td valign="top">Đang phát triển</td><td>Phân tích video dài, tìm điểm nổi bật và biến khoảnh khắc được chọn thành clip ngắn tái sử dụng</td></tr>
-<tr><td valign="top">Lồng tiếng thông minh</td><td valign="top">✅ Có sẵn</td><td>Biến kịch bản thành lời thuyết minh với lựa chọn giọng, nhịp độ và cảm xúc</td></tr>
-<tr><td valign="top">Tạo video</td><td valign="top">✅ Có sẵn</td><td>Tạo video bằng Seedance từ prompt và ảnh tham chiếu; xem trước, tạo lại và tải từng phiên bản</td></tr>
+<tr><td valign="top">Text to Speech</td><td valign="top">✅ Có sẵn</td><td>Biến kịch bản thành lời thuyết minh với lựa chọn giọng, nhịp độ và cảm xúc</td></tr>
+<tr><td valign="top">Tạo video</td><td valign="top">✅ Có sẵn</td><td>Tạo video bằng Seedance / Kling / Veo từ prompt và ảnh tham chiếu; xem trước, tạo lại và tải từng phiên bản</td></tr>
 <tr><td valign="top">Nhân vật số</td><td valign="top">Đang phát triển</td><td>Kết hợp kịch bản, giọng nói và nhân vật đại diện để tạo video người nói</td></tr>
 </tbody>
 </table>
@@ -296,6 +303,12 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 > Các video ví dụ và ảnh căn chỉnh phụ đề được tạo khi OpenCreator còn dùng tên KrillinAI.
 
+#### Trình chỉnh sửa phụ đề
+
+Trình chỉnh sửa phụ đề tích hợp hỗ trợ chỉnh sửa văn bản gốc và bản dịch cạnh nhau, xem trước video đồng bộ, dạng sóng và dòng thởi gian liên kết với phát lại, cùng kiểu phụ đề tùy chỉnh.
+
+![OpenCreator subtitle editor](../images/examples/video-translation-subtitle-editor-en.png)
+
 <a id="video-downloader"></a>
 
 ### Tải video
@@ -321,7 +334,7 @@ Nguồn video hỗ trợ:
 
 Khả dụng tùy video và khu vực; một số nguồn cần cookie nền tảng.
 
-![Chọn định dạng trong trình tải video OpenCreator](../images/examples/video-downloader-formats-en.png)
+![Chọn định dạng trong trình tải video OpenCreator](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 <a id="video-generation"></a>
 
@@ -671,7 +684,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## Cộng đồng
 
-<p>Người dùng GitHub từ <strong>ít nhất 100 quốc gia và vùng lãnh thổ</strong> đã gắn sao OpenCreator.</p>
+<p>Người dùng GitHub từ <strong>ít nhất 107 quốc gia và vùng lãnh thổ</strong> đã gắn sao OpenCreator.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Bản đồ quốc gia và vùng lãnh thổ có người gắn sao OpenCreator trên GitHub" width="760" />
 

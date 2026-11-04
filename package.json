@@ -6,13 +6,6 @@
   "scripts": {
     "prebuild": "pnpm krillinai:build",
     "build": "pnpm -r build",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "audit": "pnpm audit --audit-level=high",
-    "test:local-stack": "python3 -m pytest tests/local -q",
-    "check:local": "python3 local-stack/check_local.py",
     "test": "pnpm -r test",
     "e2e": "playwright test",
     "perf:measure": "playwright test apps/web/e2e/scheduled-task-performance.spec.ts",
@@ -35,27 +28,22 @@
     "templates:preview-videos": "node scripts/optimize-creator-preview-videos.mjs",
     "krillinai:build": "node scripts/build-krillinai.mjs",
     "krillinai:package": "node scripts/package-krillinai-release.mjs",
-    "krillinai:test": "node scripts/build-krillinai.mjs --test-only"
+    "krillinai:test": "node scripts/build-krillinai.mjs --test-only",
+    "languages:generate": "node scripts/generate-creator-languages.mjs",
+    "languages:check": "node scripts/generate-creator-languages.mjs --check"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@types/node": "^22.10.7",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
-    "vitest": "^3.2.7",
-    "@eslint/js": "^10.0.1",
-    "eslint": "^10.0.0",
-    "prettier": "^3.4.2",
-    "typescript-eslint": "^8.20.0"
+    "vitest": "^3.2.7"
   },
   "pnpm": {
     "overrides": {
       "fast-uri@>=3.0.0 <3.1.7": "3.1.7",
       "http-cache-semantics@<=4.2.0": "4.3.0",
       "ip-address@<=10.3.0": "10.7.0",
-      "undici@>=6.7.0 <6.28.1": "6.28.1",
-      "undici@>=7.0.0 <7.29.1": "7.29.1",
-      "undici@>=8.0.0 <8.10.2": "8.10.2",
       "find-my-way@<=9.6.0": "9.7.0",
       "postcss@<=8.5.17": "8.5.18",
       "proxy-addr@<2.0.8": "2.0.8",
@@ -69,7 +57,16 @@
       "js-yaml@>=4.0.0 <4.3.2": "4.3.2",
       "nanoid@>=3.0.0 <3.3.18": "3.3.18",
       "tar@>=7.0.0 <=7.5.20": "7.5.21",
-      "ws@>=8.0.0 <8.21.0": "8.21.0"
+      "ws@>=8.0.0 <8.21.0": "8.21.0",
+      "undici@>=6.0.0 <6.29.1": "6.29.1",
+      "undici@>=7.0.0 <7.30.1": "7.30.1",
+      "undici@>=8.0.0 <8.12.2": "8.12.2",
+      "vite@>=6.0.0 <6.4.4": "6.4.4",
+      "zod@<4.6.6": "4.6.6",
+      "body-parser@>=2.0.0 <2.4.0": "2.4.0"
+    },
+    "patchedDependencies": {
+      "jassub@2.5.23": "patches/jassub@2.5.23.patch"
     }
   }
 }
