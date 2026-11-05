@@ -4,7 +4,7 @@ import {
 } from '@opencreator/config';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 
 const resourceSchema = z.object({
   path: z.string().min(1),
@@ -44,18 +44,40 @@ const cliSourceSchema = z.object({
   dirty: z.boolean().optional()
 }).strict();
 
+const nlpRuntimeSchema = z.object({
+  engine: z.literal('spacy'),
+  version: z.string().min(1),
+  executable: z.string().min(1),
+  packageMetadata: z.string().min(1),
+  models: z.array(z.object({
+    language: z.string().min(1),
+    name: z.string().min(1),
+    version: z.string().min(1),
+    metadata: z.string().min(1)
+  }).strict()).min(1)
+}).strict();
+
 const manifestSchema = z.object({
   version: z.number().int().positive(),
   runtimeMode: z.literal('cli').optional(),
   cliVersion: z.string().min(1).optional(),
   sourceCommit: z.string().min(1).optional(),
   sourceSha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+  krillinBuild: z.object({
+    buildRecipeSha256: z.string().regex(/^[a-f0-9]{64}$/i),
+    cliSha256: z.string().regex(/^[a-f0-9]{64}$/i)
+  }).strict().optional(),
+  cliSigning: z.object({
+    unsignedSha256: z.string().regex(/^[a-f0-9]{64}$/i),
+    signedSha256: z.string().regex(/^[a-f0-9]{64}$/i)
+  }).strict().optional(),
   integrationPatchSha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   platform: z.string().min(1),
   arch: z.string().min(1),
   upstreamCommit: z.string().optional(),
   cliSource: cliSourceSchema.optional(),
   ytDlp: ytDlpRuntimeSchema.optional(),
+  nlp: nlpRuntimeSchema.optional(),
   resources: z.array(resourceSchema)
 }).strict();
 
