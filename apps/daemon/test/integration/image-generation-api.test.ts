@@ -25,6 +25,55 @@ describe('image generation API', () => {
     await rm(dataDir, { recursive: true, force: true });
   });
 
+  it.each([
+    { provider: 'gemini' as const, model: 'gemini-3-pro-image-preview', aspectRatio: '16:9', resolution: '4K', modelQuality: undefined, expected: { generationConfig: { imageConfig: { aspectRatio: '16:9', imageSize: '4K' } } } },
+    { provider: 'gemini' as const, model: 'gemini-2.5-flash-image', aspectRatio: '21:9', resolution: undefined, modelQuality: undefined, expected: { generationConfig: { imageConfig: { aspectRatio: '21:9' } } } },
+    { provider: 'openai' as const, model: 'gpt-image-2', aspectRatio: '16:9', resolution: '2K', modelQuality: 'auto', expected: { size: '2048x1152', quality: 'auto' } },
+    { provider: 'openai' as const, model: 'gpt-image-2.5-flare', aspectRatio: '9:16', resolution: '2K', modelQuality: 'xhigh', expected: { size: '1152x2048', quality: 'xhigh' } },
+    { provider: 'jimeng' as const, model: 'doubao-seedream-4-0-250828', aspectRatio: '16:9', resolution: '2K', modelQuality: undefined, expected: { size: '2736x1536' } }
+  ])('serializes model-specific parameters for $model', async ({ provider, model, aspectRatio, resolution, modelQuality, expected }) => {
+    const config = createDefaultCreatorServicesConfig();
+    Object.assign(config.image[provider], { model, apiKey: 'test-key' });
+    const image = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('image')]).toString('base64');
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => Response.json(provider === 'gemini'
+      ? { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: image } }] } }] }
+      : { data: [{ b64_json: image }] }));
+    await registerImageGenerationRoutes(server, createImageGenerationService({ dataDir, configStore: createConfigStore(config), fetchImpl }));
+    const response = await server.inject({ method: 'POST', url: '/image-generation/results', payload: {
+      prompt: 'A city', provider, size: '1024x1024', quality: 'medium', count: 1, aspectRatio, resolution, modelQuality
+    } });
+    expect(response.statusCode).toBe(201);
+    const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
+    expect(body).toMatchObject(expected);
+    if (provider !== 'openai') expect(body).not.toHaveProperty('quality');
+    if (model === 'gemini-2.5-flash-image') expect(body.generationConfig.imageConfig).not.toHaveProperty('imageSize');
+  });
+
+  it.each([false, true])('replaces a saved retired model in outgoing image requests (edit=%s)', async edit => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.openai = { baseUrl: 'https://images.example.test/v1', apiKey: 'test-key', model: 'gpt-image-1' };
+    const content = Buffer.from('image');
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => Response.json({ data: [{ b64_json: content.toString('base64') }] }));
+    const generated = await generateImageContents({ prompt: 'A city', provider: 'openai', size: '1024x1024', quality: 'medium', count: 1 }, config,
+      { fetchImpl, ...(edit ? { referenceImages: [{ content, mime: 'image/png' as const }] } : {}) });
+    expect(generated.model).toBe('gpt-image-2');
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(`https://images.example.test/v1/images/${edit ? 'edits' : 'generations'}`);
+    const body = fetchImpl.mock.calls[0]?.[1]?.body;
+    if (edit) {
+      const form = await new Request('http://localhost', { method: 'POST', headers: fetchImpl.mock.calls[0]?.[1]?.headers, body }).formData();
+      expect(form.get('model')).toBe('gpt-image-2');
+    } else expect(JSON.parse(String(body)).model).toBe('gpt-image-2');
+  });
+
+  it('rejects unsupported model parameters before making a paid request', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.gemini.apiKey = 'test-key';
+    const fetchImpl = vi.fn();
+    await expect(generateImageContents({ prompt: 'A city', provider: 'gemini', size: '1024x1024', quality: 'medium', count: 1, resolution: '4K' }, config, { fetchImpl }))
+      .rejects.toMatchObject({ code: 'unsupported_capability' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('generates and serves native ChatGPT artifacts through the existing image API without HTTP fallback', async () => {
     const home = join(dataDir, 'codex');
     await mkdir(home);
@@ -100,7 +149,7 @@ describe('image generation API', () => {
     expect(generated.statusCode).toBe(201);
     expect(generated.json().result).toMatchObject({
       id: 'image_result_1234',
-      model: 'gpt-image-1',
+      model: 'gpt-image-2',
       imageSize: '1024x1024',
       quality: 'high',
       count: 1,
@@ -108,7 +157,7 @@ describe('image generation API', () => {
     });
     expect(String(fetchImpl.mock.calls[0]?.[0])).toBe('https://images.example.test/v1/images/generations');
     expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toMatchObject({
-      model: 'gpt-image-1',
+      model: 'gpt-image-2',
       prompt: 'A quiet studio portrait',
       size: '1024x1024',
       quality: 'high',
@@ -160,7 +209,7 @@ describe('image generation API', () => {
     expect(generated.statusCode).toBe(201);
     expect(generated.json().result).toMatchObject({
       provider: 'codex-native',
-      model: 'gpt-image-1',
+      model: 'gpt-image-2',
       images: [{ mime: 'image/png', size: image.length }]
     });
     expect(String(fetchMock.mock.calls[0]?.[0]))
@@ -249,6 +298,9 @@ describe('image generation API', () => {
       provider: 'openai',
       size: '1536x1024',
       quality: 'medium',
+      aspectRatio: '16:9',
+      resolution: '2K',
+      modelQuality: 'auto',
       count: 1
     }, config, {
       fetchImpl: fetchImpl as typeof fetch,
@@ -266,6 +318,10 @@ describe('image generation API', () => {
       Authorization: 'Bearer openai-compatible-test',
       'Content-Type': expect.stringContaining('multipart/form-data; boundary=')
     });
+    const submitted = new Request('https://images.example.test', { method: 'POST', headers: { 'Content-Type': String((fetchImpl.mock.calls[0]?.[1]?.headers as Record<string, string>)['Content-Type']) }, body: fetchImpl.mock.calls[0]?.[1]?.body });
+    const fields = await submitted.formData();
+    expect(fields.get('size')).toBe('2048x1152');
+    expect(fields.get('quality')).toBe('auto');
     const body = Buffer.from(fetchImpl.mock.calls[0]?.[1]?.body as ArrayBuffer).toString('latin1');
     expect(body).toContain('gpt-image-2');
     expect(body.match(/name="image\[\]"/g)).toHaveLength(2);

@@ -17,13 +17,26 @@ import (
 )
 
 type Translator struct {
-	chatCompleter            types.ChatCompleter
-	filterNonSemanticFillers bool
+	chatCompleter             types.ChatCompleter
+	filterNonSemanticFillers  bool
+	terminologyEnabled        bool
+	naturalizeEnabled         bool
+	durationShorteningEnabled bool
+	checkpointDir             string
+	onRecovery                func(string)
+	recoveryDelay             time.Duration
+	onRateLimit               func()
 }
 
 func NewTranslator() *Translator {
 	return &Translator{
-		chatCompleter: openai.NewClient(config.Conf.Llm.BaseUrl, config.Conf.Llm.ApiKey, config.Conf.App.Proxy),
+		chatCompleter:      openai.NewClient(config.Conf.Llm.BaseUrl, config.Conf.Llm.ApiKey, config.Conf.App.Proxy),
+		terminologyEnabled: true,
+		// The paired translation prompt now produces natural subtitle language
+		// directly. Keep the legacy full-document naturalizer opt-in so normal
+		// subtitle jobs do not pay for a second pass over every sentence.
+		naturalizeEnabled:         false,
+		durationShorteningEnabled: true,
 	}
 }
 
@@ -313,31 +326,6 @@ IMPORTANT: The previous translation was inadequate. Please ensure:
 `, originText, types.GetStandardLanguageName(targetLang), failedTranslation, types.GetStandardLanguageName(targetLang))
 
 	return originalPrompt + enhancement
-}
-
-// isSentenceEnding 判断文本是否以句子结束符号结尾
-func isSentenceEnding(text string) bool {
-	text = strings.TrimSpace(text)
-	text = strings.TrimRight(text, "\"'”’)]}")
-	if text == "" {
-		return false
-	}
-
-	// 检查常见的句子结束符号
-	sentenceEndings := []string{
-		".", "?", "!", // 英文
-		"。", "？", "！", // 中文
-		"…", ".", "?", "!", // 日文
-		"..", "...", // 省略号
-	}
-
-	for _, ending := range sentenceEndings {
-		if strings.HasSuffix(text, ending) {
-			return true
-		}
-	}
-
-	return false
 }
 
 func subtitleTranslationContext(blocks []*util.SrtBlock, start, end int) ([]string, []string) {

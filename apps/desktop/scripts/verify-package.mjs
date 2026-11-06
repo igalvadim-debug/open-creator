@@ -15,6 +15,7 @@ import {
   closeSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdtempSync,
   openSync,
   readSync,
@@ -27,9 +28,9 @@ import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { treeSize } from './package-directory-size.mjs';
-import { verifyCreatorRuntime } from './creator-runtime-contract.mjs';
+import { verifyCreatorRuntimeBuild } from './creator-runtime-build.mjs';
 import { verifyCodexRuntime } from './codex-runtime-contract.mjs';
 import {
   hashDirectory as hashStickmanDirectory,
@@ -114,7 +115,7 @@ await assertBrandingContents();
 assertDaemonContents();
 assertCreatorPresetContents();
 assertWebContents();
-assertCreatorRuntime();
+await assertCreatorRuntime();
 assertCreatorSubtitleFontContents();
 assertCodexRuntime();
 assertStickmanRuntime();
@@ -122,7 +123,12 @@ assertNoUnexpectedPythonRuntime();
 assertNoLocalData();
 assertSize('app.asar', appAsar, 80 * 1024 * 1024);
 assertSize('Daemon resources', daemonDir, 250 * 1024 * 1024);
-assertSize('Creator Runtime', creatorRuntimeDir, 384 * 1024 * 1024);
+// Includes spaCy, its English md parser, Python, Node, and pinned media tools.
+// Windows x64 measured 610 MiB; its media tools alone exceed arm64 by 71 MiB.
+// Intel macOS also ships larger x64 media tools and native Python libraries.
+const creatorRuntimeLimitMiB = targetPlatform === 'win32' ? 704
+  : targetPlatform === 'darwin' && targetArch === 'x64' ? 640 : 512;
+assertSize('Creator Runtime', creatorRuntimeDir, creatorRuntimeLimitMiB * 1024 * 1024);
 assertSize('Codex Runtime', codexRuntimeDir, 450 * 1024 * 1024);
 assertSize('Stickman assets', join(daemonDir, 'runtime', 'stickman-assets'), 16 * 1024 * 1024);
 assertSize('Desktop package', packageRoot, 1600 * 1024 * 1024);
@@ -448,8 +454,14 @@ function assertCreatorPresetContents() {
     ) {
       throw new Error(`Creator preset manifest contains an invalid resource: ${manifestPath}`);
     }
-    expectedDaemonFiles.add(file.path);
-    const absolute = join(daemonCreatorPresetDir, ...file.path.split('/'));
+    const isAsset = file.path.startsWith('assets/');
+    if (isAsset && !/^assets\/[a-f0-9]{64}\.(?:png|jpe?g|webp|mp4)$/.test(file.path)) {
+      throw new Error(`Creator preset manifest contains an invalid asset path: ${file.path}`);
+    }
+    if (!isAsset) expectedDaemonFiles.add(file.path);
+    const absolute = isAsset
+      ? join(webCreatorPresetDir, basename(file.path))
+      : join(daemonCreatorPresetDir, ...file.path.split('/'));
     assertExists(absolute);
     const contents = readFileSync(absolute);
     if (contents.byteLength !== file.size || hashBuffer(contents) !== file.sha256) {
@@ -533,13 +545,13 @@ function assertCreatorSubtitleFontContents() {
     'utf8'
   ));
   if (
-    sourceFontManifest?.version !== 1
+    ![1, 2].includes(sourceFontManifest?.version)
     || !Array.isArray(sourceFontManifest.fonts)
     || sourceFontManifest.fonts.length === 0
   ) {
     throw new Error('Creator subtitle source font manifest is invalid');
   }
-  const webFontResources = sourceFontManifest.fonts.map(font => {
+  const webFontResources = [...sourceFontManifest.fonts, ...(sourceFontManifest.fallbackFonts ?? [])].map(font => {
     if (
       typeof font?.webFile !== 'string'
       || !font.webFile.endsWith('.woff2')
@@ -597,13 +609,25 @@ function normalizedAsarEntries() {
   });
 }
 
-function assertCreatorRuntime() {
-  const runtime = verifyCreatorRuntime(creatorRuntimeDir, targetPlatform, targetArch);
+async function assertCreatorRuntime() {
+  const runtime = verifyCreatorRuntimeBuild(creatorRuntimeDir, targetPlatform, targetArch, {
+    allowSigned: manifest.macSigningMode === 'developer-id'
+  });
+  if (runtime.nlp !== undefined) throw new Error('Packaged Creator Runtime unexpectedly contains the retired NLP runtime');
+  if (targetPlatform === process.platform && targetArch === process.arch) {
+    // Validate with the actual consumer as well as the packaging contract.
+    const { readKrillinRuntimeManifest } = await import(pathToFileURL(
+      join(daemonDir, 'dist', 'creator', 'krillin', 'manifest.js')
+    ).href);
+    readKrillinRuntimeManifest(creatorRuntimeDir);
+  }
   if (typeof manifest.packageRoot !== 'string') return;
   if (
     manifest.krillinCliVersion !== runtime.cliVersion
     || manifest.krillinSourceCommit !== runtime.sourceCommit
     || manifest.krillinSourceSha256 !== runtime.sourceSha256
+    || manifest.krillinBuild?.buildRecipeSha256 !== runtime.krillinBuild.buildRecipeSha256
+    || manifest.krillinBuild?.cliSha256 !== runtime.krillinBuild.cliSha256
     || manifest.krillinIntegrationPatchSha256 !== runtime.integrationPatchSha256
     || manifest.ytDlpRuntimeMode !== runtime.ytDlp?.mode
     || manifest.ytDlpVersion !== runtime.ytDlp?.version
@@ -997,9 +1021,15 @@ function assertExists(path) {
 }
 
 function assertSize(label, path, maxBytes) {
-  const bytes = statSync(path).isDirectory() ? treeSize(path) : statSync(path).size;
+  const directory = statSync(path).isDirectory();
+  const bytes = directory ? treeSize(path) : statSync(path).size;
   if (bytes > maxBytes) {
-    throw new Error(`${label} is unexpectedly large: ${bytes} bytes`);
+    const components = directory ? Object.fromEntries(readdirSync(path).map(name => {
+      const child = join(path, name);
+      const childStat = lstatSync(child);
+      return [name, childStat.isDirectory() ? treeSize(child) : childStat.size];
+    })) : undefined;
+    throw new Error(`${label} is unexpectedly large: ${bytes} bytes (limit: ${maxBytes} bytes; components: ${JSON.stringify(components)})`);
   }
 }
 
