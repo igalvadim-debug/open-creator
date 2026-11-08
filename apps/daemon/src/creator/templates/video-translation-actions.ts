@@ -1,7 +1,10 @@
 import {
+  videoSourceIdentity,
   parseBilibiliVideoSource,
   supportedVideoSourcePlatform,
+  volcengineTtsUsesApiKey,
   type CreatorJob,
+  type CreatorServicesConfig,
   type CreatorStageRun,
   type CreatorTtsProvider
 } from '@opencreator/protocol';
@@ -16,6 +19,7 @@ export function createVideoTranslationWorkflow(input: {
   creator: CreatorService;
   dispatcher: Pick<CreatorCommandDispatcher, 'dispatch'>;
   configStore: Pick<CreatorServicesConfigStore, 'read'>;
+  readConfigForJob?(jobId: string): Promise<CreatorServicesConfig>;
   videoMetadataService?: VideoMetadataService;
 }) {
   async function validateStage(job: CreatorJob, stageId: string): Promise<void> {
@@ -27,7 +31,7 @@ export function createVideoTranslationWorkflow(input: {
       validateSource(job);
       await validateBilibiliSource(job, input.videoMetadataService);
       if (job.state.sourceType !== 'subtitle' && job.artifacts.some(artifact => artifact.id === job.state.importedTargetSubtitleId && artifact.kind === 'target_subtitle' && artifact.status === 'completed')) return;
-      const config = await input.configStore.read();
+      const config = await (input.readConfigForJob?.(job.id) ?? input.configStore.read());
       if (
         config.llm.source === 'custom'
         && (
@@ -49,7 +53,7 @@ export function createVideoTranslationWorkflow(input: {
       return;
     }
     if (stageId !== 'tts' || job.state.dubbing !== true) return;
-    const config = await input.configStore.read();
+    const config = await (input.readConfigForJob?.(job.id) ?? input.configStore.read());
     if (!hasTtsCredentials(config, job)) {
       setConfigurationNeeded(input.creator, job.id, {
         code: 'creator_tts_config_missing',
@@ -67,6 +71,11 @@ export function createVideoTranslationWorkflow(input: {
     if (stage.status !== 'succeeded' || stage.progress.workflow !== true) return;
     let job = input.creator.getJob(stage.jobId);
     if (job === undefined || job.templateId !== 'video-translation') return;
+    if (job.status === 'canceled') return;
+    const sourceDownload = [...job.stages].reverse().find(run => run.progress.backgroundSourceDownload === true
+      && run.progress.workflowParentStageRunId === stage.id);
+    if (sourceDownload && ['canceled', 'interrupted'].includes(sourceDownload.status)) return;
+    if (job.stages.some(run => run.progress.backgroundSourceDownload === true && ['queued', 'running'].includes(run.status))) return;
     const nextStageId = nextWorkflowStage(job, stage.stageId);
     if (nextStageId === undefined) return;
     try {
@@ -79,9 +88,30 @@ export function createVideoTranslationWorkflow(input: {
     if (job !== undefined) queueNextStage(job, stage, nextStageId, input.dispatcher);
   }
 
+  function startSourceDownload(stage: CreatorStageRun): void {
+    if (stage.stageId !== 'subtitle' || stage.status !== 'running' || stage.progress.workflow !== true) return;
+    const job = input.creator.getJob(stage.jobId);
+    if (!job || job.templateId !== 'video-translation' || job.state.sourceType !== 'url'
+      || job.state.skipVideoDownload === true || typeof job.state.sourceUrl !== 'string'
+      || videoSourceIdentity(job.state.sourceUrl) === null) return;
+    if (job.stages.some(run => run.stageId === 'preview-source-video'
+      && (run.progress.workflowParentStageRunId === stage.id || ['queued', 'running'].includes(run.status)))) return;
+    input.dispatcher.dispatch(job.id, {
+      action: 'run-stage', expectedRevision: job.revision,
+      idempotencyKey: `video-translation:${stage.id}:source-download`,
+      input: { stageId: 'preview-source-video', backgroundSourceDownload: true, workflowParentStageRunId: stage.id }
+    }, 'system');
+  }
+
   return {
     validateStage,
     async handleStageChanged(stage: CreatorStageRun): Promise<void> {
+      startSourceDownload(stage);
+      if (stage.progress.backgroundSourceDownload === true && ['succeeded', 'failed'].includes(stage.status)) {
+        const job = input.creator.getJob(stage.jobId);
+        const parent = job?.stages.find(run => run.id === stage.progress.workflowParentStageRunId);
+        if (parent) await continueFrom(parent);
+      }
       await continueFrom(stage);
     },
     async reconcile(job: CreatorJob): Promise<void> {
@@ -112,6 +142,7 @@ export function createVideoTranslationWorkflow(input: {
     async recover(): Promise<void> {
       for (const job of input.creator.listJobs()) {
         if (job.templateId !== 'video-translation') continue;
+        for (const stage of job.stages) startSourceDownload(stage);
         const completed = [...job.stages].reverse().find(stage => (
           stage.status === 'succeeded' && stage.progress.workflow === true
         ));
@@ -161,6 +192,9 @@ export async function validateBilibiliSource(job: CreatorJob, service?: VideoMet
 }
 
 function validateSource(job: CreatorJob): void {
+  if (typeof job.state.importedSourceSubtitleId === 'string' && job.state.sourceLanguage === 'auto') {
+    throw new VideoTranslationWorkflowError('creator_action_invalid', 'Select the source subtitle language before translating');
+  }
   if (job.state.sourceType === 'subtitle') {
     if (!job.artifacts.some(artifact => artifact.id === job.state.importedSourceSubtitleId
       && artifact.kind === 'source_subtitle' && artifact.status === 'completed')) {
@@ -206,7 +240,11 @@ function hasTtsCredentials(
   if (provider === 'openai') return config.tts.openai.apiKey.length > 0;
   if (provider === 'minimax') return config.tts.minimax.apiKey.length > 0;
   if (provider === 'volcengine') {
-    return config.tts.volcengine.appId.length > 0 && config.tts.volcengine.accessToken.length > 0;
+    return config.tts.volcengine.accessToken.length > 0
+      && (
+        volcengineTtsUsesApiKey(config.tts.volcengine.model)
+        || config.tts.volcengine.appId.length > 0
+      );
   }
   return config.tts.aliyun.apiKey.length > 0;
 }
