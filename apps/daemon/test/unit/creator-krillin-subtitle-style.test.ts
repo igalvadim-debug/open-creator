@@ -3,10 +3,10 @@ import { buildKrillinSubtitleStyle } from '../../src/creator/krillin/adapter.js'
 
 describe('Creator KrillinAI subtitle style mapping', () => {
   it.each([
-    ['system', 'regular', 'small', 'OpenCreator Sans Regular', false, [12, 9, 10, 6]],
-    ['sans', 'medium', 'medium', 'OpenCreator Sans Medium', false, [14, 10, 12, 7]],
-    ['serif', 'bold', 'large', 'OpenCreator Serif Bold', true, [18, 12, 15, 9]],
-    ['rounded', 'bold', 'medium', 'OpenCreator Rounded Bold', true, [14, 10, 12, 7]]
+    ['system', 'regular', 'small', 'OpenCreator Sans Regular', false, [14, 10, 12, 7]],
+    ['sans', 'medium', 'medium', 'OpenCreator Sans Medium', false, [18, 12, 15, 9]],
+    ['serif', 'bold', 'large', 'OpenCreator Serif Bold', true, [22, 15, 18, 11]],
+    ['rounded', 'bold', 'medium', 'OpenCreator Rounded Bold', true, [18, 12, 15, 9]]
   ] as const)(
     'maps %s/%s/%s to validated horizontal and vertical ASS styles',
     (fontPreset, fontWeight, fontSize, fontName, bold, sizes) => {
@@ -63,6 +63,19 @@ describe('Creator KrillinAI subtitle style mapping', () => {
 
     expect(result.horizontal.major.shadow).toBe(0);
     expect(result.horizontal.major.override_tags).toBe('');
+  });
+
+  it('moves both subtitle lines together while retaining each format baseline', () => {
+    const base = buildKrillinSubtitleStyle({ fontPreset: 'sans' }) as {
+      horizontal: { major: Record<string, unknown>; minor: Record<string, unknown> };
+      vertical: { major: Record<string, unknown>; minor: Record<string, unknown> };
+    };
+    const raised = buildKrillinSubtitleStyle({ fontPreset: 'sans', verticalOffset: 40 }) as typeof base;
+    expect([base.horizontal.major.margin_v, base.horizontal.minor.margin_v,
+      base.vertical.major.margin_v, base.vertical.minor.margin_v]).toEqual([20, 30, 101, 92]);
+    expect([raised.horizontal.major.margin_v, raised.horizontal.minor.margin_v,
+      raised.vertical.major.margin_v, raised.vertical.minor.margin_v]).toEqual([60, 70, 141, 132]);
+    expect(() => buildKrillinSubtitleStyle({ verticalOffset: -21 })).toThrow();
   });
 
   it('rejects unsupported style fields instead of dropping them', () => {
