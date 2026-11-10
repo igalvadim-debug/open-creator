@@ -7,10 +7,45 @@ import {
   subtitleCuesFromArtifact,
   subtitleCuesWithSource,
   videoTranslationRegenerationStage,
+  videoTranslationReportNotice,
   videoArtifactsForResultVersion
 } from './VideoTranslationWorkspace.js';
 
 describe('video translation result artifact selection', () => {
+  it('shows persisted partial and layout results when reopening a version', () => {
+    const l = (zh: string) => zh;
+    const base = { id: 'translated', kind: 'target_subtitle', version: 1 };
+    expect(videoTranslationReportNotice(artifact({ ...base, metadata: { translationStatus: 'partial', translationFailedCount: 2 } }), l))
+      .toContain('2 条字幕尚未翻译');
+    expect(videoTranslationReportNotice(artifact({ ...base, metadata: { translationStatus: 'layout_pending' } }), l))
+      .toContain('保留完整译文');
+    expect(videoTranslationReportNotice(artifact({ ...base, metadata: { translationStatus: 'degraded' } }), l)).toContain('未通过自动质量核验');
+    expect(videoTranslationReportNotice(artifact({ ...base, metadata: { translationStatus: 'complete' } }), l)).toBe('');
+  });
+  it('fills missing version settings with the current setup defaults while retaining explicit choices', () => {
+    const subtitle = artifact({ id: 'subtitles', kind: 'target_subtitle', version: 1, metadata: { resultVersion: 1, cues: [] } });
+    const original = { ...snapshot(1, { target_subtitle: [subtitle.id] }, [subtitle.id]), state: {} };
+    const state = { resultSnapshots: [original] };
+    expect(resultVersionsFromArtifacts([subtitle], state)[0]?.settings).toMatchObject({
+      sourceLanguage: 'en', targetLanguage: 'zh_cn', bilingual: true, subtitlePosition: 'top',
+      preferPlatformCaptions: true, composeVideo: false, dubbing: false, videoFormat: 'horizontal'
+    });
+    const saved = { ...original, state: { sourceLanguage: 'fr', targetLanguage: 'ja', bilingual: false,
+      preferPlatformCaptions: false, composeVideo: false, dubbing: false, videoFormat: 'vertical' } };
+    expect(resultVersionsFromArtifacts([subtitle], { ...fallbackState(), resultSnapshots: [saved] })[0]?.settings).toMatchObject({
+      sourceLanguage: 'fr', targetLanguage: 'ja', bilingual: false, preferPlatformCaptions: false,
+      composeVideo: false, dubbing: false, videoFormat: 'vertical'
+    });
+  });
+
+  it('does not infer burned subtitles from a subtitle-free dubbed video', () => {
+    const subtitle = artifact({ id: 'target', kind: 'target_subtitle', version: 1, metadata: { resultVersion: 1, cues: [] } });
+    const dubbed = artifact({ id: 'dubbed', kind: 'dubbed_video', version: 1, metadata: {
+      resultVersion: 1, settingsSnapshot: { ...fallbackState(), composeVideo: false, dubbing: true }
+    } });
+    expect(resultVersionsFromArtifacts([subtitle, dubbed], { ...fallbackState(), composeVideo: false })[0]?.settings.composeVideo).toBe(false);
+  });
+
   it('starts a new render from existing subtitles when video composition is enabled', () => {
     const version = resultVersion({
       settings: { composeVideo: false, videoFormat: 'horizontal' }
@@ -48,6 +83,12 @@ describe('video translation result artifact selection', () => {
       version.source,
       false
     )).toBe('render-vertical');
+    expect(videoTranslationRegenerationStage(
+      version,
+      { ...version.settings, subtitleVerticalOffset: 40 },
+      version.source,
+      false
+    )).toBe('render-horizontal');
     expect(videoTranslationRegenerationStage(
       subtitleOnlyVersion,
       subtitleOnlyVersion.settings,
@@ -624,6 +665,7 @@ function resultVersion(input: {
     subtitleSecondaryColor?: string;
     subtitleOutlineColor?: string;
     subtitleOutlineWidth?: number;
+    subtitleVerticalOffset?: number;
     subtitleShadowEnabled?: boolean;
     subtitleShadowColor?: string;
     subtitleShadowOpacity?: number;
@@ -660,6 +702,7 @@ function resultVersion(input: {
       subtitleSecondaryColor: settings.subtitleSecondaryColor ?? '#FFD45C',
       subtitleOutlineColor: settings.subtitleOutlineColor ?? '#000000',
       subtitleOutlineWidth: settings.subtitleOutlineWidth ?? 2,
+      subtitleVerticalOffset: settings.subtitleVerticalOffset ?? 0,
       subtitleShadowEnabled: settings.subtitleShadowEnabled ?? true,
       subtitleShadowColor: settings.subtitleShadowColor ?? '#000000',
       subtitleShadowOpacity: settings.subtitleShadowOpacity ?? 0.65,

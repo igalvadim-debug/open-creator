@@ -1,6 +1,6 @@
 import { readFile, rename, writeFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { CreatorServicesConfigStore } from '../../creator-services/config-store.js';
 import type { CreatorArtifact, CreatorJson } from '@opencreator/protocol';
 import type { CreatorExecutor, CreatorExecutorInput, CreatorExecutorOutput } from '../executor.js';
@@ -1069,17 +1069,6 @@ function requireGeneratedRecord(stageId: string, value: unknown): Record<string,
   );
 }
 
-/**
- * Create a JSON completion callback that reads current settings on each call.
- *
- * Codex requests use the injected runtime and job context. Other sources use
- * HTTP; local mode overrides the base URL and skips the API-key requirement.
- * The HTTP response content is JSON-decoded without validating its shape.
- *
- * The callback rejects missing configuration, failed HTTP responses, or absent
- * or invalid JSON content with CreatorExecutorError. Configuration read,
- * Codex runtime, fetch, and response decoding errors propagate.
- */
 export function createStickmanConfiguredCompletion(input: {
   configStore: Pick<CreatorServicesConfigStore, 'read'>;
   codexCompleteJson?: CodexCompleteJson;
@@ -1100,16 +1089,11 @@ export function createStickmanConfiguredCompletion(input: {
         model: config.llm.model
       });
     }
-    // LOCAL-FIRST: OPENCREATOR_LOCAL=1 -> локальный llama-server :8484 (ключ не нужен).
-    const localMode = /^(1|true|yes)$/i.test(process.env.OPENCREATOR_LOCAL ?? '');
-    if (!localMode && !config.llm.apiKey.trim()) {
+    if (!config.llm.apiKey.trim()) {
       throw new CreatorExecutorError('creator_llm_config_missing', 'LLM configuration is incomplete');
     }
-    const llmBase = localMode
-      ? (process.env.LOCAL_LLM_BASE_URL ?? 'http://127.0.0.1:8484/v1')
-      : (config.llm.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1');
     const response = await fetch(
-      `${llmBase}/chat/completions`,
+      `${config.llm.baseUrl.replace(/\/$/, '') || 'https://api.openai.com/v1'}/chat/completions`,
       {
         method: 'POST',
         signal: request.signal,

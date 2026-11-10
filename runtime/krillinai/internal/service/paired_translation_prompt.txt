@@ -1,17 +1,33 @@
-将输入翻译为指定目标语言，在同一次回答中完成翻译、拆段和原译配对。
+Create natural, concise, aligned bilingual subtitle pairs for each input sentence_id.
 
-硬约束：原文和译文每段都必须单行，且分别不超过 {{MAX_TARGET_CHARS}} 显示单位。max_source_display_units 和 max_target_display_units 分别约束两侧；max_fullwidth_chars 表示纯全角文本每段最多 {{MAX_FULLWIDTH_CHARS}} 个字符，包括标点。汉字、日韩宽字符和全角字符计2，普通字母、数字、标点和空格计1。按 Unicode 字素簇计数：重音组合、印度文字组合、Emoji及其连接序列不可拆开，同一字素簇取其基础字符的最大宽度，组合符和方向控制符不额外计宽。这是字幕长度规则，不能将汉字当成半角字符。
+Required constraints:
+- EVERY source string must fit max_source_characters and EVERY target string must fit max_target_characters. The current limit is {{MAX_TARGET_CHARS}} Unicode grapheme clusters per side, including all spaces and punctuation. This is a character limit, not a word or token limit.
+- 当中英文、空格和标点各计1时，两侧整句都在上限内时保持一对，不要为了排版而拆开完整句子。
+- Cover the source exactly once, in order. Preserve spelling, punctuation, internal spaces, repeated words, and false starts. Only insert segment boundaries; never clean up or rewrite source text.
+- Each pair needs meaningful, nonempty source AND target text. Never use blank or punctuation-only placeholders. Each side must be one line, without line-break characters or formatting tags.
+- Preserve the full meaning: names, numbers, negation, uncertainty, conditions, and temporal relationships. Context fields help interpretation only; do not translate their content.
+- Write the target as fluent spoken subtitle language on the first pass. Do not copy source-language grammar, add translationese, or preserve unnecessary repetition. Keep the speaker's tone and omit only nonsemantic spoken fillers when the application allows it.
+- Prefer a native-sounding complete target sentence before choosing subtitle boundaries. Natural phrasing must never remove a fact, qualifier, name, number, unit, or relationship from the source.
+- When a sentence includes source_speech_duration_ms, treat it as the source speaker's measured speaking time, not the subtitle display duration. Shape the complete target utterance so natural target-language speech is close to that duration. A field marked source_speech_timing_estimated is only a fallback from cue boundaries and should be treated as a rough guide.
+- Do not force unnatural word-by-word translation to hit a number. Preserve meaning first, then control duration with concise spoken phrasing, natural contractions or equivalent native wording, and removal of only nonsemantic filler. Do not invent pauses or pad the target with filler. If language structure, names, numbers, or a meaning-preserving phrase makes the duration impossible, keep the meaning and accept a small error.
 
-1. 先理解完整语句，将整句忠实自然地翻译一次，写入target_text，再将这份完整译文切分。每条字幕直接写成segments中的一个对象，source是原文片段，target是对应译文片段。按顺序拼接所有target必须恰好还原target_text，仅允许边界空白变化。禁止分别对每个原文片段重新翻译整句，禁止相邻片段重复表达已经翻译过的内容。任意一侧超限，就按自然意群增加配对字幕。两侧整句都在上限内时保持一对；满足两侧上限的前提下尽量减少段数。
-2. segments的source：只在正确原文中插入分割边界，顺序、拼写、大小写、标点、组合符、连接符和方向控制符完整保留，仅允许边界空白变化。禁止改写、纠错、移动词语、重复或遗漏。无空格语言也要切分；极长专名、单词、URL没有自然边界时允许在完整字素簇之间切分。
-3. target_text与segments的target：完整译文保留全部含义、专名、数字、否定、可能性、条件、时间和因果，不重复表达原文只出现一次的意思。先确定适合原译意群对应的整句译文语序，写入target_text后只能顺序插入边界，不能再改变语序、文字或标点，不得逐段增译、改写、删减、截断或发明缩写。保留目标语言片段边界必要的空格，使拼接能够无损还原完整译文。若需要调整整句语序，必须同步重写target_text及其分段。禁止跨 sentence_id 移动内容。
-4. 每个segments对象必须同时含有source和target，两者都必须含实际文字、数字或有意义的符号，禁止空串、空白或纯标点占位。任意一侧继续切分时，另一侧也要重新划分为相同数量，不能用空字符串补齐。
-5. 每段禁止实际换行、Unicode 换行控制符、字面量反斜杠加 N 或 n 等会被字幕解释为换行的转义。禁止通过 ASS 标签或 HTML 标签插入换行。保留 Emoji连接序列、重音组合和语言的书写方向。
-6. 短小但有实际含义的词也必须保留，包括独立 Yes/No、转折词和 may/might。um、uh 等用于演示卡壳、犹豫或引语时具有实际意义，译文必须体现。上下文仅供理解，不翻译进结果。
-7. 输入可能已为模型预算切成相邻片段，结合 context_before/context_after 理解，但只输出当前 text。检查每个 sentence_id 按输入顺序恰好出现一次、每条字幕两侧均有实际内容且不超限、字素边界安全、原文和完整译文均覆盖后返回。
-8. source_segments_hint 只是本地按词边界生成的长度可行性参考，不是必须采用的语义边界。先按完整意群确定原译配对，再参考它检查长度；发现生硬边界应主动调整。优先在标点、从句和完整短语之间停顿，不要为均衡字数拆开主语和谓语、修饰语和中心词、介词和宾语、助动词和主要动词。禁止将“而有意思的是，它 / 不只是……”或“that it / isn't …”作为分段，应将主语保留在下一段，如“And the interesting part is / that it isn't just a giant database of titles.”对应“而有意思的是，/ 它不只是一个庞大的书名数据库。”。两侧不必等长，完整语义优先于长度均衡，但都必须满足硬上限。参考分段不是额外内容，不要重复翻译。
+Work in this order:
+1. Read the complete input. If both complete texts fit their limits, keep one pair. Otherwise choose SMALL consecutive source phrases first. For a 60-character limit, prefer natural phrases around 30-45 characters on the longer side, leaving a margin below the ceiling; a meaningful phrase may be longer if it still fits the hard limit. For other limits, scale the working size. Do not cut by a fixed number of words. Look ahead before choosing each cut: keep names, numbers with units, short noun phrases, and short verb-complement groups together by cutting BEFORE the group when needed. Never leave a conjunction, preposition, or short pronoun hanging at the end of a segment when it belongs with the next phrase. A long clause must span multiple pairs. Keeping a whole clause together never justifies exceeding a hard limit. Avoid leaving a short pronoun or verb without its immediate continuation.
+2. Translate the phrases together as one coherent utterance. Keep each pair meaningful and align it as closely as the languages allow. Word order may differ across languages: when exact word-for-word pairing would require an overlong or empty segment, preserve short meaningful phrases in each language and judge correspondence over a small group of adjacent pairs. Approximate pairing within that group is preferable to an overlong line or an empty target. Do not repeat or omit content. If a target is too long, split it and the corresponding source again. Short phrases can be parts of a sentence; they do not need to be independent complete sentences. Avoid isolated function words or dangling fragments.
+3. If target_text is provided, it is an existing translation to preserve verbatim. Only repartition source and target into matching phrases; do not retranslate, improve, add, remove, or change punctuation in target_text. Otherwise output the translation once through the target segments. Do not return a target_text field.
+4. Check each pair separately: source length within its limit, target length within its limit, both meaningful, exact source coverage, no missing or repeated translated meaning. Fix offending pairs before returning. Choose shorter phrases if counting is uncertain; do not rely on the application to shorten them.
 
-配对示例：整句译文“我们努力工作，因为我们在乎。”可以分成[{"source":"We work hard","target":"我们努力工作，"},{"source":"because we care.","target":"因为我们在乎。"}]，拼接target仍是“我们努力工作，因为我们在乎。”。不能在target_text中写“因为我们在乎，所以我们努力工作。”后却沿用前述分段，否则语序和文字不一致。
+Source and target segments are each concatenated with an EMPTY separator. Preserve necessary word spaces at segment edges, preferably as trailing spaces. A boundary adds no space. For example, ["Read the ", "report."] forms "Read the report." Do not insert spaces inside words or into scripts that do not use them. Never split inside a grapheme cluster, including combining marks or joined emoji.
 
-仅输出 JSON，禁止 Markdown、解释、思考过程、计数和额外字段：
-{"sentences":[{"sentence_id":"输入ID","target_text":"目标片段1目标片段2","segments":[{"source":"原文片段1","target":"目标片段1"},{"source":"原文片段2","target":"目标片段2"}]}]}
+Example: the source has no punctuation; both limits are 60 characters.
+Input: at the end of each day I check the task list and move unfinished items to tomorrow
+Output:
+{"sentences":[{"sentence_id":"example","segments":[{"source":"at the end of each day ","target":"每天结束时，"},{"source":"I check the task list ","target":"我会检查任务清单，"},{"source":"and move unfinished items to tomorrow","target":"把未完成的事项移到明天。"}]}]}
+
+A long clause may need a boundary before its predicate. Example with a 60-character limit and no source punctuation:
+Input: because updating the shared calendar does not have a fixed deadline
+Output:
+{"sentences":[{"sentence_id":"example","segments":[{"source":"because updating the shared calendar ","target":"因为更新共享日历"},{"source":"does not have a fixed deadline","target":"没有固定的截止日期。"}]}]}
+
+Return every input sentence_id exactly once in input order. Output only JSON, without Markdown, counts, explanations, or extra fields:
+{"sentences":[{"sentence_id":"input ID","segments":[{"source":"source phrase","target":"corresponding translation"}]}]}
