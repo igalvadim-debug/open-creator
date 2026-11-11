@@ -23,8 +23,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Bilibili](https://img.shields.io/badge/dynamic/json?label=Bilibili&query=%24.data.follower&suffix=%E7%B2%89%E4%B8%9D&url=https%3A%2F%2Fapi.bilibili.com%2Fx%2Frelation%2Fstat%3Fvmid%3D242124650&logo=bilibili&color=00A1D6&labelColor=FE7398&logoColor=FFFFFF)](https://space.bilibili.com/242124650)
 [![AtomGit G-Star](https://img.shields.io/badge/AtomGit-G--Star-DA203E?style=flat)](https://atomgit.com/krillinai/OpenCreator)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fUNvbqDaw)
-[![QQ گروپ](https://img.shields.io/badge/QQ%20群-754069680-green?logo=tencent-qq)](https://qm.qq.com/q/W4YC0PLMeA)
+[![X](https://img.shields.io/badge/X-Follow-000000?logo=x&logoColor=white)](https://x.com/KrillinAIJunxi)
 
 [نمایاں خصوصیات](#project-highlights) · [تخلیقی ٹولز](#creator-tools) · [Skills](#skills) · [مثالیں](#examples) · [آغاز](#quick-start) · [Desktop](#desktop) · [دستاویزات](#documentation) · [کمیونٹی](#community)
 
@@ -71,7 +70,7 @@ Web واحد فرنٹ اینڈ ہے۔ Desktop وہی Web بلڈ لوڈ کرتا 
 
 - 🔐 **مقامی تحفظ**: ڈیٹا، منسلکات اور لاگ مقامی رہتے ہیں؛ منظوری اور حساس معلومات ہٹائی گئی تشخیصی رپورٹ دستیاب ہے۔
 
-- 🌐 **انٹرفیس کی زبان**: Web یا Desktop کو آسان چینی، انگریزی یا سویڈش میں استعمال کریں؛ سسٹم زبان خود شناخت ہوتی ہے یا دستی انتخاب کریں۔
+- 🌐 **کثیر لسانی انٹرفیس**: Web اور Desktop میں 43 زبانیں، سسٹم زبان کی شناخت، دستی انتخاب اور عربی، فارسی، اردو و عبرانی کے لیے دائیں سے بائیں ترتیب دستیاب ہے۔
 
 <a id="creator-tools"></a>
 
@@ -79,13 +78,21 @@ Web واحد فرنٹ اینڈ ہے۔ Desktop وہی Web بلڈ لوڈ کرتا 
 
 موجودہ ریلیز میں دس تخلیقی ٹولز ہیں۔ دستیاب ماڈل اور خدمات مقامی Codex ماحول اور AI خدمات کی ترتیبات پر منحصر ہیں۔
 
-Dashboard سے مضمون، Xiaohongshu پوسٹ یا مختصر ویڈیو اسکرپٹ لکھیں؛ اسٹک فگر اینیمیشن بنائیں؛ ویڈیو ترجمہ یا ڈاؤن لوڈ کریں؛ تھمب نیل، تصاویر یا ویڈیو بنائیں؛ Smart Dubbing سے وائس اوور تیار کریں۔
+Dashboard سے مضمون، Xiaohongshu پوسٹ یا مختصر ویڈیو اسکرپٹ لکھیں؛ اسٹک فگر اینیمیشن بنائیں؛ ویڈیو ترجمہ یا ڈاؤن لوڈ کریں؛ تھمب نیل، تصاویر یا ویڈیو بنائیں؛ Text to Speech سے وائس اوور تیار کریں۔
 
 ![OpenCreator تخلیقی Dashboard](../images/product/opencreator-dashboard-en.png)
 
 > مزید تخلیقی ٹولز مسلسل شامل ہو رہے ہیں۔
 
-**ویڈیو ترجمہ 14 ماخذ اور 101 ہدف زبانوں کی حمایت کرتا ہے۔** ماخذ زبانیں: آسان چینی، انگریزی، ہسپانوی، فرانسیسی، اطالوی، برازیلی پرتگالی، انڈونیشیائی، تھائی، جاپانی، کوریائی، جرمن، ترکی، روسی اور ملائی۔
+**ویڈیو ترجمے میں 123 ماخذ زبانیں اور پن یِن آؤٹ پٹ سمیت 124 ہدف اختیارات ہیں۔** مقامی، انگریزی یا چینی نام اور زبان کے کوڈ سے تلاش کریں۔ آواز کی شناخت اور تشکیل کی زبانوں کا انحصار منتخب سروس اور ماڈل پر ہے۔
+
+- **صرف سب ٹائٹل کا ترجمہ**: SRT درآمد کرکے فوراً پیش منظر دیکھیں اور اصل ویڈیو، ڈبنگ یا ویڈیو رینڈرنگ کے بغیر ترجمہ کریں۔
+
+- **سب ٹائٹل کی جدید تدوین**: پلے بیک سے مربوط ویوفارم اور ٹائم لائن والے مکمل اسکرین ایڈیٹر میں اوقات بدلیں، سب ٹائٹل تقسیم یا یکجا کریں اور متن تلاش کرکے بدلیں۔ ویڈیو پر انداز دیکھیں، زبان، آواز اور آؤٹ پٹ تبدیل کریں اور پرانے نتائج محفوظ رکھتے ہوئے نیا ورژن بنائیں۔
+
+- **ایک صفحے پر تخلیق**: تصویر، ویڈیو اور Text to Speech کی ترتیبات ایک صفحے پر مکمل کریں؛ ماڈل کا انتخاب، حوالہ جاتی تصاویر کا پیش منظر، ماڈل کے مطابق تصویری اختیارات اور قابل تلاش آوازوں کا مجموعہ استعمال کریں۔
+
+- **کثیر لسانی آؤٹ پٹ اور پیش رفت**: شامل متبادل فونٹس پیچیدہ رسم الخط اور دائیں سے بائیں سب ٹائٹل کی نمائش بہتر کرتے ہیں۔ نقل نویسی، ترجمے، ڈبنگ اور رینڈرنگ کی پیش رفت اور دستیاب ہونے پر مکمل و کل تعداد دیکھیں۔
 
 <table width="100%">
 <thead>
@@ -97,16 +104,16 @@ Dashboard سے مضمون، Xiaohongshu پوسٹ یا مختصر ویڈیو اس
 </thead>
 <tbody>
 <tr><td valign="top">ویڈیو ترجمہ</td><td valign="top">✅ دستیاب</td><td>مقامی یا عوامی ویڈیو درآمد؛ کلاؤڈ یا مقامی Whisper سے نقل نویسی؛ LLM سیاق سے سب ٹائٹل کی تقسیم، مطابقت، اصطلاحات اور ترجمہ؛ دو لسانی سب ٹائٹل، ڈبنگ یا اپنی آواز کا نمونہ، انداز، افقی/عمودی ترتیب؛ SRT، آڈیو یا ویڈیو برآمد</td></tr>
-<tr><td valign="top">ویڈیو ڈاؤن لوڈر</td><td valign="top">✅ دستیاب</td><td>YouTube، Bilibili، X، TikTok، Instagram، Douyin، Facebook، Xiaohongshu، Pinterest اور Reddit کی انفرادی عوامی ویڈیو جانچیں؛ فارمیٹ کا موازنہ اور ویڈیو یا آڈیو ڈاؤن لوڈ۔ بعض ذرائع کو پلیٹ فارم کوکی درکار ہے</td></tr>
+<tr><td valign="top">ویڈیو ڈاؤن لوڈر</td><td valign="top">✅ دستیاب</td><td>YouTube، Bilibili، X، TikTok، Instagram، Douyin، Facebook، Xiaohongshu، Pinterest اور Reddit کی انفرادی عوامی ویڈیو جانچیں؛ فارمیٹ کا موازنہ اور ویڈیو یا آڈیو ڈاؤن لوڈ۔ بعض ذرائع کو پلیٹ فارم کوکی درکار ہے. پلیٹ فارم پر سب ٹائٹل دستیاب ہوں تو فہرست دیکھیں اور SRT ڈاؤن لوڈ کریں؛ پہلے انگریزی، پھر دستیاب ہونے پر انٹرفیس کی زبان دکھائی جاتی ہے۔</td></tr>
 <tr><td valign="top">تھمب نیل بنانا</td><td valign="top">✅ دستیاب</td><td>موضوع، ویڈیو لنک اور اختیاری حوالہ تصویر سے متعدد تھمب نیل بنائیں اور موازنہ کریں</td></tr>
-<tr><td valign="top">تصویر بنانا</td><td valign="top">✅ دستیاب</td><td>پرامپٹ اور اختیاری حوالہ تصویر سے GPT Image؛ تناسب اور تعداد مقرر کریں؛ ہر تصویر دیکھیں اور ڈاؤن لوڈ کریں</td></tr>
+<tr><td valign="top">تصویر بنانا</td><td valign="top">✅ دستیاب</td><td>پرامپٹ اور اختیاری حوالہ تصویر سے GPT Image / Seedream / Kling Image / Gemini؛ تناسب اور تعداد مقرر کریں؛ ہر تصویر دیکھیں اور ڈاؤن لوڈ کریں</td></tr>
 <tr><td valign="top">مضمون نگاری</td><td valign="top">✅ دستیاب</td><td>موضوع، لنک، ویڈیو یا ماخذ دستاویز سے قابلِ تدوین موضوعات، خاکہ اور مکمل مضمون؛ تیار تصاویر شامل اور Markdown، HTML یا PDF برآمد کریں</td></tr>
 <tr><td valign="top">Xiaohongshu پوسٹ</td><td valign="top">✅ دستیاب</td><td>موضوع یا مواد سے مکمل پوسٹ؛ قارئین، قسم اور طوالت مقرر؛ نتیجہ نقل یا ڈاؤن لوڈ کریں</td></tr>
 <tr><td valign="top">مختصر ویڈیو اسکرپٹ</td><td valign="top">✅ دستیاب</td><td>موضوع یا ماخذ سے ناظرین، پلیٹ فارم، دورانیے اور لہجے کے مطابق شوٹنگ کے لیے تیار حصوں والا اسکرپٹ؛ تدوین، نقل یا ڈاؤن لوڈ</td></tr>
 <tr><td valign="top">اسٹک فگر اینیمیشن</td><td valign="top">✅ دستیاب</td><td>متن یا YouTube سے بیان، آواز، یکساں کرداروں والا اسٹوری بورڈ، سب ٹائٹل اور قابلِ ڈاؤن لوڈ اینیمیشن</td></tr>
 <tr><td valign="top">خودکار کلپس</td><td valign="top">زیرِ تیاری</td><td>طویل ویڈیو جانچیں، نمایاں لمحات تلاش کریں اور منتخب حصوں کو قابلِ استعمال مختصر کلپس بنائیں</td></tr>
-<tr><td valign="top">سمارٹ ڈبنگ</td><td valign="top">✅ دستیاب</td><td>آواز، رفتار اور جذبات کے انتخاب سے اسکرپٹ کو وائس اوور بنائیں</td></tr>
-<tr><td valign="top">ویڈیو بنانا</td><td valign="top">✅ دستیاب</td><td>پرامپٹ اور حوالہ تصاویر سے Seedance ویڈیو؛ ہر ورژن دیکھیں، دوبارہ بنائیں اور ڈاؤن لوڈ کریں</td></tr>
+<tr><td valign="top">Text to Speech</td><td valign="top">✅ دستیاب</td><td>آواز، رفتار اور جذبات کے انتخاب سے اسکرپٹ کو وائس اوور بنائیں</td></tr>
+<tr><td valign="top">ویڈیو بنانا</td><td valign="top">✅ دستیاب</td><td>پرامپٹ اور حوالہ تصاویر سے Seedance / Kling / Veo ویڈیو؛ ہر ورژن دیکھیں، دوبارہ بنائیں اور ڈاؤن لوڈ کریں</td></tr>
 <tr><td valign="top">ڈیجیٹل اوتار</td><td valign="top">زیرِ تیاری</td><td>اسکرپٹ، آواز اور اوتار سے بولتے کردار کی ویڈیو بنائیں</td></tr>
 </tbody>
 </table>
@@ -298,6 +305,12 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 > یہ ویڈیو مثالیں اور سب ٹائٹل مطابقت کی تصویر KrillinAI نام کے دور کی ہیں۔
 
+#### سب ٹائٹل ایڈیٹر
+
+بلٹ اِن سب ٹائٹل ایڈیٹر اصل اور ترجمہ شدہ متن کی ساتھی ساتھی ترمیم، ہم آہنگ ویڈیو پری ویو، پلے بیک سے جُڑی ویو فارم اور ٹائم لائن، اور حسب ضرورت سب ٹائٹل اسٹائلز فراہم کرتا ہے۔
+
+![OpenCreator subtitle editor](../images/examples/video-translation-subtitle-editor-en.png)
+
 <a id="video-downloader"></a>
 
 ### ویڈیو ڈاؤن لوڈر
@@ -323,7 +336,7 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 دستیابی ویڈیو اور خطے کے مطابق بدلتی ہے؛ بعض ذرائع کو پلیٹ فارم کوکی چاہیے۔
 
-![OpenCreator ویڈیو ڈاؤن لوڈر میں فارمیٹ انتخاب](../images/examples/video-downloader-formats-en.png)
+![OpenCreator ویڈیو ڈاؤن لوڈر میں فارمیٹ انتخاب](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 <a id="video-generation"></a>
 
@@ -705,7 +718,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## کمیونٹی
 
-<p><strong>کم از کم 100 ممالک اور خطوں</strong> کے GitHub صارفین نے OpenCreator کو اسٹار دیا ہے۔</p>
+<p><strong>کم از کم 107 ممالک اور خطوں</strong> کے GitHub صارفین نے OpenCreator کو اسٹار دیا ہے۔</p>
 
 <img src="../images/star-coverage-map.svg" alt="OpenCreator کو GitHub اسٹار دینے والے ممالک اور خطوں کا نقشہ" width="760" />
 

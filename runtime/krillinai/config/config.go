@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	"go.uber.org/zap"
@@ -21,12 +22,13 @@ type App struct {
 	TranslateParallelNum  int      `toml:"translate_parallel_num"`
 	TranscribeMaxAttempts int      `toml:"transcribe_max_attempts"`
 	TranslateMaxAttempts  int      `toml:"translate_max_attempts"`
-	MaxSentenceLength     int      `toml:"max_sentence_length"` // 原文和译文单行上限：宽字素簇计2，其余基础字素簇计1
+	MaxSentenceLength     int      `toml:"max_sentence_length"` // 原译每行字符目标；60时验收至65，其他值为硬上限；包含空格和标点
 	EnableBlockVttBatch   bool     `toml:"enable_block_vtt_batch"`
 	VttBatchSize          int      `toml:"vtt_batch_size"`
 	TargetLanguageFirst   bool     `toml:"target_language_first"`    // 双语字幕中目标语言是否在上
 	ShortSubtitleMaxChars int      `toml:"short_subtitle_max_chars"` // 短字幕原文按词分组的字符长度，独立于普通字幕的目标语言长度
 	Proxy                 string   `toml:"proxy"`
+	YouTubeProxy          string   `toml:"youtube_proxy"`
 	ParsedProxy           *url.URL `toml:"-"`
 }
 
@@ -39,6 +41,7 @@ type OpenaiCompatibleConfig struct {
 	BaseUrl       string `toml:"base_url"`
 	ApiKey        string `toml:"api_key"`
 	Model         string `toml:"model"`
+	ModelName     string `toml:"model_name"`
 	OfficialModel string `toml:"official_model"`
 }
 
@@ -66,7 +69,9 @@ type AliyunTranscribeConfig struct {
 }
 
 // VolcengineAsrConfig holds Doubao Voice / OpenSpeech console credentials.
-// AppId and AccessToken are shared with TTS; ASR sends the token as X-Api-Access-Key.
+// AccessToken carries either a newer-console API Key or an older-console
+// Access Token. An empty AppId selects the single X-Api-Key form; a non-empty
+// AppId sends the App ID plus Access Token pair.
 type VolcengineAsrConfig struct {
 	AppId       string `toml:"app_id"`
 	AccessToken string `toml:"access_token"`
@@ -121,15 +126,17 @@ type Tts struct {
 }
 
 type Dubbing struct {
-	MinSubtitleDuration float64 `toml:"min_subtitle_duration"`
-	MaxChunkSize        int     `toml:"max_chunk_size"`
-	GapTolerance        float64 `toml:"gap_tolerance"`
-	SpeedMin            float64 `toml:"speed_min"`
-	SpeedAccept         float64 `toml:"speed_accept"`
-	SpeedMax            float64 `toml:"speed_max"`
-	EnableTextRewrite   bool    `toml:"enable_text_rewrite"`
-	RewriteMaxAttempts  int     `toml:"rewrite_max_attempts"`
-	Estimator           string  `toml:"estimator"`
+	MinSubtitleDuration   float64 `toml:"min_subtitle_duration"`
+	MaxChunkSize          int     `toml:"max_chunk_size"`
+	MaxSubtitleChars      int     `toml:"max_subtitle_chars"`
+	GapTolerance          float64 `toml:"gap_tolerance"`
+	SpeedMin              float64 `toml:"speed_min"`
+	SpeedAccept           float64 `toml:"speed_accept"`
+	SpeedMax              float64 `toml:"speed_max"`
+	MaxTimingOverrunRatio float64 `toml:"max_timing_overrun_ratio"`
+	EnableTextRewrite     bool    `toml:"enable_text_rewrite"`
+	RewriteMaxAttempts    int     `toml:"rewrite_max_attempts"`
+	Estimator             string  `toml:"estimator"`
 }
 
 type Image struct {
@@ -159,7 +166,7 @@ var Conf = Config{
 		TranscribeParallelNum: 1,
 		TranscribeMaxAttempts: 3,
 		TranslateMaxAttempts:  3,
-		MaxSentenceLength:     70,
+		MaxSentenceLength:     60,
 		EnableBlockVttBatch:   false,
 		VttBatchSize:          10,
 	},
@@ -211,15 +218,17 @@ var Conf = Config{
 		},
 	},
 	Dubbing: Dubbing{
-		MinSubtitleDuration: 2.5,
-		MaxChunkSize:        5,
-		GapTolerance:        1.5,
-		SpeedMin:            0.95,
-		SpeedAccept:         1.15,
-		SpeedMax:            1.30,
-		EnableTextRewrite:   true,
-		RewriteMaxAttempts:  2,
-		Estimator:           "statistical",
+		MinSubtitleDuration:   3.0,
+		MaxChunkSize:          5,
+		MaxSubtitleChars:      70,
+		GapTolerance:          1.5,
+		SpeedMin:              0.95,
+		SpeedAccept:           1.15,
+		SpeedMax:              1.30,
+		MaxTimingOverrunRatio: 0.10,
+		EnableTextRewrite:     true,
+		RewriteMaxAttempts:    3,
+		Estimator:             "statistical",
 	},
 	Image: Image{
 		Provider: "openai-compatible",
@@ -267,8 +276,8 @@ func ValidateTranscriptionConfig() error {
 			return errors.New("使用 FunASR 需要配置 Base URL 和模型")
 		}
 	case "volcengine":
-		if Conf.Transcribe.Volcengine.AppId == "" || Conf.Transcribe.Volcengine.AccessToken == "" {
-			return errors.New("使用火山引擎语音识别需要配置 App ID 和 Access Token")
+		if Conf.Transcribe.Volcengine.AccessToken == "" {
+			return errors.New("使用火山引擎语音识别需要配置 API Key 或 Access Token")
 		}
 	default:
 		return errors.New("不支持的转录提供商")
@@ -292,8 +301,11 @@ func ValidateTTSConfig() error {
 			return errors.New("使用 MiniMax 配音服务需要配置 API Key")
 		}
 	case "volcengine":
-		if Conf.Tts.Volcengine.AppId == "" || Conf.Tts.Volcengine.AccessToken == "" {
-			return errors.New("使用火山引擎配音服务需要配置 App ID 和 Access Token")
+		if Conf.Tts.Volcengine.AccessToken == "" {
+			return errors.New("使用火山引擎配音服务需要配置 API Key 或 Access Token")
+		}
+		if !strings.HasPrefix(Conf.Tts.Volcengine.Cluster, "seed-") && Conf.Tts.Volcengine.AppId == "" {
+			return errors.New("使用旧版火山引擎配音服务需要配置 App ID")
 		}
 	case "edge-tts":
 		return nil
@@ -334,6 +346,15 @@ func CheckBaseConfig() error {
 	var err error
 	Conf.App.ParsedProxy, err = url.Parse(Conf.App.Proxy)
 	return err
+}
+
+// YouTubeProxy returns the dedicated media proxy when provided. Older
+// standalone KrillinAI configs only have app.proxy, so retain that fallback.
+func YouTubeProxy() string {
+	if proxy := strings.TrimSpace(Conf.App.YouTubeProxy); proxy != "" {
+		return proxy
+	}
+	return strings.TrimSpace(Conf.App.Proxy)
 }
 
 // SaveConfig 保存配置到文件

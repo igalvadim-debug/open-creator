@@ -1,3 +1,4 @@
+import AppSelect from '../../components/forms/Select.js';
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Check, CircleCheck, CircleAlert, FolderOpen, LogIn, Moon, Save, Sun, UserRound } from 'lucide-react';
 import type {
@@ -9,7 +10,8 @@ import { useConfirmDialog } from '../../components/dialogs/ConfirmDialogProvider
 import type { ColorMode } from '../../styles/color-mode.js';
 import { useAppLanguage } from '../../i18n/LanguageProvider.js';
 import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
-import { appLanguageOptions, type AppLanguagePreference } from '../../i18n/language.js';
+import { appLanguageOptions, resolveSystemLanguage } from '../../i18n/language.js';
+import LanguageSelect from '../../components/forms/LanguageSelect.js';
 import {
   defaultAccentColor,
   defaultCustomAccentColor,
@@ -20,6 +22,7 @@ import type { ProjectPermission } from '../projects/project-model.js';
 import { ProfileSettingsView, type ProfileSettingsService } from './ProfileSettingsView.js';
 import { CleanupSettingsView, type CleanupSettingsService } from './CleanupSettingsView.js';
 import { DiagnosticsSettingsView } from './DiagnosticsSettingsView.js';
+import { readTranslationContinuation } from '../dashboard/video-translation-continuation.js';
 import type { CreatorServicesSection } from './CreatorServicesSettingsView.js';
 import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
 import type { CodexRuntimeSettingsService } from './CodexRuntimeSettingsView.js';
@@ -30,6 +33,7 @@ import {
 } from './MemorySettingsView.js';
 import type { RuntimeDependenciesController } from '../../app/use-runtime-dependencies.js';
 import { RuntimeComponentsSettingsView } from './RuntimeComponentsSettingsView.js';
+import './settings-layout.css';
 import './settings-management.css';
 import type { OpenCreatorSettingsService } from '../../services/opencreator-settings-service.js';
 import { IssueList } from '../issues/IssuePresenter.js';
@@ -41,12 +45,16 @@ import type { GatewayAccountState } from '@opencreator/protocol';
 import { OfficialServicesSettingsView } from './OfficialServicesSettingsView.js';
 import { OfficialServiceRecovery } from './OfficialServiceRecovery.js';
 import { NetworkSettings } from './NetworkSettings.js';
-import { PlatformConnectionsSettingsView } from './PlatformConnectionsSettingsView.js';
 import type { PlatformConnectionsService } from '../../services/platform-connections-service.js';
 
 const CreatorServicesSettingsView = lazy(async () => {
   const module = await import('./CreatorServicesSettingsView.js');
   return { default: module.CreatorServicesSettingsView };
+});
+
+const PlatformConnectionsSettingsView = lazy(async () => {
+  const module = await import('./PlatformConnectionsSettingsView.js');
+  return { default: module.PlatformConnectionsSettingsView };
 });
 
 export type RuntimeStatus = {
@@ -101,6 +109,7 @@ export type OpenCreatorSettingsViewProps = {
   initialSection?: CreatorServicesSection;
   componentId?: string;
   returnToTranslation?: boolean;
+  translationReturnPath?: string;
   onBack(): void;
 };
 
@@ -241,6 +250,7 @@ export function OpenCreatorSettingsView(props: OpenCreatorSettingsViewProps) {
                 service={props.creatorServicesService ?? null}
                 modelService={props.codexRuntimeService ?? null}
                 initialSection={props.initialSection}
+                onReturnToTranslation={props.returnToTranslation && readTranslationContinuation()?.returnPath === props.translationReturnPath ? props.onBack : undefined}
                 modeControls={<>
                   {modeControls}
                   {props.agentSetupNeeded && props.onOpenAgentSetup !== undefined ? (
@@ -265,7 +275,11 @@ export function OpenCreatorSettingsView(props: OpenCreatorSettingsViewProps) {
             controller={props.runtimeDependencies}
           />
         ) : null}
-        {activeTab === 'platform-connections' ? <PlatformConnectionsSettingsView connected={props.runtimeStatus.connected} service={props.platformConnectionsService} /> : null}
+        {activeTab === 'platform-connections' ? (
+          <Suspense fallback={<p role="status">{l('正在加载…', 'Loading…')}</p>}>
+            <PlatformConnectionsSettingsView connected={props.runtimeStatus.connected} service={props.platformConnectionsService} />
+          </Suspense>
+        ) : null}
         {activeTab === 'plugins' ? <PluginSettings runtimeStatus={props.runtimeStatus} /> : null}
         {activeTab === 'memory' ? (
           <MemorySettingsView
@@ -321,7 +335,7 @@ function GeneralSettings(props: {
   storageSettingsService?: Pick<OpenCreatorSettingsService, 'getStorageSettings' | 'updateStorageSettings'> | null;
   onSelectStorageDirectory?(purpose: 'default-project-root' | 'output-root'): Promise<string | null>;
 }) {
-  const { language, preference, setPreference, t } = useAppLanguage();
+  const { preference, setPreference, t } = useAppLanguage();
   const confirm = useConfirmDialog();
   const l = useLocalizedCopy();
   const [storage, setStorage] = useState<OpenCreatorStorageSettings>();
@@ -432,14 +446,7 @@ function GeneralSettings(props: {
     { value: 'workspace-write', label: t('settings.permission.approval') },
     { value: 'danger-full-access', label: t('settings.permission.fullAccess') }
   ];
-  const languageName = appLanguageOptions.find(option => option.value === language)?.label ?? 'English';
-  const languageOptions: Array<{ value: AppLanguagePreference; label: string }> = [
-    {
-      value: 'system',
-      label: t('settings.language.system', { language: languageName })
-    },
-    ...appLanguageOptions
-  ];
+  const languageName = appLanguageOptions.find(option => option.value === resolveSystemLanguage())?.label ?? 'English';
 
   return (
     <section className="settings-section" aria-labelledby="settings-general-title">
@@ -512,19 +519,18 @@ function GeneralSettings(props: {
           }}
         />
         <SettingsRow label={t('settings.defaultFileApp')} value={t('settings.systemDefaultApp')} />
-        <SettingsSelectRow
-          id="settings-display-language"
-          label={t('settings.language')}
-          value={preference}
-          options={languageOptions}
-          onChange={setPreference}
-        />
+        <div className="settings-row settings-control-row settings-language-row">
+          <label htmlFor="settings-display-language">{t('settings.language')}</label>
+          <LanguageSelect id="settings-display-language" label={t('settings.language')}
+            value={preference} systemLabel={t('settings.language.system', { language: languageName })}
+            onChange={setPreference} />
+        </div>
         {props.desktopCloseBehavior === undefined ? (
           <SettingsRow label={t('settings.menuBar')} value={t('settings.browserMode')} />
         ) : (
           <label className="settings-row settings-control-row" htmlFor="settings-desktop-close-behavior">
             <span>{t('settings.closeWindow')}</span>
-            <select
+            <AppSelect
               id="settings-desktop-close-behavior"
               className="settings-select"
               value={props.desktopCloseBehavior}
@@ -534,7 +540,7 @@ function GeneralSettings(props: {
             >
               <option value="hide">{t('settings.hideToMenuBar')}</option>
               <option value="quit">{t('settings.quit')}</option>
-            </select>
+            </AppSelect>
           </label>
         )}
         {props.desktopTelemetryEnabled === undefined ? null : (
@@ -879,7 +885,7 @@ function SettingsSelectRow<Value extends string>(props: {
   return (
     <label className="settings-row settings-control-row" htmlFor={props.id}>
       <span>{props.label}</span>
-      <select
+      <AppSelect
         id={props.id}
         className="settings-select"
         value={props.value}
@@ -888,7 +894,7 @@ function SettingsSelectRow<Value extends string>(props: {
         {props.options.map(option => (
           <option key={option.value} value={option.value}>{option.label}</option>
         ))}
-      </select>
+      </AppSelect>
     </label>
   );
 }

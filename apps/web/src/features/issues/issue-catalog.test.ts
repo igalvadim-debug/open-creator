@@ -64,6 +64,19 @@ describe('localized issue copy', () => {
     expect(text.nextStep).not.toContain('模型');
   });
 
+  it('identifies an expired YouTube caption session and directs the user to reconnect it', () => {
+    const next = { ...issue, code: 'platform_caption_access_failed', publicFacts: {
+      kind: 'unknown' as const, provider: 'krillinai',
+      upstreamMessage: 'WARNING: [youtube] The provided YouTube account cookies are no longer valid.'
+    } };
+    const text = issueConversationText(next, 'zh-CN');
+    expect(text.message).toContain('YouTube 登录态已失效');
+    expect(text.nextStep).toContain('平台连接');
+    expect(text.nextStep).toContain('重试字幕翻译');
+    expect(text.nextStep).not.toContain('模型');
+    expect(text.message).not.toContain('WARNING:');
+  });
+
   it('keeps model permission guidance for a model provider authorization error', () => {
     expect(issueConversationText({ ...issue, publicFacts: {
       kind: 'unauthorized', provider: 'openai', httpStatus: 403
@@ -181,6 +194,17 @@ describe('localized issue copy', () => {
     expect(presentIssue(next, 'sv-SE').description).toContain('Agent kunde inte slutföra diagnostiken');
     expect(presentIssue(next, 'sv-SE').description).not.toContain(raw);
     expect(issueDiagnosticText(next)).toBe(raw);
+  });
+
+  it('explains configuration recovery and tells the user to resend without hiding the original reason', () => {
+    const next = { ...issue, code: 'creator_codex_config_resynced', operation: 'creator.agent-turn',
+      publicFacts: { kind: 'configuration' as const, provider: 'codex', upstreamMessage: 'The model is not supported.' } };
+    expect(presentIssue(next, 'zh-CN').description).toContain('已重新同步本机 Codex 配置');
+    expect(presentIssue(next, 'zh-CN').description).toContain('The model is not supported.');
+    expect(issueConversationText(next, 'zh-CN').nextStep).toContain('重新发送刚才的请求');
+    const failed = { ...next, code: 'creator_codex_config_check_failed' };
+    expect(presentIssue(failed, 'zh-CN').description).toContain('本机 Codex 配置检查失败');
+    expect(issueConversationText(failed, 'zh-CN').nextStep).toContain('配置文件和登录信息');
   });
 
   it('keeps sanitized raw evidence in a localized, read-only Agent inquiry', () => {

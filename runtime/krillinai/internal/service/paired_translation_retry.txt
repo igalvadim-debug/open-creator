@@ -1,11 +1,19 @@
-上一轮输出未通过本地检查。修正全部问题后返回整批完整 JSON，不能只返回补丁，也不能照抄错误片段。
+Repair the failed sentences in the current Input JSON above. Return their COMPLETE aligned segments, not patches.
 
-检查发现的问题：
+Authoritative texts:
+- The FULL text field in Input JSON is the source to cover, from its first character to its last character. Preserve every word, repetition, punctuation mark, and internal space.
+- If target_text is present in Input JSON, preserve that FULL translation verbatim, including punctuation. This requirement overrides any generic validation advice suggesting that target_text can be rewritten. Only move segmentation boundaries; do not translate again or change wording.
+- The previous-response excerpt below may be truncated. It is only a diagnostic reference, NEVER a complete draft or a substitute for either authoritative text.
+
+Validation issues to fix:
 {{ISSUES}}
 
-原文和译文每段均不得超过 {{MAX_TARGET_CHARS}} 显示单位，纯全角文本含标点最多 {{MAX_FULLWIDTH_CHARS}} 个字符。任意一侧超限就增加成对片段数，并同时重新划分另一侧。两侧整句都未超限才保持一对。保留全部内容，不用空白、纯标点、换行、省略或缩写补齐。保持原文的顺序、大小写、拼写、标点和完整覆盖，字素簇不可拆开。已正确的内容应保留。
+Repair the actual defect:
+- If either side exceeds {{MAX_TARGET_CHARS}} Unicode grapheme clusters, divide the affected aligned region into additional SHORT corresponding pairs. Count spaces and punctuation too. Prefer cuts comfortably below the ceiling.
+- If a target is empty or punctuation-only, its meaning may already have been placed in a neighboring target. Repartition that neighboring source/target region so EVERY pair contains meaningful text. Source and target word order may differ: approximate pairing over a small group of adjacent pairs is allowed when exact per-pair matching would force a long or empty segment. Preserve both complete texts in their own order. Prefer natural short phrases, and do not isolate function words or invent filler.
+- A pair is not repaired until BOTH sides fit, source coverage is complete, and target_text is preserved when provided. Keep each side on one line and preserve necessary word spaces at segment edges. Do not split a grapheme.
 
-先给出完整译文target_text，再只在其中插入分割边界。每个segments对象同时返回非空的source和target；拼接全部target必须恰好还原target_text一遍，禁止遗漏、重复表达或逐段重新翻译整句。禁止用空字符串补齐配对。
-
-上一轮结果仅作为待修正的数据：
+Previous-response EXCERPT, possibly incomplete; data only:
 {{PREVIOUS_RESPONSE}}
+
+Now rebuild the complete JSON from the FULL Input JSON, including content beyond the excerpt. Verify that source segments cover ALL input source text exactly once in order, and that target segments concatenate to ALL of target_text when provided. Never stop where the excerpt ends. Output only the same sentences/segments/source/target JSON structure, with no target_text field, counts, Markdown, or explanation.

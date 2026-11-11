@@ -174,7 +174,7 @@ func TestHorizontalAssUsesCustomSubtitleStyle(t *testing.T) {
 	}
 }
 
-func TestHorizontalAssWrapsLargeFontChineseSubtitle(t *testing.T) {
+func TestHorizontalAssKeepsLargeFontChineseSubtitleSingleLine(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "large-chinese.srt")
 	out := filepath.Join(dir, "large-chinese.ass")
@@ -199,31 +199,40 @@ func TestHorizontalAssWrapsLargeFontChineseSubtitle(t *testing.T) {
 		t.Fatal(err)
 	}
 	ass := string(data)
-	if !strings.Contains(ass, `\N`) {
-		t.Fatalf("large-font Chinese subtitle was not wrapped: %s", ass)
+	if strings.Contains(ass, `\N`) || !strings.Contains(ass, "WrapStyle: 2") {
+		t.Fatalf("large-font Chinese subtitle must remain a single line: %s", ass)
 	}
 }
 
-func TestHorizontalAssWrapsChineseWithShorterFirstLine(t *testing.T) {
-	fontSize := 26
-	style := subtitlestyle.DefaultStyleSet()
-	style.Horizontal.Major.FontSize = &fontSize
-
-	got := wrapSubtitleForASS("只是想让你知道你走在正确的道路上", style.Horizontal.Major, &types.SubtitleTaskStepParam{
-		RenderWidth:  1920,
-		RenderHeight: 1080,
-	})
-	if len(got) != 2 {
-		t.Fatalf("wrapped line count = %d, want 2; lines = %#v", len(got), got)
+func TestAssBilingualNeverWrapsEitherLanguage(t *testing.T) {
+	for _, horizontal := range []bool{true, false} {
+		for _, target := range []string{strings.Repeat("中文字幕", 15), strings.Repeat("한국어 자막 ", 12), strings.Repeat("हिन्दी उपशीर्षक ", 10)} {
+			dir := t.TempDir()
+			in, out := filepath.Join(dir, "bilingual.srt"), filepath.Join(dir, "bilingual.ass")
+			source := "In The Artist's Way, Julia Cameron suggests three pages of stream of consciousness writing every single morning."
+			if err := os.WriteFile(in, []byte("1\n00:00:01,000 --> 00:00:09,000\n"+target+"\n"+source+"\n\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := srtToAss(in, out, horizontal, &types.SubtitleTaskStepParam{RenderWidth: 360, RenderHeight: 640}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ass := string(data)
+			if strings.Count(ass, "Dialogue:") != 1 || strings.Count(ass, `\N`) != 1 || !strings.Contains(ass, "WrapStyle: 2") || !strings.Contains(ass, strings.TrimSuffix(source, ".")) {
+				t.Fatalf("bilingual rendering must keep exactly one line per language: %s", ass)
+			}
+		}
 	}
+}
 
-	firstWidth := subtitleDisplayWidth(got[0])
-	secondWidth := subtitleDisplayWidth(got[1])
-	if firstWidth >= secondWidth {
-		t.Fatalf("first Chinese subtitle line should be shorter than second: lines=%#v widths=%d,%d", got, firstWidth, secondWidth)
-	}
-	if strings.Contains(strings.Join(got, "\n"), "知\n道") {
-		t.Fatalf("Chinese subtitle should not break inside the word 知道: lines=%#v", got)
+func TestHorizontalAssKeepsChineseSubtitleSingleLine(t *testing.T) {
+	text := "只是想让你知道你走在正确的道路上"
+	got := wrapSubtitleForASS(text, subtitlestyle.Style{}, &types.SubtitleTaskStepParam{RenderWidth: 720, RenderHeight: 1280})
+	if len(got) != 1 || got[0] != text {
+		t.Fatalf("single-language subtitle was wrapped: %#v", got)
 	}
 }
 
@@ -302,7 +311,7 @@ func TestHorizontalAssDoesNotSplitLongEnglishToken(t *testing.T) {
 	}
 }
 
-func TestHorizontalAssWrapsUsingNarrowRenderWidth(t *testing.T) {
+func TestHorizontalAssKeepsSingleLineAtNarrowRenderWidth(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "narrow-chinese.srt")
 	out := filepath.Join(dir, "narrow-chinese.ass")
@@ -329,8 +338,8 @@ func TestHorizontalAssWrapsUsingNarrowRenderWidth(t *testing.T) {
 		t.Fatal(err)
 	}
 	ass := string(data)
-	if !strings.Contains(ass, `\N`) {
-		t.Fatalf("narrow render width was not used for subtitle wrapping: %s", ass)
+	if strings.Contains(ass, `\N`) || !strings.Contains(ass, "WrapStyle: 2") {
+		t.Fatalf("narrow rendering must not wrap subtitles: %s", ass)
 	}
 }
 

@@ -7,6 +7,7 @@ import {
   createKrillinCliEnvironment,
   outputMappings,
   parseKrillinCliProgressFrame,
+  resolveKrillinNlpPython,
   resolveKrillinCliSource
 } from '../../src/creator/krillin/cli-runner.js';
 import { createKrillinConfigToml } from '../../src/creator/krillin/config-bridge.js';
@@ -47,7 +48,7 @@ describe('KrillinAI CLI protocol', () => {
 
   it('passes saved legacy styles instead of silently using runtime defaults', () => {
     const stage = { job: { templateId: 'video-translation', state: { subtitleFont: 'rounded', subtitleSize: 'large', subtitleColor: '#123456', subtitleShadowOffsetX: -4, subtitleShadowOffsetY: 6, subtitleShadowBlur: 2 } }, stageRun: { stageId: 'render-horizontal' } };
-    expect(buildKrillinStageOptions(stage as never).subtitleStyle).toMatchObject({ horizontal: { major: { font_name: 'OpenCreator Rounded Bold', font_size: 18, primary_color: '#123456', override_tags: '\\xshad-4\\yshad6\\blur2' } } });
+    expect(buildKrillinStageOptions(stage as never).subtitleStyle).toMatchObject({ horizontal: { major: { font_name: 'OpenCreator Rounded Bold', font_size: 22, primary_color: '#123456', override_tags: '\\xshad-4\\yshad6\\blur2' } } });
   });
 
   it.each([true, false])('keeps edited vertical subtitles and renders the requested bilingual=%s mode', bilingual => {
@@ -62,24 +63,48 @@ describe('KrillinAI CLI protocol', () => {
     expect(args[args.indexOf('--line-mode') + 1]).toBe('bilingual-target-bottom');
     expect(args.includes('--target-only')).toBe(!bilingual);
   });
+  it.each(['render-horizontal', 'render-vertical'] as const)('burns the dubbing-aligned %s subtitles selected by the style settings', stageId => {
+    for (const bilingual of [true, false]) {
+      const stage = { job: { templateId: 'video-translation', state: { dubbing: true, bilingual } }, stageRun: { stageId, id: 'render' }, workdir: '/job/render' };
+      const args = buildKrillinCliCommandArguments(stage as never, [
+        { id: 'source', kind: 'source_video', path: '/job/video.mp4' },
+        { id: 'dubbed', kind: 'dubbed_video', path: '/job/dubbed.mp4' },
+        { id: 'target', kind: 'target_subtitle', path: '/job/tts/target.srt' },
+        { id: 'bilingual', kind: 'bilingual_subtitle', path: '/job/tts/bilingual.srt' },
+        { id: 'vertical', kind: 'vertical_subtitle', path: '/job/subtitle/vertical.srt' }
+      ], buildKrillinStageOptions(stage as never), undefined);
+      expect(args[args.indexOf('--subtitle') + 1]).toBe(bilingual ? '/job/tts/bilingual.srt' : '/job/tts/target.srt');
+      expect(args[args.indexOf('--line-mode') + 1]).toBe(bilingual ? 'bilingual-target-top' : 'target-only');
+      expect(args).toContain('/job/dubbed.mp4');
+    }
+  });
   it.each([true, false])('never prepares video in the translation subtitle stage, even when composeVideo=%s', composeVideo => {
     const stage = { job: { templateId: 'video-translation', state: { sourceUrl: 'https://youtu.be/demo', sourceLanguage: 'en', targetLanguage: 'zh_cn', composeVideo } }, stageRun: { stageId: 'subtitle', id: 'stage' }, workdir: '/job/stage' };
     const options = buildKrillinStageOptions(stage as never);
     expect(buildKrillinCliCommandArguments(stage as never, [], options, undefined)).not.toContain('--prepare-video');
   });
 
-  it('generates audio-only dubbing without a video, and lazily composes that audio later', () => {
-    const state = { sourceUrl: 'https://youtu.be/demo', dubbing: true, composeVideo: false };
+  it.each([true, false])('generates a subtitle-free dubbed video for video sources (composeVideo=%s)', composeVideo => {
+    const state = { sourceUrl: 'https://youtu.be/demo', dubbing: true, composeVideo };
     const stage = { job: { templateId: 'video-translation', state }, stageRun: { stageId: 'tts', id: 'tts' }, workdir: '/job/tts' };
     const subtitle = { id: 'subtitle', kind: 'target_subtitle', path: '/job/target.srt' };
     const tts = buildKrillinCliCommandArguments(stage as never, [subtitle], buildKrillinStageOptions(stage as never), undefined);
-    expect(tts).toContain('--audio-only');
-    expect(tts).not.toContain('--source-url');
+    expect(tts).not.toContain('--audio-only');
+    expect(tts).toContain('--source-url');
+    expect(tts.slice(tts.indexOf('--input-srt'), tts.indexOf('--input-srt') + 2))
+      .toEqual(['--input-srt', '/job/tts/target_language_srt.srt']);
     const render = { ...stage, job: { ...stage.job, state: { ...state, composeVideo: true } }, stageRun: { stageId: 'render-horizontal', id: 'render' } };
     const args = buildKrillinCliCommandArguments(render as never, [subtitle, { id: 'audio', kind: 'dubbed_audio', path: '/job/dubbed.wav' }], buildKrillinStageOptions(render as never), undefined);
     expect(args).toContain('--source-url');
     expect(args).toContain('--media-workdir');
     expect(args.slice(args.indexOf('--audio'), args.indexOf('--audio') + 2)).toEqual(['--audio', '/job/dubbed.wav']);
+  });
+  it('keeps subtitle-only dubbing audio-only when there is no source video', () => {
+    const stage = { job: { templateId: 'video-translation', state: { sourceType: 'subtitle', dubbing: true } }, stageRun: { stageId: 'tts', id: 'tts' }, workdir: '/job/tts' };
+    const args = buildKrillinCliCommandArguments(stage as never,
+      [{ id: 'subtitle', kind: 'target_subtitle', path: '/job/target.srt' }], buildKrillinStageOptions(stage as never), undefined);
+    expect(args).toContain('--audio-only');
+    expect(args).not.toContain('--source-url');
   });
   it.each([true, false])('preserves French-to-Chinese settings through the adapter and CLI with platform captions=%s', preferPlatformCaptions => {
     const stage = {
@@ -190,6 +215,23 @@ describe('KrillinAI CLI protocol', () => {
     }
   });
 
+  it('binds NLP to the manifest-pinned interpreter and ignores inherited Python settings', () => {
+    const root = process.platform === 'win32' ? 'C:\\OpenCreator' : '/opt/opencreator';
+    const manifest = {
+      nlp: { executable: 'python/python.exe' },
+      resources: [{ path: 'python/python.exe', kind: 'executable' }]
+    };
+    const python = resolveKrillinNlpPython(root, manifest as never);
+    const env = createKrillinCliEnvironment({ KRILLINAI_NLP_PYTHON: '/untrusted/python', PYTHONPATH: '/untrusted' }, '/runtime', root, '/dependencies', undefined, python);
+    expect(env.KRILLINAI_NLP_PYTHON).toBe(python);
+    expect(env.PYTHONPATH).toBeUndefined();
+    expect(() => resolveKrillinNlpPython(root, { ...manifest, resources: [] } as never)).toThrow('Missing manifest-pinned NLP Python');
+    expect(() => resolveKrillinNlpPython(root, {
+      nlp: { executable: '../python' }, resources: [{ path: '../python', kind: 'executable' }]
+    } as never)).toThrow('resource_path_escape');
+    expect(resolveKrillinNlpPython(root, { resources: [] } as never)).toBeUndefined();
+  });
+
   it('parses and constrains progress frames while ignoring result frames', () => {
     expect(parseKrillinCliProgressFrame(
       '{"type":"progress","phase":" transcribing_audio ","percent":140,"message":" working "}'
@@ -201,6 +243,15 @@ describe('KrillinAI CLI protocol', () => {
     });
     expect(parseKrillinCliProgressFrame('{"ok":true,"stage":"subtitle"}')).toBeUndefined();
     expect(parseKrillinCliProgressFrame('not-json')).toBeUndefined();
+  });
+
+  it('preserves zero completed sentences and ignores invalid translation counts', () => {
+    expect(parseKrillinCliProgressFrame('{"type":"progress","phase":"translating_subtitles","percent":5,"completed":0,"total":52}'))
+      .toMatchObject({ completed: 0, total: 52, percent: 5 });
+    for (const counts of [{ completed: -1, total: 52 }, { completed: 53, total: 52 }, { completed: 1.5, total: 52 }, { completed: 0, total: 0 }, { completed: '1', total: 52 }]) {
+      const frame = parseKrillinCliProgressFrame(JSON.stringify({ type: 'progress', percent: 5, ...counts }));
+      expect(frame).toEqual({ type: 'progress', percent: 5 });
+    }
   });
 
   it('maps the short mixed subtitle to the vertical subtitle artifact', () => {
