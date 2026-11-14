@@ -20,7 +20,7 @@ func (s Service) TranslateSubtitleBlocks(ctx context.Context, blocks []*util.Srt
 	if s.YouTubeSubtitleSrv == nil || s.YouTubeSubtitleSrv.translator == nil {
 		return nil, ErrYouTubeSubtitleServiceNotInitialized
 	}
-	return s.YouTubeSubtitleSrv.translator.BatchTranslateSrtBlocks(ctx, blocks, string(p.OriginLanguage), string(p.TargetLanguage), p.TaskPtr)
+	return s.YouTubeSubtitleSrv.translator.withTranslationRecovery(p.TaskBasePath, p.TaskPtr).BatchTranslateSrtBlocks(ctx, blocks, string(p.OriginLanguage), string(p.TargetLanguage), p.TaskPtr)
 }
 
 type DownloadMediaResult struct {
@@ -48,6 +48,11 @@ func (s Service) PrepareMedia(ctx context.Context, stepParam *types.SubtitleTask
 }
 
 func (s Service) GenerateSubtitlesFromAudio(ctx context.Context, stepParam *types.SubtitleTaskStepParam) error {
+	if validator, ok := s.Transcriber.(interface{ ValidateLanguage(string) error }); ok && stepParam != nil {
+		if err := validator.ValidateLanguage(string(stepParam.OriginLanguage)); err != nil {
+			return err
+		}
+	}
 	if err := config.ValidateTranscriptionConfig(); err != nil {
 		return err
 	}
