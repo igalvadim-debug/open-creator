@@ -1,3 +1,4 @@
+import AppSelect from '../../components/forms/Select.js';
 import { useId, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
@@ -43,7 +44,7 @@ export function VideoTranslationSubtitleImport(props: { sourceLanguage: string; 
       );
       await session.applyAction({ action: 'import-subtitle', input: {
         fileName: file.name, contentBase64, kind: props.sourceOnly ? 'source_subtitle' : kind,
-        language: props.sourceOnly || kind === 'source_subtitle' ? props.sourceLanguage : props.targetLanguage
+        language: props.sourceOnly || kind === 'source_subtitle' ? 'auto' : props.targetLanguage
       } });
     } catch {
       // The session records runtime and file-read failures in the shared Agent panel.
@@ -73,10 +74,10 @@ export function VideoTranslationSubtitleImport(props: { sourceLanguage: string; 
     </div> : null}
     {enabled || props.sourceOnly ? <fieldset className="video-translation-subtitle-import-fields video-translation-field" disabled={props.disabled || busy}>
       {!props.sourceOnly ? <label><span>{l('字幕类型', 'Subtitle type')}</span>
-        <select value={kind} onChange={event => setKind(event.target.value)}>
+        <AppSelect value={kind} onChange={event => setKind(event.target.value)}>
           <option value="source_subtitle">{l('原文字幕（跳过语音识别）', 'Source subtitles (skip transcription)')}</option>
           <option value="target_subtitle">{l('已翻译字幕（跳过识别和翻译）', 'Translated subtitles (skip transcription and translation)')}</option>
-        </select>
+        </AppSelect>
       </label> : null}
       <div className="video-translation-subtitle-file-field">
         <label htmlFor={fileInputId}>{l('UTF-8 SRT 文件', 'UTF-8 SRT file')}</label>
@@ -105,11 +106,11 @@ export function VideoTranslationSubtitleImport(props: { sourceLanguage: string; 
           ><X size={16} aria-hidden="true" /></button> : null}
         </div>
       </div>
-      {!props.sourceOnly ? <p>{l('语言沿用上方选择。仅有译文时不会生成双语字幕。', 'Uses the language selected above. A translated-only import does not generate bilingual subtitles.')}</p> : null}
+      {!props.sourceOnly ? <p>{l('原文字幕自动识别语言，识别后可修改源语言。译文沿用上方目标语言；仅有译文时不会生成双语字幕。', 'Source subtitle language is detected automatically and can be changed. Translated subtitles use the selected target language; a translated-only import does not generate bilingual subtitles.')}</p> : null}
       {busy ? <p role="status">{l('正在导入字幕…', 'Importing subtitles…')}</p> : null}
       {error ? <p role="alert">{error}</p> : null}
       {imports.map(artifact => <details key={artifact.id} open={props.sourceOnly}>
-        <summary>{l('本地导入', 'Local import')} · {String(artifact.metadata.fileName)} · {String(artifact.metadata.language)} · {String(artifact.metadata.cueCount)} {l('条字幕', 'cues')} · v{artifact.version}</summary>
+        <summary>{l('本地导入', 'Local import')} · {String(artifact.metadata.fileName)} · {artifact.metadata.language === 'auto' ? l('语言待确认', 'Language unconfirmed') : String(artifact.metadata.language)} · {String(artifact.metadata.cueCount)} {l('条字幕', 'cues')} · v{artifact.version}</summary>
         <pre>{Array.isArray(artifact.metadata.cues) ? artifact.metadata.cues.map(cue => cue !== null && typeof cue === 'object' && !Array.isArray(cue) ? `${cue.start} → ${cue.end}\n${cue.text}` : '').join('\n\n') : ''}</pre>
       </details>)}
     </fieldset> : null}

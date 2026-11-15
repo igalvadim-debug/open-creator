@@ -21,8 +21,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Bilibili](https://img.shields.io/badge/dynamic/json?label=Bilibili&query=%24.data.follower&suffix=%E7%B2%89%E4%B8%9D&url=https%3A%2F%2Fapi.bilibili.com%2Fx%2Frelation%2Fstat%3Fvmid%3D242124650&logo=bilibili&color=00A1D6&labelColor=FE7398&logoColor=FFFFFF)](https://space.bilibili.com/242124650)
 [![AtomGit G-Star](https://img.shields.io/badge/AtomGit-G--Star-DA203E?style=flat)](https://atomgit.com/krillinai/OpenCreator)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fUNvbqDaw)
-[![Grupo de QQ](https://img.shields.io/badge/QQ%20群-754069680-green?logo=tencent-qq)](https://qm.qq.com/q/W4YC0PLMeA)
+[![X](https://img.shields.io/badge/X-Follow-000000?logo=x&logoColor=white)](https://x.com/KrillinAIJunxi)
 
 [Destacados](#características-principales) · [Herramientas](#herramientas-de-creación) · [Skills](#skills) · [Ejemplos](#ejemplos) · [Inicio](#inicio-rápido) · [Desktop](#desktop) · [Docs](#documentación) · [Comunidad](#comunidad)
 
@@ -65,17 +64,27 @@ Web es la única implementación del frontend. Desktop carga la misma compilaci�
 
 - 🔐 **Seguridad local**: conserva los datos, los archivos adjuntos y los registros localmente de forma predeterminada, con aprobaciones y diagnósticos que ocultan información confidencial.
 
+- 🌐 **Interfaz multilingüe**: Web y Desktop ofrecen 43 idiomas, detección del idioma del sistema, selección manual y diseño de derecha a izquierda para árabe, persa, urdu y hebreo.
+
 ## Herramientas de creación
 
 La versión actual incluye seis herramientas de creación. Los modelos y servicios disponibles dependen del entorno local de Codex y de la configuración de los servicios de IA.
 
-Abre el Dashboard para traducir o descargar vídeos, generar miniaturas o imágenes, crear voces en off con Doblaje inteligente o generar vídeos con Seedance.
+Abre el Dashboard para traducir o descargar vídeos, generar miniaturas o imágenes, crear voces en off con Text to Speech o generar vídeos con Seedance.
 
 ![Dashboard de creación de OpenCreator](../images/product/opencreator-dashboard-en.png)
 
 > Continuamente se añaden nuevas herramientas de creación.
 
-**La traducción de vídeos admite 101 idiomas de destino.**
+**La traducción de vídeos ofrece 123 idiomas de origen y 124 opciones de destino, incluida la salida en pinyin.** Busca por nombre nativo, inglés, chino o código de idioma. La cobertura del reconocimiento y la síntesis de voz depende del servicio y modelo elegidos.
+
+- **Traducción solo de subtítulos**: Importa y previsualiza un SRT y tradúcelo sin vídeo de origen, doblaje ni renderizado de vídeo.
+
+- **Edición avanzada de subtítulos**: Abre un editor inmersivo con forma de onda y línea de tiempo sincronizadas con la reproducción. Ajusta tiempos, divide o une subtítulos y busca y reemplaza texto. Previsualiza estilos sobre el vídeo, cambia idioma, voz y salida, y genera otra versión conservando las anteriores.
+
+- **Creación en una sola página**: Configura la generación de imágenes, vídeos y Text to Speech en una página, con selección de modelos, vista previa de referencias, opciones de imagen según el modelo y una biblioteca de voces con búsqueda.
+
+- **Salida multilingüe y progreso**: Las fuentes de respaldo incluidas mejoran los alfabetos complejos y los subtítulos de derecha a izquierda. Sigue el progreso de transcripción, traducción, doblaje y renderizado, con cantidades completadas y totales cuando estén disponibles.
 
 <table width="100%">
 <thead>
@@ -87,16 +96,16 @@ Abre el Dashboard para traducir o descargar vídeos, generar miniaturas o imáge
 </thead>
 <tbody>
 <tr><td valign="top">Traducción de vídeos</td><td valign="top">✅ Disponible</td><td>Importa vídeos locales o públicos; transcribe con servicios Whisper locales o en la nube; utiliza el contexto de un LLM para segmentar y alinear subtítulos, gestionar terminología y traducir; configura subtítulos bilingües, doblaje o una muestra de voz personalizada, estilos de subtítulos y composición horizontal o vertical, y exporta SRT, audio o vídeo</td></tr>
-<tr><td valign="top">Descarga de vídeos</td><td valign="top">✅ Disponible</td><td>Analiza vídeos públicos individuales de YouTube, Bilibili, X, TikTok, Instagram, Douyin, Facebook, Xiaohongshu, Pinterest y Reddit; compara los formatos disponibles y descarga vídeo o audio. Algunas plataformas pueden requerir cookies</td></tr>
+<tr><td valign="top">Descarga de vídeos</td><td valign="top">✅ Disponible</td><td>Analiza vídeos públicos individuales de YouTube, Bilibili, X, TikTok, Instagram, Douyin, Facebook, Xiaohongshu, Pinterest y Reddit; compara los formatos disponibles y descarga vídeo o audio. Algunas plataformas pueden requerir cookies. Si la plataforma ofrece subtítulos, consulta la lista y descarga SRT; se prioriza el inglés y después el idioma de la interfaz, si está disponible.</td></tr>
 <tr><td valign="top">Generación de miniaturas</td><td valign="top">✅ Disponible</td><td>Combina un tema, un enlace de vídeo y una imagen de referencia opcional para generar y comparar varias propuestas de miniaturas de contenido</td></tr>
-<tr><td valign="top">Generación de imágenes</td><td valign="top">✅ Disponible</td><td>Genera imágenes con GPT Image a partir de un prompt y una imagen de referencia opcional, configura la relación de aspecto y la cantidad de resultados y, después, previsualiza y descarga cada imagen</td></tr>
+<tr><td valign="top">Generación de imágenes</td><td valign="top">✅ Disponible</td><td>Genera imágenes con GPT Image / Seedream / Kling Image / Gemini a partir de un prompt y una imagen de referencia opcional, configura la relación de aspecto y la cantidad de resultados y, después, previsualiza y descarga cada imagen</td></tr>
 <tr><td valign="top">Redacción de artículos</td><td valign="top">✅ Disponible</td><td>Convierte temas, enlaces, vídeos o documentos en opciones de tema, esquema y artículo editables; añade imágenes y exporta a Markdown, HTML o PDF.</td></tr>
 <tr><td valign="top">Publicaciones de Xiaohongshu</td><td valign="top">✅ Disponible</td><td>Genera una publicación a partir de un tema o material fuente, ajusta audiencia, tipo y longitud y copia o descarga el resultado.</td></tr>
 <tr><td valign="top">Guion para vídeo corto</td><td valign="top">✅ Disponible</td><td>Crea un guion segmentado listo para grabar a partir de un tema o material fuente, adaptado a audiencia, plataforma, duración y tono; edítalo o expórtalo.</td></tr>
 <tr><td valign="top">Animación de figuras de palitos</td><td valign="top">✅ Disponible</td><td>Convierte texto o contenido de YouTube en narración, voz, imágenes de storyboard con personajes coherentes, subtítulos y una animación descargable.</td></tr>
 <tr><td valign="top">Clips automáticos</td><td valign="top">En desarrollo</td><td>Analiza vídeos largos, identifica los momentos destacados y convierte las escenas elegidas en clips cortos reutilizables</td></tr>
-<tr><td valign="top">Doblaje inteligente</td><td valign="top">✅ Disponible</td><td>Convierte guiones en voces en off con opciones de voz, ritmo y emoción</td></tr>
-<tr><td valign="top">Generación de vídeo</td><td valign="top">✅ Disponible</td><td>Genera vídeos con Seedance a partir de prompts e imágenes de referencia y, después, previsualiza, vuelve a generar o descarga cada versión</td></tr>
+<tr><td valign="top">Text to Speech</td><td valign="top">✅ Disponible</td><td>Convierte guiones en voces en off con opciones de voz, ritmo y emoción</td></tr>
+<tr><td valign="top">Generación de vídeo</td><td valign="top">✅ Disponible</td><td>Genera vídeos con Seedance / Kling / Veo a partir de prompts e imágenes de referencia y, después, previsualiza, vuelve a generar o descarga cada versión</td></tr>
 <tr><td valign="top">Avatar digital</td><td valign="top">En desarrollo</td><td>Combina guiones, voz y presentación de avatar para producir vídeos con una persona hablando</td></tr>
 </tbody>
 </table>
@@ -252,6 +261,12 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 > Estos ejemplos de vídeo y la imagen de alineación de subtítulos se produjeron cuando OpenCreator todavía utilizaba el nombre KrillinAI.
 
+#### Editor de subtítulos
+
+El editor de subtítulos integrado permite editar el texto original y la traducción en paralelo, previsualizar el vídeo sincronizado, utilizar una forma de onda y una línea de tiempo vinculadas a la reproducción y personalizar los estilos de subtítulos.
+
+![OpenCreator subtitle editor](../images/examples/video-translation-subtitle-editor-en.png)
+
 ### Descarga de vídeos
 
 Analiza enlaces de vídeo públicos de 10 plataformas compatibles, compara los formatos disponibles y descarga el vídeo o el audio directamente en el proyecto.
@@ -275,7 +290,7 @@ Fuentes de vídeo compatibles:
 
 La disponibilidad depende del vídeo y la región; algunas fuentes pueden requerir cookies de la plataforma. OpenCreator no importa automáticamente las cookies del navegador.
 
-![Selección de formatos del descargador de vídeos de OpenCreator](../images/examples/video-downloader-formats-en.png)
+![Selección de formatos del descargador de vídeos de OpenCreator](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### Generación de vídeos
 
@@ -558,7 +573,7 @@ El archivo `README.md` de la raíz es el documento canónico en inglés. Las tra
 
 ## Comunidad
 
-<p>Usuarios de GitHub de <strong>al menos 100 países y regiones</strong> han dado una estrella a OpenCreator.</p>
+<p>Usuarios de GitHub de <strong>al menos 107 países y regiones</strong> han dado una estrella a OpenCreator.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Mapa mundial con los países y regiones de usuarios de GitHub que dieron una estrella a OpenCreator" width="760" />
 

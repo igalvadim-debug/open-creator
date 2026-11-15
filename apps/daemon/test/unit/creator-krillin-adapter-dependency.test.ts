@@ -33,6 +33,26 @@ afterEach(() => {
 });
 
 describe('KrillinAI configured transcription dependency', () => {
+  it.each(['platform-success', 'platform-failure', 'audio', 'import'])('checks language only at the actual ASR boundary: %s', async route => {
+    const fixture = setup();
+    fixture.config.transcription.provider = 'whisperkit';
+    const stage = fixture.stage as CreatorExecutorInput;
+    stage.job.templateId = 'video-translation';
+    stage.job.state.sourceLanguage = 'yue'; // Bundled large-v2 lacks the Cantonese token.
+    if (route === 'audio') stage.job.state.preferPlatformCaptions = false;
+    if (route === 'import') {
+      stage.job.state.preferPlatformCaptions = false;
+      const subtitle = writeTargetSubtitle(tempDir);
+      stage.inputArtifacts.push({ id: 'source-srt', kind: 'source_subtitle', path: join(tempDir, subtitle.relativePath) } as never);
+    }
+    if (route === 'platform-failure') runKrillinCli.mockRejectedValueOnce(new KrillinCliError('platform_caption_failed', 'No platform captions'));
+    else runKrillinCli.mockImplementation(async input => { const subtitle = writeTargetSubtitle(input.jobsRoot); return ['source_subtitle', 'target_subtitle', 'vertical_subtitle'].map(kind => ({ ...subtitle, kind })); });
+    if (route === 'audio' || route === 'platform-failure') {
+      await expect(fixture.executor.run(stage)).rejects.toMatchObject({ code: 'creator_transcription_language_unsupported' });
+      expect(runKrillinCli).toHaveBeenCalledTimes(route === 'audio' ? 0 : 1);
+    } else await expect(fixture.executor.run(stage)).resolves.toMatchObject({ outputs: expect.any(Array) });
+    expect(fixture.ensure).not.toHaveBeenCalled();
+  });
   it.each([
     ['分享视频 https://v.douyin.com/abc123/ 复制打开抖音', 'https://v.douyin.com/abc123/'],
     ['https://www.douyin.com/jingxuan?modal_id=123', 'https://www.douyin.com/video/123'],
@@ -246,7 +266,10 @@ describe('KrillinAI configured transcription dependency', () => {
       mkdirSync(outputDir, { recursive: true });
       const outputPath = join(outputDir, 'dubbed.wav');
       writeFileSync(outputPath, 'audio');
-      return [{ kind: 'dubbed_audio', relativePath: relative(input.jobsRoot, outputPath), size: 5 }];
+      return [
+        writeTargetSubtitle(input.jobsRoot),
+        { kind: 'dubbed_audio', relativePath: relative(input.jobsRoot, outputPath), size: 5 }
+      ];
     });
 
     await fixture.executor.run(stage);
@@ -254,6 +277,43 @@ describe('KrillinAI configured transcription dependency', () => {
     expect(runKrillinCli.mock.calls[0]?.[0].artifacts).toEqual([
       expect.objectContaining({ id: 'source-video', kind: 'source_video' })
     ]);
+    expect(fixture.ensure).not.toHaveBeenCalled();
+  });
+
+  it('uses fresh dubbed audio when the previous dubbed video is stale during render', async () => {
+    const fixture = setup();
+    const stage = fixture.stage as CreatorExecutorInput;
+    stage.job.templateId = 'video-translation';
+    stage.stageRun.stageId = 'render-horizontal';
+    stage.job.state.dubbing = true;
+    stage.job.state.composeVideo = true;
+    stage.inputArtifacts[0]!.metadata = { settingsSnapshot: { sourceUrl: 'https://www.youtube.com/watch?v=demo' } };
+    const subtitle = writeTargetSubtitle(tempDir);
+    const audioPath = join(tempDir, 'dubbed.wav');
+    const staleVideoPath = join(tempDir, 'old-dubbed.mp4');
+    writeFileSync(audioPath, 'audio');
+    writeFileSync(staleVideoPath, 'old video');
+    stage.inputArtifacts.push(
+      { id: 'target-subtitle', kind: 'target_subtitle', status: 'completed', path: join(tempDir, subtitle.relativePath) } as never,
+      { id: 'dubbed-audio', kind: 'dubbed_audio', status: 'completed', path: audioPath } as never,
+      { id: 'old-dubbed-video', kind: 'dubbed_video', status: 'stale', path: staleVideoPath } as never
+    );
+    runKrillinCli.mockImplementation(async input => {
+      const outputDir = join(input.jobsRoot, stage.job.id, 'outputs');
+      mkdirSync(outputDir, { recursive: true });
+      const renderPath = join(outputDir, 'horizontal.mp4');
+      writeFileSync(renderPath, 'render');
+      return [{ kind: 'horizontal_video', relativePath: relative(input.jobsRoot, renderPath), size: 6 }];
+    });
+
+    await fixture.executor.run(stage);
+
+    expect(runKrillinCli.mock.calls[0]?.[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'dubbed-audio', kind: 'dubbed_audio' })
+    ]));
+    expect(runKrillinCli.mock.calls[0]?.[0].artifacts).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'old-dubbed-video' })
+    ]));
     expect(fixture.ensure).not.toHaveBeenCalled();
   });
 });
@@ -325,7 +385,7 @@ function setup() {
     workdir: join(jobsRoot, 'auto-clip-job', 'subtitle-stage'),
     reportProgress: vi.fn()
   } as never;
-  return { ensure, executor, stage, getYtDlpRuntime };
+  return { ensure, executor, stage, getYtDlpRuntime, config };
 }
 
 function writeTargetSubtitle(jobsRoot: string) {

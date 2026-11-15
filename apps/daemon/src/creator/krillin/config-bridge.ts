@@ -4,17 +4,34 @@ import type { AliyunOssConfig, CreatorServicesConfig } from '@opencreator/protoc
 export function createKrillinConfigToml(
   config: CreatorServicesConfig,
   llmOverride?: { baseUrl: string; apiKey: string; model: string },
-  officialTranscriptionModel?: string
+  officialTranscriptionModel?: string,
+  officialTextModel?: { id: string; name: string },
+  llmFallback?: { baseUrl: string; apiKey: string; model: string; modelName?: string }
 ): string {
   const llm = llmOverride ?? config.llm;
   const document = compact({
-    app: { proxy: officialTranscriptionModel ? '' : config.proxy },
+    // Keep media access on the user's configured proxy even when the
+    // transcription API is routed through the official gateway. The runtime
+    // uses a separate proxy for its YouTube/yt-dlp requests so local gateway
+    // calls do not have to go through the media proxy.
+    app: {
+      proxy: officialTranscriptionModel ? '' : config.proxy,
+      youtube_proxy: config.proxy
+    },
     llm: {
       base_url: llm.baseUrl,
       api_key: llm.apiKey,
       model: llm.model,
+      model_name: llmOverride === undefined && officialTextModel?.id === llm.model
+        ? officialTextModel.name : undefined,
       json: config.llm.jsonMode
     },
+    llm_fallback: llmOverride === undefined && llmFallback && llmFallback.model !== llm.model ? {
+      base_url: llmFallback.baseUrl,
+      api_key: llmFallback.apiKey,
+      model: llmFallback.model,
+      model_name: llmFallback.modelName
+    } : undefined,
     transcribe: {
       provider: normalizeTranscriptionProvider(config.transcription.provider),
       enable_gpu_acceleration: config.transcription.enableGpuAcceleration,

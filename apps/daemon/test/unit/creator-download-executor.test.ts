@@ -11,6 +11,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile
 } from 'node:fs/promises';
@@ -20,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDownloadExecutor } from '../../src/creator/download/executor.js';
 import { parseDownloadProbe } from '../../src/creator/download/probe-parser.js';
 import type { CreatorExecutorInput } from '../../src/creator/executor.js';
+import { createCreatorProcessControl } from '../../src/creator/process-tree.js';
 
 let tempDir = '';
 
@@ -29,6 +31,61 @@ afterEach(async () => {
 });
 
 describe('creator download executor', () => {
+  it.skipIf(process.platform === 'win32')('suspends and continues the actual downloader without starting it again', async () => {
+    const binaries = await fakeBinaries({ holdDownload: true });
+    const workdir = join(tempDir, 'live-pause');
+    await mkdir(workdir);
+    const probe = parsedProbe();
+    const controller = new AbortController();
+    const stage = stageInput({ workdir, stageId: 'download', state: {
+      sourceUrl: probe.requestedUrl, mediaType: 'video', selectedOptionId: 'video-1080-1'
+    }, inputArtifacts: [await writeProbeArtifact(workdir, probe)] });
+    stage.signal = controller.signal;
+    stage.processControl = createCreatorProcessControl(controller.signal)!;
+    const ticks = async () => Number(await readFile(join(workdir, 'ticks'), 'utf8').catch(() => '0'));
+    const work = createDownloadExecutor(binaries).run(stage);
+    // Attach a rejection handler immediately so a failed assertion can clean up.
+    void work.catch(() => undefined);
+    try {
+      await expect.poll(ticks).toBeGreaterThan(2);
+      stage.processControl.pause();
+      await new Promise(resolve => setTimeout(resolve, 60));
+      const saved = await ticks();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(await ticks()).toBe(saved);
+      stage.processControl.resume();
+      await expect.poll(ticks).toBeGreaterThan(saved);
+      await writeFile(join(workdir, 'finish'), 'finish');
+      const result = await work;
+      expect(result.outputs[0]?.kind).toBe('source_video');
+      expect(await readFile(join(workdir, 'starts'), 'utf8')).toBe('1');
+    } finally {
+      controller.abort();
+      await work.catch(() => undefined);
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('cancels a paused executor before it starts another subprocess', async () => {
+    const binaries = await fakeBinaries();
+    const workdir = join(tempDir, 'paused-before-spawn');
+    await mkdir(workdir);
+    const probe = parsedProbe();
+    const controller = new AbortController();
+    const reportProgress = vi.fn();
+    const stage = stageInput({ workdir, stageId: 'download', reportProgress, state: {
+      sourceUrl: probe.requestedUrl, mediaType: 'video', selectedOptionId: 'video-1080-1'
+    }, inputArtifacts: [await writeProbeArtifact(workdir, probe)] });
+    stage.signal = controller.signal;
+    stage.processControl = createCreatorProcessControl(controller.signal)!;
+    stage.processControl.pause();
+    const work = createDownloadExecutor(binaries).run(stage);
+    const canceled = expect(work).rejects.toThrow();
+    await expect.poll(() => reportProgress.mock.calls.some(([progress]) => progress.phase === 'preparing_download')).toBe(true);
+    controller.abort();
+    await canceled;
+    await expect(readFile(join(workdir, 'args.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it.each([null, 'not an SRT file'])('rejects missing or invalid subtitle output: %s', async subtitleContent => {
     const executor = createDownloadExecutor(await fakeBinaries({ subtitleContent }));
     const workdir = join(tempDir, 'subtitle-failure');
@@ -99,7 +156,7 @@ describe('creator download executor', () => {
     expect(result.outputs[0]).toMatchObject({ kind: 'source_video', metadata: {
       previewOnly: true, playbackCompatible: true, settingsSnapshot: { sourceType: 'url', sourceUrl }
     } });
-    expect(reportProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'downloading', percent: 42 }));
+    expect(reportProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'downloading', percent: 33 }));
   });
   it.each([
     'https://x.com/creator/status/123', 'https://www.tiktok.com/@creator/video/123',
@@ -127,15 +184,141 @@ describe('creator download executor', () => {
     const args = JSON.parse(await readFile(join(workdir, 'args.json'), 'utf8')) as string[];
     expect(args).toContain('https://www.bilibili.com/video/BV18E421w7bf?p=3');
     expect(args).toContain('--no-playlist');
-    expect(args).toContain('download:oc-preview:%(progress)j');
+    expect(args).toContain('download:[download] %(progress._percent_str)s oc-preview:%(progress)j');
+    expect(args).toContain('before_dl:oc-preview-formats:%(format_id)s');
+    expect(args).toContain('before_dl:oc-preview-duration:%(duration)s');
+    expect(args).toContain('before_dl:oc-preview-metadata:%(requested_formats.:.{format_id,filesize,filesize_approx,tbr,abr})j');
     expect(args).not.toContain('--extract-audio');
     expect(result.outputs).toEqual([expect.objectContaining({
       kind: 'source_video', status: 'completed', sourceArtifactIds: [],
       metadata: expect.objectContaining({ settingsSnapshot: expect.objectContaining({ sourceUrl }), playbackCompatible: true })
     })]);
-    expect(reportProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'downloading', percent: 42, downloadedBytes: 42, totalBytes: 100 }));
-    expect(reportProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'downloading', percent: null, downloadedBytes: 10, totalBytes: null }));
-    expect(reportProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'merging_media', percent: null }));
+    expect(reportProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'downloading', percent: 33, downloadedBytes: 42, totalBytes: 100 }));
+    expect(reportProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'merging_media', percent: 77 }));
+  });
+
+  it('keeps measured dual-stream preview progress visible and monotonic from the first video byte', async () => {
+    const executor = createDownloadExecutor(await fakeBinaries({
+      previewFormatId: '399+140-20',
+      previewFormatSizes: [8_350_655, 4_654_174],
+      previewProgressEvents: [
+        { downloaded_bytes: 4_175_327, total_bytes: 8_350_655, filename: 'video.mp4' },
+        { downloaded_bytes: 8_350_655, total_bytes: 8_350_655, filename: 'video.mp4' },
+        { downloaded_bytes: 1024, total_bytes: 4_654_174, filename: 'audio.m4a' },
+        { downloaded_bytes: 4_654_174, total_bytes: 4_654_174, filename: 'audio.m4a' }
+      ]
+    }));
+    const workdir = join(tempDir, 'preview-multi-resource');
+    await mkdir(workdir);
+    const reportProgress = vi.fn();
+    await executor.run(previewInput({
+      workdir,
+      sourceUrl: 'https://www.youtube.com/watch?v=demo',
+      reportProgress
+    }));
+
+    const progress = reportProgress.mock.calls
+      .map(([value]) => value as { phase?: string; percent?: number | null; downloadedBytes?: number; totalBytes?: number | null })
+      .filter(value => value.phase === 'downloading');
+    expect(progress.map(value => value.percent)).toEqual([25, 49, 49, 75]);
+    expect(progress.map(value => value.totalBytes)).toEqual(Array(4).fill(13_004_829));
+    expect(progress.map(value => value.downloadedBytes)).toEqual([4_175_327, 8_350_655, 8_351_679, 13_004_829]);
+  });
+
+  it('does not freeze a partial percentage while unknown-size resources keep downloading', async () => {
+    const executor = createDownloadExecutor(await fakeBinaries({
+      previewFormatId: 'video+audio',
+      previewProgressEvents: [
+        { downloaded_bytes: 100, total_bytes: 100, filename: 'video.mp4' },
+        { downloaded_bytes: 25, filename: 'audio.m4a' },
+        { downloaded_bytes: 50, filename: 'audio.m4a' },
+        { downloaded_bytes: 75, filename: 'audio.m4a' },
+        { downloaded_bytes: 100, total_bytes: 100, filename: 'audio.m4a' }
+      ]
+    }));
+    const workdir = join(tempDir, 'preview-unknown-sizes');
+    await mkdir(workdir);
+    const reportProgress = vi.fn();
+    await executor.run(previewInput({ workdir, sourceUrl: 'https://www.youtube.com/watch?v=demo', reportProgress }));
+
+    const progress = reportProgress.mock.calls
+      .map(([value]) => value as { phase?: string; percent?: number | null; downloadedBytes?: number; totalBytes?: number | null })
+      .filter(value => value.phase === 'downloading');
+    expect(progress.map(value => value.percent)).toEqual([null, null, null, null, 75]);
+    expect(progress.map(value => value.downloadedBytes)).toEqual([100, 125, 150, 175, 200]);
+    expect(progress.map(value => value.totalBytes)).toEqual([null, null, null, null, 200]);
+  });
+
+  it('advances preview progress using the selected format bitrate when yt-dlp has no byte total', async () => {
+    const executor = createDownloadExecutor(await fakeBinaries({
+      previewFormatId: '616+140-drc',
+      previewDuration: 121,
+      previewFormats: [
+        { format_id: '616', filesize: null, filesize_approx: null, tbr: 3549.491 },
+        { format_id: '140-drc', filesize: 1_966_756, filesize_approx: null, abr: 129.537 }
+      ],
+      previewProgressEvents: [
+        { downloaded_bytes: 300_000, total_bytes_estimate: 300_000, fragment_index: 1, fragment_count: 0,
+          _percent: 100, status: 'downloading', filename: 'video.mp4' },
+        { downloaded_bytes: 1_600_000, filename: 'video.mp4' },
+        { downloaded_bytes: 8_000_000, filename: 'video.mp4' },
+        { downloaded_bytes: 20_000_000, filename: 'video.mp4' }
+      ]
+    }));
+    const workdir = join(tempDir, 'preview-bitrate-estimate');
+    await mkdir(workdir);
+    const reportProgress = vi.fn();
+    await executor.run(previewInput({ workdir, sourceUrl: 'https://www.youtube.com/watch?v=demo', reportProgress }));
+
+    const progress = reportProgress.mock.calls
+      .map(([value]) => value as { phase?: string; percent?: number | null; downloadedBytes?: number; totalBytes?: number | null; totalBytesEstimated?: boolean })
+      .filter(value => value.phase === 'downloading');
+    expect(progress.map(value => value.percent)).toEqual([2, 4, 12, 28]);
+    expect(progress.map(value => value.downloadedBytes)).toEqual([300_000, 1_600_000, 8_000_000, 20_000_000]);
+    expect(progress.map(value => value.totalBytes)).toEqual(Array(4).fill(121 * 3549.491 * 1_000 / 8 + 1_966_756));
+    expect(progress.every(value => value.totalBytesEstimated === true)).toBe(true);
+  });
+
+  it('reports the measured ratio for a single preview resource', async () => {
+    const downloadedBytes = 39.4 * 1024 ** 2;
+    const totalBytes = 44.2 * 1024 ** 2;
+    const executor = createDownloadExecutor(await fakeBinaries({
+      previewProgressEvents: [{ downloaded_bytes: downloadedBytes, total_bytes: totalBytes, filename: 'video.mp4' }]
+    }));
+    const workdir = join(tempDir, 'preview-single-resource');
+    await mkdir(workdir);
+    const reportProgress = vi.fn();
+    await executor.run(previewInput({
+      workdir,
+      sourceUrl: 'https://www.youtube.com/watch?v=demo',
+      reportProgress
+    }));
+
+    const progress = reportProgress.mock.calls
+      .map(([value]) => value as { phase?: string; percent?: number | null; downloadedBytes?: number; totalBytes?: number | null })
+      .filter(value => value.phase === 'downloading');
+    expect(progress).toEqual([
+      expect.objectContaining({ percent: 67, downloadedBytes, totalBytes })
+    ]);
+  });
+
+  it('reports measured progress while converting a preview for local playback', async () => {
+    const executor = createDownloadExecutor(await fakeBinaries({ videoCodec: 'vp9' }));
+    const workdir = join(tempDir, 'preview-conversion');
+    await mkdir(workdir);
+    const reportProgress = vi.fn();
+    await executor.run(previewInput({
+      workdir,
+      sourceUrl: 'https://www.youtube.com/watch?v=demo',
+      reportProgress
+    }));
+
+    const progress = reportProgress.mock.calls
+      .map(([value]) => value as { phase?: string; percent?: number | null; phasePercent?: number | null })
+      .filter(value => value.phase === 'normalizing_media')
+    expect(progress.map(value => value.percent)).toEqual([80, 90]);
+    expect(progress.map(value => value.phasePercent)).toEqual([0, 50]);
+    expect(progress.every(value => Number.isInteger(value.percent) && Number.isInteger(value.phasePercent))).toBe(true);
   });
 
   it.each(['matching', 'different-part', 'missing', 'invalid'])('handles %s preview cache without mixing Bilibili parts', async cache => {
@@ -910,6 +1093,7 @@ describe('creator download executor', () => {
       '--ffmpeg-location',
       binaries.ffmpegPath,
       '--progress',
+      '--continue',
       '--progress-delta',
       '0.5',
       '-f',
@@ -941,8 +1125,13 @@ describe('creator download executor', () => {
     expect(downloadPercents).toEqual(
       [...downloadPercents].sort((left, right) => left - right)
     );
-    expect(downloadPercents[1]).toBeCloseTo(79.5, 1);
+    expect(downloadPercents).toEqual([35, 80, 81]);
     expect(downloadPercents.at(-1)).toBeGreaterThan(downloadPercents[1]!);
+    expect(reportProgress.mock.calls
+      .map(([progress]) => progress)
+      .filter(progress => progress.phase === 'downloading')
+      .map(progress => progress.bytesPerSecond))
+      .toEqual([2.5 * 1024 ** 2, 512_000, null]);
     expect(reportProgress).toHaveBeenLastCalledWith(expect.objectContaining({
       status: 'succeeded',
       phase: 'completed',
@@ -1039,7 +1228,8 @@ describe('creator download executor', () => {
     }));
     expect(reportProgress).toHaveBeenCalledWith(expect.objectContaining({
       phase: 'normalizing_media',
-      percent: 98.5
+      percent: 99,
+      phasePercent: 50
     }));
   }, 20_000);
 
@@ -1279,7 +1469,7 @@ describe('creator download executor', () => {
       inputArtifacts: [await writeProbeArtifact(workdir, probe)]
     }));
 
-    expect(result.outputs[0]?.path).toBe(join(workdir, fileName));
+    expect(result.outputs[0]?.path).toBe(await realpath(join(workdir, fileName)));
     expect(result.outputs[0]?.metadata?.fileName).toBe(fileName);
     expect(JSON.parse(await readFile(join(workdir, 'args.json'), 'utf8')))
       .toEqual(expect.arrayContaining(['--encoding', 'utf-8']));
@@ -1612,6 +1802,12 @@ async function fakeBinaries(input?: {
   reportedOutputName?: string;
   splitOutputUtf8?: boolean;
   subtitleContent?: string | null;
+  holdDownload?: boolean;
+  previewProgressEvents?: Array<Record<string, number | string | null>>;
+  previewFormatId?: string | null;
+  previewFormatSizes?: number[];
+  previewFormats?: Array<Record<string, number | string | null>>;
+  previewDuration?: number;
 }): Promise<{
   configStore: {
     read(): Promise<ReturnType<typeof createDefaultCreatorServicesConfig>>;
@@ -1631,9 +1827,10 @@ async function fakeBinaries(input?: {
   const failure = input?.failure;
   const videoCodec = input?.videoCodec ?? 'h264';
   await writeExecutable(ytDlpScriptPath, `#!/usr/bin/env node
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 const args = process.argv.slice(2);
+const previewProgressEvents = ${JSON.stringify(input?.previewProgressEvents ?? null)};
 writeFileSync(join(process.cwd(), 'args.json'), JSON.stringify(args));
 writeFileSync(join(process.cwd(), 'runtime-env.json'), JSON.stringify({
   sslCertificateFile: process.env.SSL_CERT_FILE ?? null
@@ -1665,16 +1862,41 @@ if (args.includes('--skip-download')) {
 const audio = args.includes('--extract-audio');
 const output = join(process.cwd(), ${JSON.stringify(input?.outputName ?? null)} ?? (audio ? 'download.mp3' : 'download.mp4'));
 const reportedOutput = join(process.cwd(), ${JSON.stringify(input?.reportedOutputName ?? null)} ?? ${JSON.stringify(input?.outputName ?? null)} ?? (audio ? 'download.mp3' : 'download.mp4'));
+if (${input?.holdDownload === true}) {
+  writeFileSync('starts', String(existsSync('starts') ? Number(readFileSync('starts', 'utf8')) + 1 : 1));
+  let ticks = 0;
+  while (!existsSync('finish')) {
+    writeFileSync('ticks', String(++ticks));
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
 writeFileSync(output, audio ? 'download-audio' : 'download-video');
 if (args.includes('--progress')) {
   if (args.includes('--progress-template')) {
-    process.stderr.write('oc-preview:{"downloaded_bytes":42,"total_bytes":100}\\n');
-    process.stderr.write('oc-preview:{"downloaded_bytes":10}\\n');
+    if (${JSON.stringify(input?.previewFormatId === undefined ? 'video' : input.previewFormatId)} !== null) {
+      process.stdout.write('oc-preview-formats:' + ${JSON.stringify(input?.previewFormatId === undefined ? 'video' : input.previewFormatId)} + '\\n');
+    }
+    if (${JSON.stringify(input?.previewDuration ?? null)} !== null) {
+      process.stdout.write('oc-preview-duration:' + ${JSON.stringify(input?.previewDuration ?? null)} + '\\n');
+    }
+    if (${JSON.stringify(input?.previewFormats ?? input?.previewFormatSizes ?? null)} !== null) {
+      process.stdout.write('oc-preview-metadata:' + JSON.stringify(${JSON.stringify(input?.previewFormats ?? (input?.previewFormatSizes ?? []).map((filesize, index) => ({ format_id: String(index), filesize })))}) + '\\n');
+    }
+    const events = previewProgressEvents ?? [
+      { downloaded_bytes: 42, total_bytes: 100 },
+      { downloaded_bytes: 10 }
+    ];
+    for (const event of events) {
+      const total = event.total_bytes ?? event.total_bytes_estimate;
+      const partPercent = typeof event._percent === 'number' ? event._percent
+        : typeof total === 'number' && total > 0 ? event.downloaded_bytes / total * 100 : null;
+      process.stderr.write('[download] ' + (partPercent === null ? 'N/A' : partPercent.toFixed(1) + '%') + ' oc-preview:' + JSON.stringify(event) + '\\n');
+    }
   }
-  process.stderr.write('[download] 42.0% of 100B\\n');
+  process.stderr.write('[download] 42.0% of 100B at 2.50MiB/s ETA 00:01\\n');
   if (!audio) {
-    process.stderr.write('[download] 100% of 100B\\n');
-    process.stderr.write('[download] 10.0% of 20B\\n');
+    process.stderr.write('[download] 100% of 100B in 00:01 at 512.00KB/s\\n');
+    process.stderr.write('[download] 10.0% of 20B at Unknown B/s ETA Unknown\\n');
   }
 }
 process.stderr.write(audio ? '[ExtractAudio] Destination\\n' : '[Merger] Merging formats\\n');
@@ -1697,6 +1919,11 @@ copyFileSync(args[inputIndex + 1], args.at(-1));
 process.stderr.write('out_time=00:00:06.000000\\n');
 `);
   await writeExecutable(ffprobeScriptPath, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes('format=duration')) {
+  process.stdout.write('12\\n');
+  process.exit(0);
+}
 const path = process.argv.at(-1) ?? '';
 const audio = path.endsWith('.mp3');
 const compatible = path.endsWith('.playable.mp4');

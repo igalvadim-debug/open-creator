@@ -21,8 +21,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Bilibili](https://img.shields.io/badge/dynamic/json?label=Bilibili&query=%24.data.follower&suffix=%E7%B2%89%E4%B8%9D&url=https%3A%2F%2Fapi.bilibili.com%2Fx%2Frelation%2Fstat%3Fvmid%3D242124650&logo=bilibili&color=00A1D6&labelColor=FE7398&logoColor=FFFFFF)](https://space.bilibili.com/242124650)
 [![AtomGit G-Star](https://img.shields.io/badge/AtomGit-G--Star-DA203E?style=flat)](https://atomgit.com/krillinai/OpenCreator)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fUNvbqDaw)
-[![Groupe QQ](https://img.shields.io/badge/QQ%20群-754069680-green?logo=tencent-qq)](https://qm.qq.com/q/W4YC0PLMeA)
+[![X](https://img.shields.io/badge/X-Follow-000000?logo=x&logoColor=white)](https://x.com/KrillinAIJunxi)
 
 [Points forts](#points-forts) · [Outils](#outils-de-création) · [Skills](#skills) · [Exemples](#exemples) · [Démarrer](#démarrage-rapide) · [Desktop](#desktop) · [Docs](#documentation) · [Communauté](#communauté)
 
@@ -65,17 +64,27 @@ Web constitue l'unique implémentation du frontend. Desktop charge la même comp
 
 - 🔐 **Sécurité locale** : conservez les données, les pièces jointes et les journaux localement par défaut, avec des approbations et des diagnostics expurgés des informations sensibles.
 
+- 🌐 **Interface multilingue** : Web et Desktop proposent 43 langues, la détection de la langue système, le choix manuel et une disposition de droite à gauche pour l'arabe, le persan, l'ourdou et l'hébreu.
+
 ## Outils de création
 
 La version actuelle comprend six outils de création. Les modèles et services disponibles dépendent de votre environnement Codex local et de la configuration des services d'IA.
 
-Ouvrez le Dashboard pour traduire ou télécharger des vidéos, générer des miniatures ou des images, créer des voix off avec le doublage intelligent ou générer des vidéos avec Seedance.
+Ouvrez le Dashboard pour traduire ou télécharger des vidéos, générer des miniatures ou des images, créer des voix off avec le Text to Speech ou générer des vidéos avec Seedance.
 
 ![Dashboard de création d'OpenCreator](../images/product/opencreator-dashboard-en.png)
 
 > De nouveaux outils de création sont ajoutés en continu.
 
-**La traduction vidéo prend en charge 101 langues cibles.**
+**La traduction vidéo propose 123 langues sources et 124 options cibles, dont la sortie en pinyin.** Recherchez par nom natif, anglais, chinois ou code de langue. La couverture de la reconnaissance et de la synthèse vocales dépend du service et du modèle choisis.
+
+- **Traduction de sous-titres seuls** : Importez et prévisualisez un SRT, puis traduisez-le sans vidéo source, doublage ni rendu vidéo.
+
+- **Édition avancée des sous-titres** : Un éditeur immersif relie la lecture à la forme d'onde et à la timeline. Ajustez les temps, divisez ou fusionnez les sous-titres et recherchez et remplacez du texte. Prévisualisez les styles sur la vidéo, réglez la langue, la voix et la sortie, puis générez une nouvelle version en conservant les précédentes.
+
+- **Création sur une seule page** : Configurez la génération d'images, de vidéos et Text to Speech sur une page, avec sélection du modèle, aperçu des références, options d'image propres au modèle et bibliothèque de voix avec recherche.
+
+- **Sortie multilingue et progression** : Les polices de secours intégrées améliorent le rendu des écritures complexes et des sous-titres de droite à gauche. Suivez la transcription, la traduction, le doublage et le rendu, avec le nombre d'éléments terminés et le total lorsqu'ils sont disponibles.
 
 <table width="100%">
 <thead>
@@ -87,16 +96,16 @@ Ouvrez le Dashboard pour traduire ou télécharger des vidéos, générer des mi
 </thead>
 <tbody>
 <tr><td valign="top">Traduction vidéo</td><td valign="top">✅ Disponible</td><td>Importez des vidéos locales ou publiques ; transcrivez-les avec des services Whisper locaux ou dans le cloud ; utilisez le contexte d'un LLM pour segmenter et aligner les sous-titres, gérer la terminologie et traduire ; configurez des sous-titres bilingues, un doublage ou un échantillon vocal personnalisé, le style des sous-titres et une composition horizontale ou verticale, puis exportez au format SRT, audio ou vidéo</td></tr>
-<tr><td valign="top">Téléchargement de vidéos</td><td valign="top">✅ Disponible</td><td>Analysez des vidéos publiques individuelles de YouTube, Bilibili, X, TikTok, Instagram, Douyin, Facebook, Xiaohongshu, Pinterest et Reddit ; comparez les formats disponibles et téléchargez la vidéo ou l'audio. Certaines plateformes peuvent nécessiter des cookies</td></tr>
+<tr><td valign="top">Téléchargement de vidéos</td><td valign="top">✅ Disponible</td><td>Analysez des vidéos publiques individuelles de YouTube, Bilibili, X, TikTok, Instagram, Douyin, Facebook, Xiaohongshu, Pinterest et Reddit ; comparez les formats disponibles et téléchargez la vidéo ou l'audio. Certaines plateformes peuvent nécessiter des cookies. Si la plateforme fournit des sous-titres, consultez la liste et téléchargez le SRT ; l'anglais est prioritaire, puis la langue de l'interface si elle est disponible.</td></tr>
 <tr><td valign="top">Génération de miniatures</td><td valign="top">✅ Disponible</td><td>Combinez un sujet, un lien vidéo et une image de référence facultative pour générer et comparer plusieurs variantes de miniatures de contenu</td></tr>
-<tr><td valign="top">Génération d'images</td><td valign="top">✅ Disponible</td><td>Générez des images avec GPT Image à partir d'un prompt et d'une image de référence facultative, configurez le format et le nombre de résultats, puis prévisualisez et téléchargez chaque image</td></tr>
+<tr><td valign="top">Génération d'images</td><td valign="top">✅ Disponible</td><td>Générez des images avec GPT Image / Seedream / Kling Image / Gemini à partir d'un prompt et d'une image de référence facultative, configurez le format et le nombre de résultats, puis prévisualisez et téléchargez chaque image</td></tr>
 <tr><td valign="top">Rédaction d’articles</td><td valign="top">✅ Disponible</td><td>Transformez un sujet, des liens, des vidéos ou des documents en choix de sujets, plan et article modifiables ; ajoutez des images et exportez en Markdown, HTML ou PDF.</td></tr>
 <tr><td valign="top">Publications Xiaohongshu</td><td valign="top">✅ Disponible</td><td>Générez une publication à partir d’un sujet ou de sources en choisissant le public, le type et la longueur, puis copiez ou téléchargez le résultat.</td></tr>
 <tr><td valign="top">Script de vidéo courte</td><td valign="top">✅ Disponible</td><td>Créez un script découpé prêt au tournage à partir d’un sujet ou de sources, adapté au public, à la plateforme, à la durée et au ton ; modifiez-le ou exportez-le.</td></tr>
 <tr><td valign="top">Animation de bonshommes allumettes</td><td valign="top">✅ Disponible</td><td>Transformez du texte ou du contenu YouTube en narration, voix, images de storyboard aux personnages cohérents, sous-titres et animation téléchargeable.</td></tr>
 <tr><td valign="top">Clips automatiques</td><td valign="top">En développement</td><td>Analysez de longues vidéos, identifiez les temps forts et transformez les moments choisis en clips courts réutilisables</td></tr>
-<tr><td valign="top">Doublage intelligent</td><td valign="top">✅ Disponible</td><td>Transformez des scripts en voix off avec un choix de voix et des réglages de rythme et d'émotion</td></tr>
-<tr><td valign="top">Génération vidéo</td><td valign="top">✅ Disponible</td><td>Générez des vidéos avec Seedance à partir de prompts et d'images de référence, puis prévisualisez, régénérez ou téléchargez chaque version</td></tr>
+<tr><td valign="top">Text to Speech</td><td valign="top">✅ Disponible</td><td>Transformez des scripts en voix off avec un choix de voix et des réglages de rythme et d'émotion</td></tr>
+<tr><td valign="top">Génération vidéo</td><td valign="top">✅ Disponible</td><td>Générez des vidéos avec Seedance / Kling / Veo à partir de prompts et d'images de référence, puis prévisualisez, régénérez ou téléchargez chaque version</td></tr>
 <tr><td valign="top">Avatar numérique</td><td valign="top">En développement</td><td>Combinez scripts, voix et présentation d'avatar pour produire des vidéos face caméra</td></tr>
 </tbody>
 </table>
@@ -252,6 +261,12 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 > Ces exemples vidéo et l'image d'alignement des sous-titres ont été produits lorsqu'OpenCreator utilisait encore le nom KrillinAI.
 
+#### Éditeur de sous-titres
+
+L'éditeur de sous-titres intégré permet de modifier côte à côte le texte original et sa traduction, de prévisualiser la vidéo en synchronisation, d'utiliser une forme d'onde et une chronologie liées à la lecture, et de personnaliser les styles de sous-titres.
+
+![OpenCreator subtitle editor](../images/examples/video-translation-subtitle-editor-en.png)
+
 ### Téléchargement de vidéos
 
 Analysez des liens vidéo publics provenant de 10 plateformes prises en charge, comparez les formats disponibles, puis téléchargez la vidéo ou l'audio directement dans le projet.
@@ -275,7 +290,7 @@ Sources vidéo prises en charge :
 
 La disponibilité dépend de la vidéo et de la région ; certaines sources peuvent nécessiter des cookies de la plateforme. OpenCreator n'importe pas automatiquement les cookies du navigateur.
 
-![Sélection du format dans l'outil de téléchargement vidéo OpenCreator](../images/examples/video-downloader-formats-en.png)
+![Sélection du format dans l'outil de téléchargement vidéo OpenCreator](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### Génération vidéo
 
@@ -558,7 +573,7 @@ Le fichier `README.md` situé à la racine est le document anglais de référenc
 
 ## Communauté
 
-<p>OpenCreator a reçu des étoiles d’utilisateurs GitHub dans <strong>au moins 100 pays et régions</strong>.</p>
+<p>OpenCreator a reçu des étoiles d’utilisateurs GitHub dans <strong>au moins 107 pays et régions</strong>.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Carte du monde indiquant les pays et régions des utilisateurs GitHub ayant attribué une étoile à OpenCreator" width="760" />
 

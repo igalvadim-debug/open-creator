@@ -21,10 +21,11 @@ type TTSRequest struct {
 	AudioOnly        bool
 	Voice            string
 	VoiceCloneSource string
-	ReportProgress   func(phase string, percent int, message string)
+	ReportProgress   ProgressReporter
 }
 
 func GenerateTTS(ctx context.Context, svc StageService, req TTSRequest) (Response, error) {
+	req.ReportProgress = monotonicProgress(req.ReportProgress)
 	if req.LineMode == "" {
 		req.LineMode = LineModeTargetOnly
 	}
@@ -40,6 +41,7 @@ func GenerateTTS(ctx context.Context, svc StageService, req TTSRequest) (Respons
 		return ttsFailureResponse(req, manifest, ErrorKindInternal, "apply_outputs_failed", err), err
 	}
 	restoreOutputs(manifest, existingOutputs)
+	prepareTTSOutputs(manifest)
 
 	inputSRT := req.InputSRT
 	if inputSRT == "" {
@@ -67,18 +69,21 @@ func GenerateTTS(ctx context.Context, svc StageService, req TTSRequest) (Respons
 		}
 	}
 	stepParam := &types.SubtitleTaskStepParam{
-		TaskId:               req.TaskID,
-		TaskPtr:              &types.SubtitleTask{TaskId: req.TaskID, Status: types.SubtitleTaskStatusProcessing},
-		TaskBasePath:         req.Workdir,
-		EnableTts:            true,
-		TtsAudioOnly:         req.AudioOnly,
-		TtsSourceFilePath:    ttsSource,
-		TtsResultFilePath:    manifest.Outputs.TTSAudio,
-		InputVideoPath:       inputVideo,
-		TtsVoiceCode:         req.Voice,
-		VoiceCloneAudioUrl:   req.VoiceCloneSource,
-		VideoWithTtsFilePath: manifest.Outputs.VideoWithTTS,
-		TargetLanguage:       types.StandardLanguageCode(manifest.TargetLanguage),
+		TaskId:                  req.TaskID,
+		TaskPtr:                 &types.SubtitleTask{TaskId: req.TaskID, Status: types.SubtitleTaskStatusProcessing},
+		TaskBasePath:            req.Workdir,
+		EnableTts:               true,
+		TtsAudioOnly:            req.AudioOnly,
+		TtsSourceFilePath:       ttsSource,
+		TtsOriginSrtFilePath:    manifest.Outputs.OriginSRT,
+		TtsResultFilePath:       manifest.Outputs.TTSAudio,
+		TtsBilingualSrtFilePath: manifest.Outputs.BilingualSRT,
+		InputVideoPath:          inputVideo,
+		TtsVoiceCode:            req.Voice,
+		VoiceCloneAudioUrl:      req.VoiceCloneSource,
+		VideoWithTtsFilePath:    manifest.Outputs.VideoWithTTS,
+		TargetLanguage:          types.StandardLanguageCode(manifest.TargetLanguage),
+		TtsResultSrtFilePath:    manifest.Outputs.TargetSRT,
 	}
 	stepParam.TaskPtr.SetProgressReporter(func(percent uint8) {
 		if percent >= 95 {
@@ -87,6 +92,7 @@ func GenerateTTS(ctx context.Context, svc StageService, req TTSRequest) (Respons
 		}
 		reportTTSProgress(req, "generating_voice", int(percent), "正在生成配音")
 	})
+	forwardTaskProgress(stepParam.TaskPtr, req.ReportProgress, nil)
 	reportTTSProgress(req, "generating_voice", 20, "正在生成配音")
 	if err := svc.GenerateSpeechFromSRT(ctx, stepParam); err != nil {
 		return failTTSStage(req, manifest, "generate_speech_failed", err)
@@ -105,11 +111,11 @@ func GenerateTTS(ctx context.Context, svc StageService, req TTSRequest) (Respons
 	return ttsResponse(true, req, manifest, nil), nil
 }
 
-func reportTTSProgress(req TTSRequest, phase string, percent int, message string) {
+func reportTTSProgress(req TTSRequest, phase string, percent int, message string, counts ...ProgressCounts) {
 	if req.ReportProgress == nil {
 		return
 	}
-	req.ReportProgress(phase, percent, message)
+	req.ReportProgress(phase, percent, message, counts...)
 }
 
 func ttsManifest(req TTSRequest) (*Manifest, error) {
@@ -179,10 +185,48 @@ func restoreOutputs(manifest *Manifest, existing Outputs) {
 
 func failTTSStage(req TTSRequest, manifest *Manifest, code string, err error) (Response, error) {
 	if manifest != nil {
+		invalidateTTSOutputs(manifest)
 		manifest.MarkStage(StageTTS, false, err.Error())
 		_ = manifest.Save()
 	}
 	return ttsFailureResponse(req, manifest, ErrorKindRetryable, code, err), err
+}
+
+// prepareTTSOutputs removes artifacts from an earlier run before starting a
+// new TTS attempt, so a failed attempt cannot inherit stale diagnostics.
+func prepareTTSOutputs(manifest *Manifest) {
+	if manifest == nil {
+		return
+	}
+	for _, path := range []string{
+		manifest.Outputs.TTSAudio,
+		manifest.Outputs.VideoWithTTS,
+		filepath.Join(manifest.Workdir, "dubbing", "dubbing_plan.json"),
+		filepath.Join(manifest.Workdir, "dubbing", "dubbing_report.json"),
+		filepath.Join(manifest.Workdir, "dubbing", "dub.srt"),
+	} {
+		if path != "" {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+// invalidateTTSOutputs prevents a failed run from exposing partially generated
+// audio or video through the manifest.
+func invalidateTTSOutputs(manifest *Manifest) {
+	if manifest == nil {
+		return
+	}
+	for _, path := range []string{
+		manifest.Outputs.TTSAudio,
+		manifest.Outputs.VideoWithTTS,
+	} {
+		if path != "" {
+			_ = os.Remove(path)
+		}
+	}
+	manifest.Outputs.TTSAudio = ""
+	manifest.Outputs.VideoWithTTS = ""
 }
 
 func ttsFailureResponse(req TTSRequest, manifest *Manifest, kind ErrorKind, code string, err error) Response {

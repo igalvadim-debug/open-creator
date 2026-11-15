@@ -13,13 +13,13 @@
 
 <p><strong>OpenCreator was formerly known as KrillinAI.</strong></p>
 
+
 **English** | [简体中文](./docs/zh/README.md) | [日本語](./docs/ja/README.md) | [한국어](./docs/ko/README.md) | [Bahasa Indonesia](./docs/id/README.md) | [Español](./docs/es/README.md) | [Français](./docs/fr/README.md) | [Deutsch](./docs/de/README.md) | [Português](./docs/pt/README.md) | [Русский](./docs/ru/README.md) | [العربية](./docs/ar/README.md) | [ภาษาไทย](./docs/th/README.md) | [Türkçe](./docs/tr/README.md) | [हिन्दी](./docs/hi/README.md) | [বাংলা](./docs/bn/README.md) | [اردو](./docs/ur/README.md) | [Tiếng Việt](./docs/vi/README.md) | [Filipino](./docs/fil/README.md)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Bilibili](https://img.shields.io/badge/dynamic/json?label=Bilibili&query=%24.data.follower&suffix=%E7%B2%89%E4%B8%9D&url=https%3A%2F%2Fapi.bilibili.com%2Fx%2Frelation%2Fstat%3Fvmid%3D242124650&logo=bilibili&color=00A1D6&labelColor=FE7398&logoColor=FFFFFF)](https://space.bilibili.com/242124650)
 [![AtomGit G-Star](https://img.shields.io/badge/AtomGit-G--Star-DA203E?style=flat)](https://atomgit.com/krillinai/OpenCreator)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fUNvbqDaw)
-[![QQ 群](https://img.shields.io/badge/QQ%20群-754069680-green?logo=tencent-qq)](https://qm.qq.com/q/W4YC0PLMeA)
+[![X](https://img.shields.io/badge/X-Follow-000000?logo=x&logoColor=white)](https://x.com/KrillinAIJunxi)
 
 [Highlights](#project-highlights) · [Creator Tools](#creator-tools) · [Skills](#skills) · [Examples](#examples) · [Quick Start](#quick-start) · [Desktop](#desktop) · [Docs](#documentation) · [Community](#community)
 
@@ -76,19 +76,27 @@ Web is the single frontend implementation. Desktop loads the same Web build and 
 
 - 🔐 **Local Security**: Keep data, attachments, and logs local by default, with approvals and redacted diagnostics.
 
-- 🌐 **Localized Interface**: Use the Web or Desktop client in Simplified Chinese, English, or Swedish, with automatic system-language detection or manual selection.
+- 🌐 **Localized Interface**: Use Web and Desktop in 43 interface languages, with automatic system-language detection, manual selection, and right-to-left layouts for Arabic, Persian, Urdu, and Hebrew.
 
 ## Creator Tools
 
 The current release includes ten creator tools. Available models and services depend on your local Codex environment and AI service settings.
 
-Open the Dashboard to write articles, Xiaohongshu posts, or short-video scripts; create stick figure animations; translate or download videos; generate thumbnails, images, or videos; and create voiceovers with Smart Dubbing.
+Open the Dashboard to write articles, Xiaohongshu posts, or short-video scripts; create stick figure animations; translate or download videos; generate thumbnails, images, or videos; and create voiceovers with Text to Speech.
 
 ![OpenCreator Creator Dashboard](./docs/images/product/opencreator-dashboard-en.png)
 
 > More creator tools are continuously being added.
 
-**Video Translation supports 14 source languages and 101 target languages.** The source languages are Simplified Chinese, English, Spanish, French, Italian, Brazilian Portuguese, Indonesian, Thai, Japanese, Korean, German, Turkish, Russian, and Malay.
+**Video Translation offers 123 source languages and 124 target options, including Pinyin output.** Search by native name, English name, Chinese name, or language code. Speech recognition and dubbing coverage depend on the selected service and model; the language catalog does not mean every model supports every language.
+
+- **Subtitle-only translation**: Import and preview an SRT file, then translate it without a source video, dubbing, or video rendering.
+
+- **Advanced subtitle editing**: Open an immersive editor with a playback-linked waveform and timeline, adjust subtitle timing, split or merge cues, and find and replace text. Preview subtitle styles on the video, adjust language, dubbing, and output settings, then generate a new version while retaining earlier results.
+
+- **One-step creation**: Configure image generation, video generation, and Text to Speech on one page. Browse models, preview reference images, use model-specific image options, and find voices in a searchable voice library.
+
+- **Multilingual output and progress**: Bundled fallback fonts improve complex-script and right-to-left subtitle rendering. Follow transcription, translation, dubbing, and rendering progress with completed and total item counts where available.
 
 <table width="100%">
 <thead>
@@ -100,16 +108,16 @@ Open the Dashboard to write articles, Xiaohongshu posts, or short-video scripts;
 </thead>
 <tbody>
 <tr><td valign="top">Video Translation</td><td valign="top">✅ Available</td><td>Import local or public videos; transcribe with cloud or local Whisper services; use LLM context for subtitle segmentation, alignment, terminology, and translation; configure bilingual subtitles, dubbing or a custom voice sample, subtitle styles, landscape or portrait composition, and export SRT, audio, or video</td></tr>
-<tr><td valign="top">Video Downloader</td><td valign="top">✅ Available</td><td>Analyze individual public videos from YouTube, Bilibili, X, TikTok, Instagram, Douyin, Facebook, Xiaohongshu, Pinterest, and Reddit; compare available formats and download video or audio. Some sources may require platform cookies</td></tr>
+<tr><td valign="top">Video Downloader</td><td valign="top">✅ Available</td><td>Analyze individual public videos from YouTube, Bilibili, X, TikTok, Instagram, Douyin, Facebook, Xiaohongshu, Pinterest, and Reddit; compare available formats and download video or audio. Some sources may require platform cookies. When platform captions are available, preview the subtitle list and download SRT; English appears first, followed by the interface language when available.</td></tr>
 <tr><td valign="top">Thumbnail Generator</td><td valign="top">✅ Available</td><td>Combine a topic, video link, and optional reference image to generate and compare multiple content-thumbnail variations</td></tr>
-<tr><td valign="top">Image Generation</td><td valign="top">✅ Available</td><td>Generate with GPT Image from a prompt and optional reference image, configure the aspect ratio and output count, then preview and download individual images</td></tr>
+<tr><td valign="top">Image Generation</td><td valign="top">✅ Available</td><td>Generate with GPT Image / Seedream / Kling Image / Gemini from a prompt and optional reference image, configure the aspect ratio and output count, then preview and download individual images</td></tr>
 <tr><td valign="top">Article Writer</td><td valign="top">✅ Available</td><td>Turn a topic, links, videos, or source documents into editable topic options, an outline, and a complete article; add generated images and export Markdown, HTML, or PDF</td></tr>
 <tr><td valign="top">Xiaohongshu Posts</td><td valign="top">✅ Available</td><td>Generate a complete Xiaohongshu post from a topic or source material, with controls for the target audience, post type, and length, then copy or download the result</td></tr>
 <tr><td valign="top">Short Video Script</td><td valign="top">✅ Available</td><td>Create a shoot-ready segmented script from a topic or source material, tailored to the audience, platform, duration, and tone, then edit, copy, or download it</td></tr>
 <tr><td valign="top">Stick Figure Animation</td><td valign="top">✅ Available</td><td>Turn text or YouTube content into narration, voice, consistent-character storyboard visuals, subtitles, and a downloadable stick figure animation</td></tr>
 <tr><td valign="top">Auto Clips</td><td valign="top">In development</td><td>Analyze long videos, identify highlights, and turn selected moments into reusable short clips</td></tr>
-<tr><td valign="top">Smart Dubbing</td><td valign="top">✅ Available</td><td>Turn scripts into voiceovers with selectable voices, pacing, and emotion controls</td></tr>
-<tr><td valign="top">Video Generation</td><td valign="top">✅ Available</td><td>Generate videos with Seedance from prompts and reference images, then preview, regenerate, and download each version</td></tr>
+<tr><td valign="top">Text to Speech</td><td valign="top">✅ Available</td><td>Turn scripts into voiceovers with selectable voices, pacing, and emotion controls</td></tr>
+<tr><td valign="top">Video Generation</td><td valign="top">✅ Available</td><td>Generate videos with Seedance / Kling / Veo from prompts and reference images, then preview, regenerate, and download each version</td></tr>
 <tr><td valign="top">Digital Avatar</td><td valign="top">In development</td><td>Combine scripts, voice, and avatar presentation to produce talking-head videos</td></tr>
 </tbody>
 </table>
@@ -265,6 +273,12 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 > These video examples and the subtitle alignment image were produced while OpenCreator still used the KrillinAI name.
 
+#### Subtitle Editor
+
+The built-in subtitle editor provides side-by-side original and translated text, synchronized video preview, a playback-linked waveform and timeline, and customizable subtitle styles.
+
+![OpenCreator subtitle editor](./docs/images/examples/video-translation-subtitle-editor-en.png)
+
 ### Video Downloader
 
 Analyze public video links from 10 supported platforms, compare available formats, and download video or audio directly to your project.
@@ -288,7 +302,7 @@ Supported video sources:
 
 Availability varies by video and region; some sources may require platform cookies.
 
-![OpenCreator Video Downloader format selection](./docs/images/examples/video-downloader-formats-en.png)
+![OpenCreator Video Downloader format selection](./docs/images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### Video Generation
 
@@ -588,7 +602,7 @@ The root `README.md` is the canonical English document. Maintained translations 
 
 ## Community
 
-<p>GitHub users from <strong>at least 100 countries and regions</strong> have starred OpenCreator.</p>
+<p>GitHub users from <strong>at least 107 countries and regions</strong> have starred OpenCreator.</p>
 
 
 ### The Crew

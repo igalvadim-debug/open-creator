@@ -1,3 +1,4 @@
+import { selectOption } from '../../test/select-option.js';
 import type { CodexProviderConfig, CodexRuntimeReadiness, GatewayAccountState } from '@opencreator/protocol';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
@@ -46,6 +47,39 @@ function mount(service: AgentSetupService, initialSnapshot?: AgentSetupSnapshot)
 describe('StartupAgentSetup', () => {
   afterEach(() => { cleanup(); window.localStorage.clear(); });
 
+  it('starts in English and updates the selector and both modes when the language changes', async () => {
+    window.localStorage.clear();
+    render(<LanguageProvider>
+      <StartupAgentSetup service={createService()} onReady={vi.fn()} onSkip={vi.fn()} />
+    </LanguageProvider>);
+    const user = userEvent.setup();
+    expect(document.documentElement).toHaveAttribute('lang', 'en-US');
+    expect(screen.getByRole('region', { name: 'Get started with Agent' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign-in mode' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Local mode' })).toBeInTheDocument();
+    const englishSelector = screen.getByRole('combobox', { name: 'Display language' });
+    expect(englishSelector).toHaveAttribute('data-value', 'en-US');
+    expect(englishSelector).toHaveValue('English');
+
+    await user.click(englishSelector);
+    await user.click(screen.getByRole('option', { name: /Chinese \(Simplified\)/ }));
+    expect(document.documentElement).toHaveAttribute('lang', 'zh-CN');
+    expect(screen.getByRole('button', { name: '登录模式' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '本地模式' })).toBeInTheDocument();
+    const chineseSelector = screen.getByRole('combobox', { name: '显示语言' });
+    expect(chineseSelector).toHaveAttribute('data-value', 'zh-CN');
+    expect(chineseSelector).toHaveValue('简体中文 · Chinese (Simplified)');
+
+    await user.click(chineseSelector);
+    await user.click(screen.getByRole('option', { name: 'English' }));
+    await user.click(screen.getByRole('button', { name: 'Sign-in mode' }));
+    expect(screen.getByRole('button', { name: 'Sign in to OpenCreator' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    await user.click(screen.getByRole('button', { name: 'Local mode' }));
+    expect(await screen.findByRole('combobox', { name: 'Provider' })).toBeInTheDocument();
+    expect(window.localStorage.getItem('opencreator.preferences.language')).toBe('en-US');
+  });
+
   it('only offers reuse for a ready Codex with usable credentials', () => {
     const provider: CodexProviderConfig = { baseUrl: 'https://gateway.example.test/v1', model: 'model-1', apiKeyConfigured: true, authentication: 'api_key' };
     expect(availableAgentMode({ readiness: readiness('signed_out', 'degraded'), provider })).toBe('api_key');
@@ -85,7 +119,7 @@ describe('StartupAgentSetup', () => {
     await user.click(screen.getByRole('button', { name: '本地模式' }));
     await user.click(screen.getByRole('button', { name: '自定义模型服务' }));
     expect(screen.getByRole('combobox', { name: '供应商' })).toBeInTheDocument();
-    await user.selectOptions(screen.getByRole('combobox', { name: '供应商' }), 'deepseek');
+    await selectOption(screen.getByRole('combobox', { name: '供应商' }), 'deepseek');
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.deepseek.com');
     expect(screen.getByLabelText('模型名称')).toHaveValue('deepseek-v4-pro');
     await user.type(screen.getByLabelText('API Key'), 'custom-key');
@@ -124,7 +158,7 @@ describe('StartupAgentSetup', () => {
     expect(providerSelect).toHaveValue('openai');
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.openai.com/v1');
     expect(screen.getByLabelText('模型名称')).toHaveValue('gpt-5.6-sol');
-    await user.selectOptions(providerSelect, 'minimax');
+    await selectOption(providerSelect, 'minimax');
     expect(screen.queryByRole('button', { name: '使用 ChatGPT 登录' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '使用本机 Codex，继续' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.minimax.io');
@@ -160,7 +194,7 @@ describe('StartupAgentSetup', () => {
     const { onReady } = mount(service);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: '本地模式' }));
-    await user.selectOptions(await screen.findByRole('combobox', { name: '供应商' }), 'openai');
+    await selectOption(await screen.findByRole('combobox', { name: '供应商' }), 'openai');
     await user.type(screen.getByLabelText('API Key'), 'secret');
     await user.click(screen.getByRole('button', { name: '保存并开始使用' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('模型服务尚未就绪');

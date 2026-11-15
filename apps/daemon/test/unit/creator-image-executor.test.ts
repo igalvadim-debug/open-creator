@@ -4,7 +4,7 @@ import {
   type CreatorStageRun,
   type ImageGenerationProvider
 } from '@opencreator/protocol';
-import { access, copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -20,6 +20,21 @@ afterEach(async () => {
 });
 
 describe('creator image executor', () => {
+  it('saves all four images in a batch without submitting four paid requests', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'creator-image-batch-'));
+    const contents = Array.from({ length: 4 }, (_, i) => ({ content: png(`batch-${i}`), mime: 'image/png' as const }));
+    const generate = vi.fn(async () => ({ model: 'midjourney-v8.2', contents }));
+    const executor = createImageExecutor({ configStore: { read: async () => createDefaultCreatorServicesConfig() }, generate });
+    const result = await executor.run(stageInput({ candidateCount: 1 }));
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(result.outputs).toHaveLength(4);
+    expect(new Set(result.outputs.map(output => output.path)).size).toBe(4);
+    for (const [i, output] of result.outputs.entries()) {
+      expect(await readFile(output.path!)).toEqual(contents[i]!.content);
+      expect(output.metadata).toMatchObject({ candidate: i + 1, model: 'midjourney-v8.2' });
+    }
+    expect(result.progress).toMatchObject({ status: 'succeeded', completed: 4, failed: 0, total: 4 });
+  });
   it.each(['openai', 'codex-native'] as const)('rejects a missing required image before invoking %s', async provider => {
     const generate = vi.fn();
     const executor = createImageExecutor({ configStore: { read: async () => createDefaultCreatorServicesConfig() }, generate });
@@ -138,6 +153,16 @@ describe('creator image executor', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) })
     );
     expect(result.outputs).toHaveLength(1);
+  });
+
+  it('forwards manual image model controls from drafts to the provider and saved artifact', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'creator-image-model-options-'));
+    const config = createDefaultCreatorServicesConfig();
+    const generate = vi.fn(async () => ({ model: 'gpt-image-2', contents: [{ content: png('image'), mime: 'image/png' as const }] }));
+    const executor = createImageExecutor({ configStore: { read: async () => config }, generate });
+    const result = await executor.run(stageInput({ provider: 'openai', candidateCount: 1, aspectRatio: '16:9', resolution: '2K', modelQuality: 'auto' }));
+    expect(generate).toHaveBeenCalledWith(expect.objectContaining({ aspectRatio: '16:9', resolution: '2K', modelQuality: 'auto' }), config, expect.any(Object));
+    expect(result.outputs[0]?.metadata).toMatchObject({ aspectRatio: '16:9', resolution: '2K', modelQuality: 'auto' });
   });
 
   it('normalizes inherited candidate counts for codex-native', async () => {
