@@ -25,7 +25,7 @@ async function setup(activate = vi.fn(async () => undefined), close = vi.fn(asyn
     async startDevice() { const id = String(++attempt); return { attemptId: id, deviceSecret: `private-${id}`, authorizationUrl: `https://gateway.example/device?attempt=${id}`, interval: 5, expiresIn: 600 }; },
     pollDevice: vi.fn(async (id: string) => ({ accessToken: `access-${id}`, refreshToken: `refresh-${id}`, expiresIn: 900 })),
     async cancelDevice() {},
-    refresh: vi.fn(async () => ({ accessToken: 'new-access', refreshToken: 'new-refresh', expiresIn: 900 })),
+    refresh: vi.fn(async (_refreshToken: string) => ({ accessToken: 'new-access', refreshToken: 'new-refresh', expiresIn: 900 })),
     async logout() {},
     avatar: vi.fn(async () => ({ data: new Uint8Array([1, 2, 3]), contentType: 'image/png' })),
     bootstrap: vi.fn(async (access: string): Promise<GatewayBootstrap> => { const id = access.split('-').at(-1)!; return { schemaVersion: 1 as const, account: { id, email: `${id}@example.test`, verified: true }, modelKey: `cloud-${id}`, keyVersion: '1', bindingVersion: `${id}:1`, baseUrl: 'https://gateway.example/v1', models: [{ id: 'gateway-text', modality: 'text' as const, capabilities: ['responses'] }], defaults: { text: 'gateway-text' } }; }),
@@ -41,6 +41,94 @@ async function setup(activate = vi.fn(async () => undefined), close = vi.fn(asyn
   return { service, root, client, activate, close, probe };
 }
 
+it('reads the public image catalog without account credentials', async () => {
+  const f = await setup();
+  const request = vi.spyOn(f.client, 'request').mockResolvedValue({
+    catalogVersion: 'catalog-1', updatedAt: '2026-11-10T00:00:00Z', refreshState: 'ready',
+    defaults: { image: 'vendor/image' },
+    models: [
+      { id: 'vendor/image', name: 'Image One', modality: 'image', capabilities: [], imageOptions: { maxImages: 1, maxReferences: 0, aspectRatios: ['1:1'] } },
+      { id: 'vendor/text', modality: 'text', capabilities: ['responses'] }
+    ]
+  });
+  try {
+    await expect(f.service.readPublicImageCatalog()).resolves.toMatchObject({
+      recommendedModelId: 'vendor/image', models: [{ id: 'vendor/image', imageOptions: { aspectRatios: ['1:1'] } }]
+    });
+    expect(request).toHaveBeenCalledWith('/api/v1/models/catalog', '');
+    request.mockResolvedValueOnce({ models: [{ id: 'broken' }] });
+    await expect(f.service.readPublicImageCatalog()).rejects.toMatchObject({ code: 'invalid_gateway_response' });
+  } finally { await f.service.close(); }
+});
+
+it('reads the public video catalog with native model metadata and no account credentials', async () => {
+  const f = await setup();
+  const request = vi.spyOn(f.client, 'request').mockResolvedValue({
+    catalogVersion: 'catalog-video', defaults: { video: 'vendor/video' }, models: [
+      { id: 'vendor/video', name: 'Motion One', vendor: 'Vendor', modality: 'video', capabilities: ['generate'], sizes: ['1280x720'], durations: [5, 10],
+        price: { version: 'v1', videoUnitsPerSecond: { '720p': 30_000_000 }, estimates: { clip: { creditUnits: '150000000', seconds: 5, resolution: '720p' } } } },
+      { id: 'vendor/image', modality: 'image', capabilities: [] }
+    ]
+  });
+  try {
+    await expect(f.service.readPublicVideoCatalog()).resolves.toMatchObject({
+      recommendedModelId: 'vendor/video', models: [{ id: 'vendor/video', vendor: 'Vendor', sizes: ['1280x720'], durations: [5, 10],
+        price: { videoUnitsPerSecond: { '720p': 30_000_000 }, estimates: { clip: { creditUnits: '150000000' } } } }]
+    });
+    expect(request).toHaveBeenCalledWith('/api/v1/models/catalog', '');
+  } finally { await f.service.close(); }
+});
+
+it('reads public text models from the catalog without account credentials', async () => {
+  const f = await setup();
+  const request = vi.spyOn(f.client, 'request').mockResolvedValue({
+    catalogVersion: 'catalog-text', defaults: { text: 'vendor/text' }, models: [
+      { id: 'vendor/text', name: 'Text One', vendor: 'Vendor', modality: 'text', capabilities: ['chat', 'responses'],
+        price: { version: 'v1', inputPerMillion: 1, outputPerMillion: 2 } },
+      { id: 'vendor/image', modality: 'image', capabilities: [] }
+    ]
+  });
+  try {
+    await expect(f.service.readPublicTextCatalog()).resolves.toMatchObject({
+      recommendedModelId: 'vendor/text', models: [{ id: 'vendor/text', vendor: 'Vendor', price: { inputPerMillion: 1 } }]
+    });
+    expect(request).toHaveBeenCalledWith('/api/v1/models/catalog', '');
+  } finally { await f.service.close(); }
+});
+
+it('caches only coarse recharge state and its observation time from order responses', async () => {
+  const f = await setup();
+  await seedSavedAccount(f);
+  const request = vi.spyOn(f.client, 'request').mockResolvedValue({
+    order: {
+      id: 'order-secret', amountUnits: '1000', status: 'completed',
+      paymentStatus: 'paid', creditStatus: 'ready'
+    }
+  });
+  try {
+    await f.service.billing('/api/v1/billing/orders/order-secret');
+    const snapshot = f.service.peekTelemetryRechargeState();
+    expect(snapshot.state).toBe('recharged');
+    expect(Number.isNaN(Date.parse(snapshot.observedAt))).toBe(false);
+    expect(JSON.stringify(snapshot)).not.toContain('order-secret');
+    expect(JSON.stringify(snapshot)).not.toContain('1000');
+    expect(request).toHaveBeenCalledOnce();
+    request.mockResolvedValue({ order: { status: 'failed' } });
+    await f.service.billing('/api/v1/billing/orders/order-secret');
+    expect(f.service.peekTelemetryRechargeState().state).toBe('recharged');
+  } finally { await f.service.close(); }
+});
+
+it('reports an authoritative empty order list as not recharged', async () => {
+  const f = await setup();
+  await seedSavedAccount(f);
+  vi.spyOn(f.client, 'request').mockResolvedValue({ items: [] });
+  try {
+    await f.service.billing('/api/v1/billing/orders');
+    expect(f.service.peekTelemetryRechargeState().state).toBe('not_recharged');
+  } finally { await f.service.close(); }
+});
+
 it('saves a compatible model choice without invoking the paid probe', async () => {
   const f = await setupCachedAccount({ models: [{ id: 'first', modality: 'text', capabilities: ['responses'] }, { id: 'second', modality: 'text', capabilities: ['responses'] }], defaults: { text: 'first' } });
   try {
@@ -52,6 +140,40 @@ it('saves a compatible model choice without invoking the paid probe', async () =
     await expect(f.service.selectModel('text', 'missing')).rejects.toMatchObject({ code: 'invalid_model' });
     expect(f.service.peekState().selectedModels?.text).toBe('second');
   } finally { await f.service.close(); }
+});
+
+it('remembers task models across restarts without changing account defaults', async () => {
+  const f = await setupCachedAccount({
+    models: [{ id: 'first', modality: 'text', capabilities: ['responses'] }, { id: 'second', modality: 'text', capabilities: ['responses'] }],
+    defaults: { text: 'first' }
+  });
+  const server = Fastify();
+  try {
+    await registerGatewayAccountRoutes(server, f.service);
+    const response = await server.inject({ method: 'PATCH', url: '/gateway/task-model', payload: {
+      templateId: 'short-video-script', modality: 'text', model: 'second'
+    } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().taskModels).toMatchObject({ 'short-video-script': { text: 'second' } });
+    expect(response.json().selectedModels.text).toBe('first');
+    const invalid = await server.inject({ method: 'PATCH', url: '/gateway/task-model', payload: {
+      templateId: 'short-video-script', modality: 'text', model: 'missing'
+    } });
+    expect(invalid.statusCode).toBe(400);
+    expect((await f.service.readState()).taskModels).toMatchObject({ 'short-video-script': { text: 'second' } });
+    await f.service.close();
+    const restored = module.createGatewayAccountService({
+      dataDir: f.root, client: f.client, activateRuntime: f.activate, closeRuntime: f.close,
+      hasActiveTasks: () => false, automaticPolling: false
+    });
+    try {
+      expect(await restored.readState()).toMatchObject({
+        taskModels: { 'short-video-script': { text: 'second' } }, selectedModels: { text: 'first' }
+      });
+      await restored.logout();
+      expect((await restored.readState()).taskModels).toBeUndefined();
+    } finally { await restored.close(); }
+  } finally { await server.close(); await f.service.close(); }
 });
 
 it('checks a task model without changing account defaults', async () => {
@@ -246,7 +368,7 @@ async function setupCatalogAccount(hasActiveTasks = () => false, deferStartupAct
   f.client.bootstrap.mockResolvedValue(raw);
   const request = vi.spyOn(f.client, 'request').mockImplementation(async (path?: string) => {
     if (path === '/api/v1/client/probe-credentials') throw new Error('Automatic probing must not request credentials');
-    return path === '/api/v1/client/models' ? { models: raw.models } : { account: raw.account };
+    return path?.startsWith('/api/v1/client/models') ? { models: raw.models } : { account: raw.account };
   });
   return { ...f, raw, fetcher, request,
     setCatalogIDs(value: string[]) { ids = value; failure = undefined; }, setFailure(status: number) { failure = status; },
@@ -888,7 +1010,7 @@ it('recovers a rejected cached model key through binding sync without inference 
   raw = { ...await f.client.bootstrap('access-1'), transport: 'openrouter-direct', baseUrl: 'https://openrouter.ai/api/v1',
     modelKey: 'rejected-key', keyRotation: false, modelUsePolicy: 'cached-key-v1' };
   f.client.bootstrap.mockResolvedValue(raw);
-  vi.spyOn(f.client, 'request').mockImplementation(async (path?: string) => path === '/api/v1/client/models' ? { models: raw.models } : { account: raw.account });
+  vi.spyOn(f.client, 'request').mockImplementation(async (path?: string) => path?.startsWith('/api/v1/client/models') ? { models: raw.models } : { account: raw.account });
   const grant = await f.service.startAuthorization(); await f.service.pollAuthorization(grant.attemptId);
   expect(f.service.peekState()).toMatchObject({ authState: 'signed_in', activationState: 'blocked' });
   raw = { ...raw, modelKey: 'replacement-key', keyVersion: '2' }; f.client.bootstrap.mockResolvedValue(raw);
@@ -947,7 +1069,7 @@ it('coordinates concurrent direct uses and refreshes a replaced user key private
   f.client.bootstrap.mockImplementation(async () => binding);
   vi.spyOn(f.client, 'request').mockImplementation(async (path?: string, _access?: string, body?: unknown) => {
     if (path === '/api/v1/client/usage') { states.push(body as { busy: boolean; pending: boolean }); return { keyVersion: currentVersion }; }
-    if (path === '/api/v1/client/models') return { models: binding.models };
+    if (path?.startsWith('/api/v1/client/models')) return { models: binding.models };
     return { account: binding.account };
   });
   const grant = await f.service.startAuthorization(); await f.service.pollAuthorization(grant.attemptId);
@@ -971,7 +1093,7 @@ it('automatically requests migration on restart and defers it for pending suppli
   const original = { ...await f.client.bootstrap('access-1'), keyRotation: true };
   f.client.bootstrap.mockResolvedValue(original);
   vi.spyOn(f.client, 'request').mockImplementation(async (path?: string) => path === '/api/v1/client/usage'
-    ? { keyVersion: original.keyVersion } : path === '/api/v1/client/models' ? { models: original.models } : { account: original.account });
+    ? { keyVersion: original.keyVersion } : path?.startsWith('/api/v1/client/models') ? { models: original.models } : { account: original.account });
   const grant = await f.service.startAuthorization(); await f.service.pollAuthorization(grant.attemptId);
   await f.service.close();
   for (const pending of [true, false]) {
@@ -996,7 +1118,7 @@ it.each([false, true])('旧轮换凭据收到迁移提示后切换网关，无�
   f.client.bootstrap.mockResolvedValue(gateway);
   const request = vi.spyOn(f.client, 'request').mockImplementation(async path => {
     if (path === '/api/v1/client/usage') throw new GatewayError('gateway_migrated', 409, { path, reason: 'http', httpStatus: 409 });
-    return path === '/api/v1/client/models' ? { models: gateway.models } : { account: gateway.account };
+    return path?.startsWith('/api/v1/client/models') ? { models: gateway.models } : { account: gateway.account };
   });
   try {
     await f.service.initialize();
@@ -1119,7 +1241,7 @@ it('refreshes the official catalog when idle, preserving choices and deferring p
   const image = { id: 'image', modality: 'image' as const, capabilities: ['edit'] };
   let catalog: GatewayBootstrap['models'] = [first, second];
   f.client.bootstrap.mockImplementation(async () => ({ schemaVersion: 1, account: { id: '1', email: '1@example.test', verified: true }, modelKey: 'private-key', keyVersion: '1', bindingVersion: 'catalog-version', baseUrl: 'https://gateway.example/v1', models: catalog, defaults: { text: 'first' } }));
-  vi.spyOn(f.client, 'request').mockImplementation(async (path?: string) => path === '/api/v1/client/models' ? { models: catalog } : { account: { id: '1', email: '1@example.test', verified: true } });
+  vi.spyOn(f.client, 'request').mockImplementation(async (path?: string) => path?.startsWith('/api/v1/client/models') ? { models: catalog } : { account: { id: '1', email: '1@example.test', verified: true } });
   const grant = await f.service.startAuthorization(); await f.service.pollAuthorization(grant.attemptId);
   await f.service.selectModel('text', 'second');
   const start = Date.now(); const clock = vi.spyOn(Date, 'now').mockReturnValue(start + 31_000);
@@ -1137,6 +1259,31 @@ it('refreshes the official catalog when idle, preserving choices and deferring p
     expect((await f.service.readState()).selectedModels?.text).toBe('first');
     await f.service.logout(); clock.mockReturnValue(start + 124_000);
     await f.service.readState(); expect((await f.service.readState()).source).toBe('manual');
+  } finally { clock.mockRestore(); await f.service.close(); }
+});
+
+it('keeps gateway model parameters cached between ordinary account reads and honors an explicit refresh', async () => {
+  const f = await setup();
+  const bootstrap = { ...await f.client.bootstrap('access-1'), schemaVersion: 3 as const, transport: 'gateway' as const,
+    supplier: 'chatanywhere' as const, keyRotation: false, modelKey: undefined, models: [
+      { id: 'gateway-text', modality: 'text' as const, capabilities: ['responses'] },
+      { id: 'gpt-image-2', modality: 'image' as const, capabilities: ['generate'],
+        imageOptions: { maxImages: 1, maxReferences: 0, aspectRatios: ['1:1'] } }
+    ] };
+  f.client.bootstrap.mockResolvedValue(bootstrap);
+  const request = vi.spyOn(f.client, 'request').mockImplementation(async path => path?.startsWith('/api/v1/client/models')
+    ? { models: bootstrap.models } : { account: bootstrap.account });
+  const grant = await f.service.startAuthorization(); await f.service.pollAuthorization(grant.attemptId);
+  const started = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(started + 31_000);
+  try {
+    await f.service.readState();
+    expect(request.mock.calls.filter(([path]) => path?.startsWith('/api/v1/client/models'))).toHaveLength(0);
+    await f.service.readState({ refreshModels: true });
+    expect(request.mock.calls.filter(([path]) => path?.startsWith('/api/v1/client/models'))).toHaveLength(1);
+    clock.mockReturnValue(started + 60 * 60_000 + 31_001);
+    await f.service.readState();
+    expect(request.mock.calls.filter(([path]) => path?.startsWith('/api/v1/client/models'))).toHaveLength(2);
   } finally { clock.mockRestore(); await f.service.close(); }
 });
 
@@ -1161,6 +1308,30 @@ it('revokes model readiness when account polling detects an expired session', as
     expect(selection.statusCode).toBe(401);
     expect(selection.json().error.code).toBe('GATEWAY_AUTH_REQUIRED');
   } finally { clock.mockRestore(); await server.close(); await f.service.close(); }
+});
+
+it('adopts a newer persisted refresh token after a stale token receives 401', async () => {
+  const f = await setup();
+  await seedSavedAccount(f);
+  const store = createGatewayConfigStore(f.root);
+  await f.service.initialize();
+  const original = await store.readCredentials();
+  if (!original) throw new Error('test credentials were not persisted');
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 16 * 60_000);
+  try {
+    f.client.refresh.mockImplementation(async refreshToken => {
+      if (refreshToken === original.refreshToken) {
+        await store.writeCredentials({ ...original, accessToken: 'persisted-access', refreshToken: 'persisted-refresh', expiresIn: 900, accessExpiresAt: new Date(Date.now() + 900_000).toISOString() });
+        throw new GatewayError('auth_required', 401);
+      }
+      return { accessToken: 'latest-access', refreshToken: 'latest-refresh', expiresIn: 900 };
+    });
+    await f.service.refresh();
+    expect(f.client.refresh).toHaveBeenNthCalledWith(1, original.refreshToken);
+    expect(f.client.refresh).toHaveBeenNthCalledWith(2, 'persisted-refresh');
+    expect(f.service.peekState().authState).toBe('signed_in');
+    await expect(store.readCredentials()).resolves.toMatchObject({ accessToken: 'latest-access', refreshToken: 'latest-refresh' });
+  } finally { clock.mockRestore(); await f.service.close(); }
 });
 
 it('clears an expired device session before starting reauthorization', async () => {
@@ -1369,6 +1540,33 @@ it('keeps the device session when bootstrap fails and can activate without anoth
   await f.service.activate();
   expect((await f.service.readState()).activationState).toBe('ready');
   await f.service.close();
+});
+
+it('activates the official Runtime with a text fallback when the gateway has no defaults', async () => {
+  const f = await setup();
+  const gateway: GatewayBootstrap = {
+    schemaVersion: 3, transport: 'gateway', supplier: 'chatanywhere', keyRotation: false,
+    account: { id: '1', email: '1@example.test', verified: true },
+    keyVersion: 'gateway-v1', bindingVersion: '1:gateway-v1', baseUrl: 'https://gateway.example/v1',
+    models: [
+      { id: 'gpt-6-luna', modality: 'text', capabilities: ['responses', 'chat'], status: 'ready' },
+      { id: 'deepseek-v4.1-flash', modality: 'text', capabilities: ['responses', 'chat'], status: 'ready' }
+    ], defaults: {}
+  };
+  f.client.bootstrap.mockResolvedValue(gateway);
+  vi.spyOn(f.client, 'request').mockImplementation(async path => path === '/api/v1/client/usage'
+    ? { keyVersion: gateway.keyVersion } : path === '/api/v1/me' ? { account: gateway.account }
+      : { models: gateway.models, defaults: {} });
+  try {
+    const grant = await f.service.startAuthorization();
+    await f.service.pollAuthorization(grant.attemptId);
+    expect(f.service.peekState()).toMatchObject({
+      authState: 'signed_in', activationState: 'ready', selectedModels: { text: 'deepseek-v4.1-flash' }
+    });
+    expect(f.activate).toHaveBeenCalledWith(expect.objectContaining({
+      defaults: expect.objectContaining({ text: 'deepseek-v4.1-flash' })
+    }));
+  } finally { await f.service.close(); }
 });
 
 it('concurrent reads wait for the same persisted account initialization', async () => {

@@ -3,6 +3,7 @@ import type {
   CodexProviderConfig,
   CreatorServicesCapabilitiesResponse,
   CreatorServicesConfig,
+  CreatorServicesCredentialField,
   CreatorServicesConfigResponse,
   CreatorTtsPreviewRequest,
   CreatorTtsProvider,
@@ -12,11 +13,13 @@ import type { RuntimeClient } from '../runtime/client.js';
 
 type ClientLike = Pick<RuntimeClient, 'get' | 'patch' | 'delete' | 'rawRequest'>;
 
-export type CreatorServicesSettingsService = Omit<ReturnType<typeof createCreatorServicesService>, 'getCodexImageStatus' | 'getCodexModelStatus' | 'getNetwork' | 'saveNetwork'> & {
+export type CreatorServicesSettingsService = Omit<ReturnType<typeof createCreatorServicesService>, 'getCodexImageStatus' | 'getCodexModelStatus' | 'getNetwork' | 'saveNetwork' | 'getLocalVideoConfig' | 'saveLocalVideoConfig'> & {
   getCodexImageStatus?: () => Promise<CodexImageStatus>;
   getCodexModelStatus?: () => Promise<CodexProviderConfig>;
   getNetwork?: () => Promise<{ proxy: string }>;
   saveNetwork?: (network: { proxy: string }) => Promise<{ proxy: string }>;
+  getLocalVideoConfig?: () => Promise<CreatorServicesConfigResponse>;
+  saveLocalVideoConfig?: (video: CreatorServicesConfig['video'], clearCredentials?: CreatorServicesCredentialField[]) => Promise<CreatorServicesConfigResponse>;
 };
 
 export function createCreatorServicesService(client: ClientLike) {
@@ -35,8 +38,19 @@ export function createCreatorServicesService(client: ClientLike) {
     getConfig(): Promise<CreatorServicesConfigResponse> {
       return client.get('/creator-services/config');
     },
-    saveConfig(config: CreatorServicesConfig): Promise<CreatorServicesConfigResponse> {
-      return client.patch('/creator-services/config', config);
+    getLocalVideoConfig(): Promise<CreatorServicesConfigResponse> {
+      return client.get('/creator-services/video/local');
+    },
+    saveLocalVideoConfig(video: CreatorServicesConfig['video'], clearCredentials: CreatorServicesCredentialField[] = []): Promise<CreatorServicesConfigResponse> {
+      return client.patch('/creator-services/video/local', { video, clearCredentials });
+    },
+    saveConfig(
+      config: CreatorServicesConfig,
+      clearCredentials: CreatorServicesCredentialField[] = []
+    ): Promise<CreatorServicesConfigResponse> {
+      return client.patch('/creator-services/config', clearCredentials.length === 0
+        ? config
+        : { config, clearCredentials });
     },
     testTranscriptionConnection(config: CreatorServicesConfig['transcription']['funasr']): Promise<{ connected: boolean; model: string; models: string[]; capabilities: string[] }> { return client.rawRequest('/creator-services/transcription/test', { method: 'POST', body: config }).then(response => response.json()); },
     resetConfig(): Promise<CreatorServicesConfigResponse> {

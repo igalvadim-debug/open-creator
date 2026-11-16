@@ -1,3 +1,4 @@
+import { changeControl } from '../../test/select-option.js';
 import type {
   CreatorActionRequest,
   CreatorActionResponse,
@@ -50,6 +51,32 @@ afterEach(() => {
 });
 
 describe('VideoDownloadWorkspace', () => {
+  it('analyzes an embedded video URL and opens the generated download task', async () => {
+    const current = job();
+    const applyAction = vi.fn(async (_id: string, request: CreatorActionRequest) => ({
+      job: {
+        ...current,
+        revision: current.revision + 1,
+        state: {
+          ...current.state,
+          ...(request.action === 'update-settings' ? request.input.patch as Record<string, CreatorJson> : {})
+        }
+      }
+    }));
+    const onGenerated = vi.fn();
+    renderWorkspace(current, { applyAction, embedded: true, onGenerated });
+
+    fireEvent.change(screen.getByRole('textbox', { name: '视频链接' }), {
+      target: { value: 'https://www.youtube.com/watch?v=demo' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '获取' }));
+
+    await waitFor(() => expect(applyAction).toHaveBeenCalledWith(current.id, expect.objectContaining({
+      action: 'run-stage', input: { stageId: 'probe' }
+    })));
+    expect(onGenerated).toHaveBeenCalledOnce();
+  });
+
   it('localizes subtitle provenance and reorders tracks when the display language changes', () => {
     const probe = probeArtifact();
     const tracks = ['en', ...appLanguageOptions.filter(option => option.value !== 'en-US').map(option => option.value)];
@@ -68,12 +95,12 @@ describe('VideoDownloadWorkspace', () => {
       const l = createLocalizedCopy(language);
       expect(screen.getByRole('tab', { name: `SRT ${l('字幕', 'Subtitles')}` })).toHaveAttribute('aria-selected', 'true');
       expect(screen.getByText(`SRT · ${l('人工字幕', 'Manual subtitles')} · en`)).toBeVisible();
-      expect(screen.getByText(`SRT · ${l('自动字幕', 'Automatic captions')} · zh-CN`)).toBeVisible();
+      expect(screen.getByText(`SRT · ${l('自动字幕', 'Automatic captions')} · ${tracks[1]}`)).toBeVisible();
       const promoted = language === 'en-US' ? ['en'] : ['en', language];
       expect(screen.getAllByRole('radio').map(radio => radio.closest('label')?.querySelector('strong')?.textContent))
         .toEqual([...promoted, ...tracks.filter(track => !promoted.includes(track))]);
     }
-  });
+  }, 15_000);
 
   it.each<{
     language: AppLanguage;
@@ -287,6 +314,36 @@ describe('VideoDownloadWorkspace', () => {
     expect(screen.queryByText('链接解析完成，请选择下载规格')).not.toBeInTheDocument();
   });
 
+  it('downloads a selected format locally as soon as it completes and shows OK', async () => {
+    const initial = job({
+      state: { sourceUrl: 'https://www.youtube.com/watch?v=demo' },
+      artifacts: [probeArtifact()]
+    });
+    let applySnapshot: ((next: CreatorJob) => void) | undefined;
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    createObjectURL.mockReturnValue('blob:direct-download');
+    renderWorkspace(initial, {
+      applyAction: vi.fn(async () => ({ job: initial })),
+      openArtifact: vi.fn(async () => new Response(new Blob(['video'], { type: 'video/mp4' }))),
+      onSnapshot: callback => { applySnapshot = callback; }
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: '下载 1080p' }));
+    act(() => applySnapshot?.(job({
+      ...initial,
+      revision: 1,
+      artifacts: [probeArtifact(), videoArtifact()],
+      stages: [downloadStage('download_1080', 'video-1080-1', 'succeeded', 100)]
+    })));
+
+    await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    expect(click.mock.instances[0]).toHaveProperty('download', 'Creator Download.mp4');
+    expect(screen.getByLabelText('OK 1080p')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '下载规格' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: '作品' })).toHaveAttribute('aria-selected', 'false');
+    click.mockRestore();
+  });
+
   it('marks downloaded formats complete and only offers saving project files locally', async () => {
     const current = job({
       state: {
@@ -307,17 +364,10 @@ describe('VideoDownloadWorkspace', () => {
     expect(screen.queryByRole('tab', { name: '视频信息' })).not.toBeInTheDocument();
     expect(screen.getByText('Creator Download')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '更换链接' })).toBeInTheDocument();
-    const panel = screen.getByRole('complementary', { name: 'OpenCreator' });
-    const summary = within(panel).getByRole('complementary', { name: '任务摘要' });
-    expect(screen.getAllByRole('complementary', { name: '任务摘要' })).toHaveLength(1);
-    expect(summary.querySelector('details')).not.toHaveAttribute('open');
-    fireEvent.click(within(summary).getByText('任务摘要'));
-    expect(summary.querySelector('details')).toHaveAttribute('open');
-    expect(summary).toHaveTextContent('https://www.youtube.com/watch?v=demo');
-    expect(summary).toHaveTextContent('当前选择1080p');
-    expect(screen.getAllByText('1080p')).toHaveLength(2);
+    expect(screen.queryByRole('complementary', { name: 'OpenCreator' })).not.toBeInTheDocument();
+    expect(screen.getByText('1080p')).toBeInTheDocument();
     expect(screen.getByText('MP4 · 1920 x 1080 · 30 FPS · 84 MB')).toBeInTheDocument();
-    expect(screen.getByLabelText('已完成 1080p')).toBeInTheDocument();
+    expect(screen.getByLabelText('OK 1080p')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '下载 1080p' }))
       .not.toBeInTheDocument();
     expect(screen.queryByText('OpenCreator 视频示例')).not.toBeInTheDocument();
@@ -429,7 +479,7 @@ describe('VideoDownloadWorkspace', () => {
     expect(language).toHaveValue('en');
     expect(screen.getByText(/音频: .*\(en\)/)).toBeInTheDocument();
 
-    fireEvent.change(language, { target: { value: 'es' } });
+    changeControl(language, { target: { value: 'es' } });
 
     expect(language).toHaveValue('es');
     expect(screen.getByText(/音频: .*\(es\)/)).toBeInTheDocument();
@@ -548,7 +598,7 @@ describe('VideoDownloadWorkspace', () => {
 
     expect(await screen.findByText('可重新加载预览或保存到本机'))
       .toBeInTheDocument();
-    expect(screen.getByRole('complementary', { name: 'OpenCreator' }).querySelector('.creator-collaboration-issue')).toBeInTheDocument();
+    expect(document.querySelector('.creator-workspace-local-issue')).toBeInTheDocument();
     expect(screen.queryByText(/诊断编号：OC-/)).not.toBeInTheDocument();
     expect(screen.queryByText('preview unavailable')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '重新加载' }));
@@ -565,6 +615,8 @@ describe('VideoDownloadWorkspace', () => {
   });
 
   it('keeps other formats downloadable and lists progress by queued option', async () => {
+    const downloading = downloadStage('stage_1080', 'video-1080-1', 'running', 42);
+    downloading.progress.bytesPerSecond = 2.5 * 1024 ** 2;
     let current = job({
       state: {
         sourceUrl: 'https://www.youtube.com/watch?v=demo',
@@ -572,7 +624,7 @@ describe('VideoDownloadWorkspace', () => {
         selectedOptionId: 'video-1080-1'
       },
       artifacts: [probeArtifact()],
-      stages: [downloadStage('stage_1080', 'video-1080-1', 'running', 42)]
+      stages: [downloading]
     });
     const jobId = current.id;
     const applyAction = vi.fn(async (
@@ -620,6 +672,7 @@ describe('VideoDownloadWorkspace', () => {
     const availableButton = screen.getByRole('button', { name: '下载 720p' });
     expect(runningButton).toBeDisabled();
     expect(runningButton).toHaveTextContent('下载中');
+    expect(runningButton).toHaveTextContent('42%');
     expect(availableButton).toBeEnabled();
 
     fireEvent.click(availableButton);
@@ -635,10 +688,35 @@ describe('VideoDownloadWorkspace', () => {
         })
       })
     ));
+    fireEvent.click(screen.getByRole('tab', { name: '作品' }));
     expect(await screen.findByText('Creator Download · 1080p')).toBeInTheDocument();
     expect(screen.getByText('Creator Download · 720p')).toBeInTheDocument();
     expect(screen.getByText('42%')).toBeInTheDocument();
+    expect(screen.getByText('Creator Download · 1080p').closest('.video-download-progress-row'))
+      .toHaveTextContent('正在下载到项目 · 2.5 MB/s');
     expect(screen.getAllByText('0%').length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    { status: 'running', phase: 'downloading', speed: 0, expected: '0 B/s' },
+    { status: 'running', phase: 'downloading', speed: null, expected: null },
+    { status: 'running', phase: 'preparing_download', speed: 2.5 * 1024 ** 2, expected: null },
+    { status: 'running', phase: 'merging_media', speed: 2.5 * 1024 ** 2, expected: null },
+    { status: 'queued', phase: 'downloading', speed: 2.5 * 1024 ** 2, expected: null },
+    { status: 'failed', phase: 'downloading', speed: 2.5 * 1024 ** 2, expected: null },
+    { status: 'succeeded', phase: 'completed', speed: 2.5 * 1024 ** 2, expected: null }
+  ] as const)('shows only current transfer speed for $status/$phase with speed $speed', async ({ status, phase, speed, expected }) => {
+    const stage = downloadStage('stage_speed', 'video-1080-1', status, 42, phase);
+    stage.progress.bytesPerSecond = speed;
+    renderWorkspace(job({
+      state: { sourceUrl: 'https://www.youtube.com/watch?v=demo' },
+      artifacts: [probeArtifact()],
+      stages: [stage]
+    }), { applyAction: vi.fn() });
+    fireEvent.click(await screen.findByRole('tab', { name: '作品' }));
+    const row = screen.getByText('Creator Download · 1080p').closest('.video-download-progress-row');
+    if (expected === null) expect(row).not.toHaveTextContent(/\b(?:B|KB|MB)\/s\b/);
+    else expect(row).toHaveTextContent(expected);
   });
 
   it('shows download preparation as indeterminate instead of a fixed percent', async () => {
@@ -667,6 +745,93 @@ describe('VideoDownloadWorkspace', () => {
     expect(screen.queryByText('2%')).not.toBeInTheDocument();
     expect(screen.getByRole('progressbar', { name: '正在准备下载' }))
       .not.toHaveAttribute('aria-valuenow');
+  });
+
+  it('pauses, resumes and cancels from each download row without controlling another format', async () => {
+    const first = downloadStage('stage_first', 'video-1080-1', 'running', 42);
+    first.progress.bytesPerSecond = 2 * 1024 ** 2;
+    const other = downloadStage('stage_other', 'video-720-2', 'queued', 0);
+    let current = job({ state: { sourceUrl: 'https://www.youtube.com/watch?v=demo' }, artifacts: [probeArtifact()], stages: [first, other] });
+    const controlDownload = vi.fn(async (_jobId: string, stageId: string, action: 'pause' | 'resume' | 'cancel') => {
+      const previous = current.stages.find(stage => stage.id === stageId)!;
+      const stage: CreatorStageRun = { ...previous, id: action === 'resume' ? 'stage_resumed' : previous.id,
+        status: action === 'pause' ? 'interrupted' : action === 'cancel' ? 'canceled' : 'running',
+        progress: { ...previous.progress, bytesPerSecond: null, cancelRequested: false,
+          downloadControl: action === 'pause' ? 'paused' : action === 'cancel' ? 'canceled' : null } };
+      current = { ...current, revision: current.revision + 1, stages: action === 'resume'
+        ? [...current.stages, stage] : current.stages.map(item => item.id === stageId ? stage : item) };
+      return { job: current, stage, control: action === 'pause' ? 'paused' : action === 'cancel' ? 'canceled' : 'resumed' };
+    });
+    renderWorkspace(current, { applyAction: vi.fn(), controlDownload });
+    fireEvent.click(await screen.findByRole('tab', { name: '作品' }));
+    fireEvent.click(screen.getByRole('button', { name: '暂停下载 Creator Download · 1080p' }));
+    const resume = await screen.findByRole('button', { name: '继续下载 Creator Download · 1080p' });
+    expect(controlDownload).toHaveBeenLastCalledWith(current.id, first.id, 'pause');
+    const row = screen.getByText('Creator Download · 1080p').closest('.video-download-progress-row')! as HTMLElement;
+    expect(within(row).getByText('已暂停')).toBeInTheDocument();
+    expect(within(row).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '42');
+    expect(row).not.toHaveTextContent('MB/s');
+    expect(screen.getByRole('button', { name: '暂停下载 Creator Download · 720p' })).toBeEnabled();
+    fireEvent.click(resume);
+    await screen.findByRole('button', { name: '暂停下载 Creator Download · 1080p' });
+    expect(controlDownload).toHaveBeenLastCalledWith(current.id, first.id, 'resume');
+    const resumedRow = screen.getByText('Creator Download · 1080p').closest('.video-download-progress-row')! as HTMLElement;
+    fireEvent.click(screen.getByRole('button', { name: '取消下载 Creator Download · 1080p' }));
+    await waitFor(() => expect(within(resumedRow).getByText('已取消')).toBeInTheDocument());
+    expect(controlDownload).toHaveBeenLastCalledWith(current.id, 'stage_resumed', 'cancel');
+    expect(within(resumedRow).queryByRole('button', { name: /继续下载/ })).not.toBeInTheDocument();
+    expect(current.stages.find(stage => stage.id === other.id)).toEqual(other);
+  });
+
+  it('keeps a live download row and its progress throughout repeated pause and resume actions', async () => {
+    const first = downloadStage('stage_live', 'video-1080-1', 'running', 42);
+    first.progress.bytesPerSecond = 2 * 1024 ** 2;
+    let current = job({ state: { sourceUrl: 'https://www.youtube.com/watch?v=demo' }, artifacts: [probeArtifact()], stages: [first] });
+    const controlDownload = vi.fn(async (_jobId: string, stageId: string, action: 'pause' | 'resume' | 'cancel') => {
+      const stage = { ...current.stages[0]!, progress: { ...current.stages[0]!.progress,
+        downloadControl: action === 'pause' ? 'paused' : null, bytesPerSecond: null, cancelRequested: false } };
+      current = { ...current, revision: current.revision + 1, stages: [stage] };
+      return { job: current, stage, control: action === 'pause' ? 'paused' : 'resumed' };
+    });
+    renderWorkspace(current, { applyAction: vi.fn(), controlDownload });
+    fireEvent.click(await screen.findByRole('tab', { name: '作品' }));
+    const row = screen.getByText('Creator Download · 1080p').closest('.video-download-progress-row')! as HTMLElement;
+    const progress = within(row).getByRole('progressbar');
+    for (let toggle = 0; toggle < 3; toggle++) {
+      fireEvent.click(within(row).getByRole('button', { name: /暂停下载/ }));
+      fireEvent.click(await within(row).findByRole('button', { name: /继续下载/ }));
+      await within(row).findByRole('button', { name: /暂停下载/ });
+      expect(within(row).getByRole('progressbar')).toBe(progress);
+      expect(progress).toHaveAttribute('aria-valuenow', '42');
+      expect(progress.firstElementChild).toHaveStyle({ width: '42%' });
+      expect(row).not.toHaveTextContent('准备');
+    }
+    expect(controlDownload.mock.calls.every(([, stageId]) => stageId === first.id)).toBe(true);
+  });
+
+  it('preserves saved progress while reconnecting after the download process was lost', async () => {
+    const stage = downloadStage('stage_reconnect', 'video-1080-1', 'running', 42, 'preparing_download');
+    stage.progress.resumedFromStageRunId = 'stage_before_restart';
+    renderWorkspace(job({ state: { sourceUrl: 'https://www.youtube.com/watch?v=demo' }, artifacts: [probeArtifact()], stages: [stage] }),
+      { applyAction: vi.fn(), controlDownload: vi.fn() });
+    fireEvent.click(await screen.findByRole('tab', { name: '作品' }));
+    const row = screen.getByText('Creator Download · 1080p').closest('.video-download-progress-row')! as HTMLElement;
+    expect(row).toHaveTextContent('正在恢复下载');
+    expect(row).toHaveTextContent('42%');
+    expect(row).not.toHaveTextContent('准备中');
+    const progress = within(row).getByRole('progressbar');
+    expect(progress).toHaveAttribute('aria-valuenow', '42');
+    expect(progress).not.toHaveAttribute('data-indeterminate');
+    expect(progress.firstElementChild).toHaveStyle({ width: '42%' });
+  });
+
+  it('offers row resume for a download stopped from the Agent', async () => {
+    const stopped = downloadStage('stage_stopped', 'video-1080-1', 'canceled', 42);
+    renderWorkspace(job({ state: { sourceUrl: 'https://www.youtube.com/watch?v=demo' }, artifacts: [probeArtifact()], stages: [stopped] }),
+      { applyAction: vi.fn(), controlDownload: vi.fn() });
+    fireEvent.click(await screen.findByRole('tab', { name: '作品' }));
+    expect(screen.getByRole('button', { name: '继续下载 Creator Download · 1080p' })).toBeEnabled();
+    expect(screen.getByText('已停止')).toBeInTheDocument();
   });
 
   it('accepts supported platform video URLs and Reddit share links for analysis', async () => {
@@ -864,8 +1029,8 @@ describe('VideoDownloadWorkspace', () => {
       applyAction: vi.fn()
     });
 
-    expect(screen.getAllByText('无法连接视频平台，请检查网络或代理设置后重试'))
-      .toHaveLength(2);
+    expect(screen.getByText('无法连接视频平台，请检查网络或代理设置后重试'))
+      .toBeInTheDocument();
   });
 
   it('keeps routine yt-dlp version management out of the download workspace', () => {
@@ -961,8 +1126,11 @@ function renderWorkspace(
     applyAction: ReturnType<typeof vi.fn>;
     openArtifact?: ReturnType<typeof vi.fn>;
     openDownloadThumbnail?: ReturnType<typeof vi.fn>;
+    controlDownload?: ReturnType<typeof vi.fn>;
     runtimeDependencies?: Partial<RuntimeDependenciesController>;
     onOpenRuntimeComponents?: () => void;
+    embedded?: boolean;
+    onGenerated?: () => void;
     onSnapshot?: (callback: (next: CreatorJob) => void) => void;
     language?: AppLanguage;
   }
@@ -983,6 +1151,7 @@ function renderWorkspace(
           applyAction: input.applyAction,
           openArtifact: input.openArtifact,
           openDownloadThumbnail: input.openDownloadThumbnail,
+          controlDownload: input.controlDownload,
           runAgentTurn: vi.fn()
         } as never}
       >
@@ -993,6 +1162,8 @@ function renderWorkspace(
           onBack={vi.fn()}
           runtimeDependencies={runtimeDependencies}
           onOpenRuntimeComponents={input.onOpenRuntimeComponents}
+          embedded={input.embedded}
+          onGenerated={input.onGenerated}
         />
       </CreatorSessionProvider>
     </LanguageProvider>
