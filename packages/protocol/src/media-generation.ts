@@ -4,7 +4,6 @@ export const imageGenerationSizes = ['1024x1024', '1536x1024', '1024x1536'] as c
 export type ImageGenerationSize = typeof imageGenerationSizes[number];
 export type ImageGenerationQuality = 'low' | 'medium' | 'high';
 export type ImageGenerationProvider = 'openai' | 'jimeng' | 'kling' | 'gemini' | 'codex-native';
-
 export const coverStyleIds = [
   'personal-growth',
   'psychology',
@@ -33,6 +32,7 @@ export type CreateImageGenerationRequest = {
   aspectRatio?: string;
   resolution?: string;
   officialQuality?: string;
+  modelQuality?: string;
 };
 
 /** Detect explicit references to an existing image, rather than ordinary photo styles. */
@@ -58,6 +58,9 @@ export type ImageGenerationResult = {
   model: string;
   imageSize: ImageGenerationSize;
   quality: ImageGenerationQuality;
+  aspectRatio?: string;
+  resolution?: string;
+  modelQuality?: string;
   count: number;
   images: ImageGenerationAsset[];
   createdAt: string;
@@ -108,7 +111,6 @@ export type CreateVideoGenerationRequest = {
   referenceImage?: VideoGenerationReferenceImage;
   references?: VideoGenerationReference[];
   generateAudio?: boolean;
-  priceVersion?: string;
 };
 
 export type VideoGenerationReference = {

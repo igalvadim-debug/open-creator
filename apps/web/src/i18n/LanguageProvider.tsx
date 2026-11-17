@@ -19,10 +19,10 @@ import { hasLanguageCatalog, loadLanguageCatalog, translateEnglishCopy } from '.
 
 const messages = {
   'zh-CN': {
-    'nav.home': '模版',
+    'nav.home': '探索',
     'nav.dashboard': '工作台',
     'nav.plugins': '插件中心',
-    'nav.projects': '我的项目',
+    'nav.projects': '生成历史',
     'nav.settings': '设置',
     'nav.schedules': '定时任务',
     'nav.search': '搜索',
@@ -66,9 +66,9 @@ const messages = {
     'settings.closeWindow': '关闭窗口时',
     'settings.hideToMenuBar': '隐藏到菜单栏',
     'settings.quit': '退出 OpenCreator',
-    'settings.telemetry': '发送匿名使用数据',
-    'settings.telemetryDescription': '发送启动次数、活跃时长、版本和系统信息；服务端会记录请求来源 IP，不包含项目、文件或对话内容。',
-    'settings.accent.neutral': '默认灰',
+    'settings.telemetry': '发送数据帮助我们改进',
+    'settings.telemetryDescription': '发送基本使用情况、错误信息及账号 ID，用于定位和修复问题。可随时关闭。',
+    'settings.accent.neutral': '中性灰',
     'settings.accent.blue': '蓝色',
     'settings.accent.cyan': '青色',
     'settings.accent.purple': '紫色',
@@ -266,10 +266,10 @@ const messages = {
     'timeline.process.thinking': '正在思考'
   },
   'en-US': {
-    'nav.home': 'Templates',
+    'nav.home': 'Explore',
     'nav.dashboard': 'Dashboard',
     'nav.plugins': 'Plugins',
-    'nav.projects': 'My Projects',
+    'nav.projects': 'Generation History',
     'nav.settings': 'Settings',
     'nav.schedules': 'Scheduled Tasks',
     'nav.search': 'Search',
@@ -313,8 +313,8 @@ const messages = {
     'settings.closeWindow': 'When closing the window',
     'settings.hideToMenuBar': 'Hide in menu bar',
     'settings.quit': 'Quit OpenCreator',
-    'settings.telemetry': 'Send anonymous usage data',
-    'settings.telemetryDescription': 'Send launch count, active time, version, and system information. The server records the request IP; projects, files, and conversations are not included.',
+    'settings.telemetry': 'Send data to help us improve',
+    'settings.telemetryDescription': 'Send basic usage data, error information, and your account ID to help us diagnose and fix issues. You can turn this off at any time.',
     'settings.accent.neutral': 'Neutral',
     'settings.accent.blue': 'Blue',
     'settings.accent.cyan': 'Cyan',
@@ -513,11 +513,11 @@ const messages = {
     'timeline.process.thinking': 'Thinking'
   },
   'sv-SE': {
-    'nav.home': 'Mallar', 'nav.dashboard': 'Arbetsyta', 'nav.plugins': 'Insticksprogram', 'nav.projects': 'Mina projekt', 'nav.settings': 'Inställningar', 'nav.schedules': 'Schemalagda jobb', 'nav.search': 'Sök', 'nav.collapse': 'Fäll ihop sidofältet', 'nav.expand': 'Fäll ut sidofältet', 'nav.autoCollapsed': 'Sidofältet fälldes ihop automatiskt', 'nav.autoCollapsedHint': 'Stäng filarbetsytan för att fälla ut sidofältet i det här fönstret',
+    'nav.home': 'Utforska', 'nav.dashboard': 'Arbetsyta', 'nav.plugins': 'Insticksprogram', 'nav.projects': 'Mina projekt', 'nav.settings': 'Inställningar', 'nav.schedules': 'Schemalagda jobb', 'nav.search': 'Sök', 'nav.collapse': 'Fäll ihop sidofältet', 'nav.expand': 'Fäll ut sidofältet', 'nav.autoCollapsed': 'Sidofältet fälldes ihop automatiskt', 'nav.autoCollapsedHint': 'Stäng filarbetsytan för att fälla ut sidofältet i det här fönstret',
     'settings.navigation': 'Inställningsnavigering', 'settings.back': 'Tillbaka till appen', 'settings.categories': 'Inställningskategorier', 'settings.tab.general': 'Allmänt', 'settings.tab.aiServices': 'AI-tjänster', 'settings.tab.runtimeComponents': 'Tredjepartskomponenter', 'settings.tab.codexAgent': 'Codex Agent', 'settings.tab.plugins': 'Insticksprogram', 'settings.tab.memory': 'Minne', 'settings.tab.profiles': 'Profiler', 'settings.tab.cleanup': 'Rensa', 'settings.tab.diagnostics': 'Diagnostik', 'settings.tab.about': 'Om OpenCreator',
     'settings.required': 'Krävs', 'settings.general.description': 'Justera OpenCreators standardinställningar och skrivbordsvisning.', 'settings.colorMode': 'Färgläge', 'settings.light': 'Ljust', 'settings.dark': 'Mörkt', 'settings.accent': 'Accentfärg', 'settings.permission': 'Standardbehörighet', 'settings.permission.followProject': 'Följ projektinställningen', 'settings.permission.approval': 'Begär godkännande', 'settings.permission.fullAccess': 'Fullständig åtkomst', 'settings.permission.confirm': 'Fullständig åtkomst låter OpenCreator läsa lokala filer och köra lokala åtgärder. Vill du ange den som standardbehörighet?',
     'settings.defaultFileApp': 'Standardapp för filer', 'settings.systemDefaultApp': 'Systemets standardapp', 'settings.language': 'Visningsspråk', 'settings.language.system': 'Systemspråk ({{language}})', 'settings.language.zh': 'Förenklad kinesiska', 'settings.language.en': 'Engelska', 'settings.language.sv': 'Svenska', 'settings.menuBar': 'Visa i menyraden', 'settings.browserMode': 'Webbläsarläge', 'settings.closeWindow': 'När fönstret stängs', 'settings.hideToMenuBar': 'Dölj i menyraden', 'settings.quit': 'Avsluta OpenCreator',
-    'settings.telemetry': 'Skicka anonym användningsdata', 'settings.telemetryDescription': 'Skickar antal starter, aktiv tid, version och systeminformation. Servern registrerar begärans IP-adress men inte projekt, filer eller konversationer.', 'settings.about.description': 'Visa version, datakatalog och lokal driftinformation.', 'settings.about.version': 'OpenCreator-version', 'settings.about.runtimeVersion': 'Körmiljöversion', 'settings.about.dataDirectory': 'Datakatalog', 'settings.about.checkUpdates': 'Sök efter uppdateringar', 'settings.status.normal': 'Normal', 'settings.status.disconnected': 'Frånkopplad', 'settings.unknown': 'Okänd', 'settings.notSet': 'Inte angivet',
+    'settings.telemetry': 'Skicka data för att förbättra OpenCreator', 'settings.telemetryDescription': 'Skicka grundläggande användningsdata, felinformation och ditt konto-ID så att vi kan hitta och åtgärda problem. Du kan stänga av detta när som helst.', 'settings.about.description': 'Visa version, datakatalog och lokal driftinformation.', 'settings.about.version': 'OpenCreator-version', 'settings.about.runtimeVersion': 'Körmiljöversion', 'settings.about.dataDirectory': 'Datakatalog', 'settings.about.checkUpdates': 'Sök efter uppdateringar', 'settings.status.normal': 'Normal', 'settings.status.disconnected': 'Frånkopplad', 'settings.unknown': 'Okänd', 'settings.notSet': 'Inte angivet',
     'home.greeting.morning': 'God morgon, kreatör', 'home.greeting.afternoon': 'God eftermiddag, kreatör', 'home.greeting.evening': 'God kväll, kreatör', 'home.question': 'Vad kan jag hjälpa dig att skapa?', 'home.skillCategories': 'Kategorier för kreativa mallar', 'home.skills': 'Kreativa mallar', 'home.noRecentSkills': 'Inga mallar har använts ännu', 'home.useSkill': 'Använd mallen {{title}}',
     'dashboard.title': 'Arbetsyta', 'dashboard.featured': 'Utvalda appar', 'dashboard.openTool': 'Öppna {{title}}', 'dashboard.start': 'Börja skapa', 'dashboard.apps': 'Kreativa appar', 'dashboard.categories': 'Appkategorier', 'dashboard.search': 'Sök appar', 'dashboard.empty': 'Inga matchande appar hittades', 'dashboard.showAll': 'Visa alla appar',
     'composer.permission.approval': 'Begär godkännande', 'composer.permission.approvalDescription': 'Fråga när filer ska hanteras eller kommandon med hög risk köras', 'composer.permission.fullAccess': 'Fullständig åtkomst', 'composer.permission.fullAccessDescription': 'Tillåt åtkomst till lokala filer och lokala åtgärder', 'composer.imageUnsupported': '{{model}} stöder inte bildinmatning', 'composer.uploadFailed': 'Uppladdningen misslyckades', 'composer.input.label': 'Ange uppgift', 'composer.input.unavailable': 'Den aktuella konversationen är inte tillgänglig', 'composer.input.placeholder': 'Skriv / för att använda ett insticksprogram', 'composer.add.context': 'Lägg till sammanhang', 'composer.add.file': 'Lägg till fil', 'composer.add.skills': 'Färdigheter',
@@ -542,11 +542,13 @@ type LanguageContextValue = {
   t: Translate;
 };
 
+const fallbackPreference = readLanguagePreference();
+const fallbackLanguage = resolveAppLanguage(fallbackPreference);
 const defaultContext: LanguageContextValue = {
-  preference: 'system',
-  language: 'zh-CN',
+  preference: fallbackPreference,
+  language: fallbackLanguage,
   setPreference: () => undefined,
-  t: createTranslator('zh-CN')
+  t: createTranslator(fallbackLanguage)
 };
 
 const LanguageContext = createContext<LanguageContextValue>(defaultContext);

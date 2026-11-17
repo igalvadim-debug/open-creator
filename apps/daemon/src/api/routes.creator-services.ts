@@ -3,13 +3,15 @@ import type {
   CodexProviderConfig,
   CreatorServicesCapabilitiesResponse,
   CreatorServicesConfig,
+  CreatorServicesCredentialField,
   CreatorTtsPreviewRequest,
   CreatorTtsProvider
 } from '@opencreator/protocol';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { ZodError } from 'zod';
+import { ZodError } from 'zod/v3';
 import {
   CreatorServicesConfigStoreError,
+  creatorCredentialPaths,
   parseCreatorServicesConfig,
   presentCreatorServicesConfig,
   retainCreatorServicesCredentials,
@@ -32,7 +34,8 @@ export async function registerCreatorServicesRoutes(
   onConfigurationChanged?: () => Promise<void> | void,
   readCodexImageStatus?: () => Promise<CodexImageStatus>,
   readCodexModelStatus?: () => Promise<CodexProviderConfig>,
-  networkStore: CreatorServicesConfigStore = store
+  networkStore: CreatorServicesConfigStore = store,
+  localStore: CreatorServicesConfigStore = networkStore
 ): Promise<void> {
   server.get('/creator-services/network', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store');
@@ -93,9 +96,50 @@ export async function registerCreatorServicesRoutes(
     }
   });
 
+  server.get('/creator-services/video/local', async (_request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try { return presentCreatorServicesConfig(await localStore.read()); }
+    catch (error) { return sendStoreError(reply, error); }
+  });
+
+  server.patch<{ Body: unknown }>('/creator-services/video/local', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const body = request.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)
+      || !Object.hasOwn(body, 'video') || Object.keys(body).some(key => !['video', 'clearCredentials'].includes(key))) {
+      return reply.code(400).send(apiError('VALIDATION_FAILED', 'Invalid local video settings'));
+    }
+    const update = body as { video: unknown; clearCredentials?: unknown };
+    const clear = update.clearCredentials ?? [];
+    if (!Array.isArray(clear) || clear.some(field => typeof field !== 'string'
+      || !field.startsWith('video.') || !(creatorCredentialPaths as readonly string[]).includes(field))) {
+      return reply.code(400).send(apiError('VALIDATION_FAILED', 'Invalid video credential fields'));
+    }
+    try {
+      const current = await localStore.read();
+      const next = parseCreatorServicesConfig({ ...current, video: update.video });
+      const saved = await localStore.write(retainCreatorServicesCredentials(next, current, clear as CreatorServicesCredentialField[]));
+      return presentCreatorServicesConfig(saved);
+    } catch (error) {
+      if (error instanceof ZodError) return reply.code(400).send(apiError('VALIDATION_FAILED', 'Invalid local video settings'));
+      return sendStoreError(reply, error);
+    }
+  });
+
   server.patch<{ Body: unknown }>('/creator-services/config', async (request, reply) => {
     try {
-      const config = parseCreatorServicesConfig(request.body);
+      // Only this validation failure is a client error; other TypeErrors still
+      // reach the generic store handler below.
+      let update: ReturnType<typeof readCreatorServicesConfigUpdate>;
+      try {
+        update = readCreatorServicesConfigUpdate(request.body);
+      } catch (error) {
+        if (error instanceof TypeError) {
+          return reply.code(400).send(apiError('VALIDATION_FAILED', error.message));
+        }
+        throw error;
+      }
+      const config = parseCreatorServicesConfig(update.config);
       const unsupportedProvider = unsupportedTranscriptionProvider(
         config,
         readCapabilities()
@@ -108,7 +152,11 @@ export async function registerCreatorServicesRoutes(
       }
       const current = await store.read();
       if (networkStore !== store) config.proxy = (await networkStore.read()).proxy;
-      const saved = await store.write(retainCreatorServicesCredentials(config, current));
+      const saved = await store.write(retainCreatorServicesCredentials(
+        config,
+        current,
+        update.clearCredentials
+      ));
       try {
         await onConfigurationChanged?.();
       } catch (error) {
@@ -206,8 +254,10 @@ export async function registerCreatorServicesRoutes(
             provider,
             voiceId: request.body.voiceId,
             ...(typeof request.body.model === 'string' ? { model: request.body.model } : {}),
+            ...(typeof request.body.language === 'string' ? { language: request.body.language } : {}),
             ...(typeof request.body.text === 'string' ? { text: request.body.text } : {})
           });
+          if (result.language) reply.header('Content-Language', result.language);
           return reply
             .header('Content-Type', result.mime)
             .header('Content-Length', String(result.content.length))
@@ -228,6 +278,28 @@ function clearOfficialAddresses(value: unknown): void {
     if (key === 'baseUrl' || key === 'apiKey' || key === 'proxy') (value as Record<string, unknown>)[key] = '';
     else clearOfficialAddresses(child);
   }
+}
+
+function readCreatorServicesConfigUpdate(value: unknown): {
+  config: unknown;
+  clearCredentials: CreatorServicesCredentialField[];
+} {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { config: value, clearCredentials: [] };
+  }
+  const record = value as Record<string, unknown>;
+  if (!Object.hasOwn(record, 'config')) return { config: value, clearCredentials: [] };
+  const clearCredentials = record.clearCredentials ?? [];
+  if (!Array.isArray(clearCredentials) || clearCredentials.some(candidate => (
+    typeof candidate !== 'string'
+    || !(creatorCredentialPaths as readonly string[]).includes(candidate)
+  ))) {
+    throw new TypeError('clearCredentials must contain only supported credential fields');
+  }
+  return {
+    config: record.config,
+    clearCredentials: clearCredentials as CreatorServicesCredentialField[]
+  };
 }
 
 function sendStoreError(reply: FastifyReply, error: unknown) {

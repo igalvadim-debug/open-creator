@@ -8,16 +8,19 @@ import (
 	"go.uber.org/zap"
 	"krillin-ai/internal/types"
 	"krillin-ai/log"
+	"net"
 	"strings"
 )
 
 func (c *Client) Transcription(audioFile, language, workDir string) (*types.TranscriptionData, error) {
+	language = types.WhisperLanguageCode(language)
 	granularity := openai.TranscriptionTimestampGranularityWord
 	if c.official {
 		granularity = openai.TranscriptionTimestampGranularitySegment
 	}
+	requestID := &responseRequestID{}
 	resp, err := c.client.CreateTranscription(
-		context.Background(),
+		context.WithValue(context.Background(), responseRequestIDKey{}, requestID),
 		openai.AudioRequest{
 			Model:    c.model,
 			FilePath: audioFile,
@@ -34,12 +37,30 @@ func (c *Client) Transcription(audioFile, language, workDir string) (*types.Tran
 			return nil, err
 		}
 		log.GetLogger().Error("openai create transcription failed", zap.Error(err))
-		return nil, &TranscriptionError{Code: "audio_transcription_api_failed", Message: fmt.Sprintf("transcription service request failed: %v", err), Cause: err}
+		classified = &TranscriptionError{Code: "audio_transcription_api_failed", Message: fmt.Sprintf("transcription service request failed: %v", err), Cause: err, RequestID: requestID.value}
+		var apiError *openai.APIError
+		if errors.As(err, &apiError) {
+			classified.HTTPStatus = apiError.HTTPStatusCode
+			if code, ok := apiError.Code.(string); ok {
+				classified.UpstreamCode = safeDiagnosticCode(code)
+			}
+			if classified.UpstreamCode == "" {
+				classified.UpstreamCode = safeDiagnosticCode(apiError.Type)
+			}
+		} else {
+			var networkError net.Error
+			if errors.As(err, &networkError) && networkError.Timeout() {
+				classified.UpstreamCode = "network_timeout"
+			} else {
+				classified.UpstreamCode = "network_error"
+			}
+		}
+		return nil, classified
 	}
 
 	transcriptionData := &types.TranscriptionData{
-		Language: resp.Language,
-		Text:     strings.ReplaceAll(resp.Text, "-", " "), // 连字符处理，因为模型存在很多错误添加到连字符
+		Language: types.RecognitionLanguageCode(resp.Language),
+		Text:     resp.Text,
 		Words:    make([]types.Word, 0),
 	}
 	num := 0
@@ -47,34 +68,8 @@ func (c *Client) Transcription(audioFile, language, workDir string) (*types.Tran
 		if strings.TrimSpace(word.Word) == "" || word.Start < 0 || word.End <= word.Start {
 			continue
 		}
-		if strings.Contains(word.Word, "—") {
-			// 对称切分
-			mid := (word.Start + word.End) / 2
-			seperatedWords := strings.Split(word.Word, "—")
-			transcriptionData.Words = append(transcriptionData.Words, []types.Word{
-				{
-					Num:   num,
-					Text:  seperatedWords[0],
-					Start: word.Start,
-					End:   mid,
-				},
-				{
-					Num:   num + 1,
-					Text:  seperatedWords[1],
-					Start: mid,
-					End:   word.End,
-				},
-			}...)
-			num += 2
-		} else {
-			transcriptionData.Words = append(transcriptionData.Words, types.Word{
-				Num:   num,
-				Text:  word.Word,
-				Start: word.Start,
-				End:   word.End,
-			})
-			num++
-		}
+		transcriptionData.Words = append(transcriptionData.Words, types.Word{Num: num, Text: word.Word, Start: word.Start, End: word.End})
+		num++
 	}
 
 	if c.official && len(transcriptionData.Words) == 0 {

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCreatorStageRunner } from '../../src/creator/stage-runner.js';
 import { createCreatorRepository } from '../../src/creator/repository.js';
+import { appendCreatorResultSnapshot } from '../../src/creator/result-snapshots.js';
 import {
   CreatorServiceError,
   createCreatorService
@@ -42,6 +43,28 @@ function setup() {
 }
 
 describe('creator service', () => {
+  it('restores a deduplicated local clip source after switching to a URL', () => {
+    const { db, service } = setup();
+    const job = service.createJob({ projectId: 'project_1', templateId: 'auto-clip', state: {} });
+    const upload = {
+      path: join(tempDir, 'source.mp4'), fileName: 'source.mp4', mimeType: 'video/mp4',
+      size: 1024, sha256: 'same-video', lastModified: null,
+      media: { duration: 120, width: 1920, height: 1080, hasVideo: true, hasAudio: true }
+    };
+    const first = service.registerSourceVideo(job.id, { expectedRevision: job.revision, ...upload });
+    const urlJob = service.applyAction(job.id, {
+      action: 'update-settings', expectedRevision: first.job.revision,
+      input: { patch: { sourceType: 'url', sourceUrl: 'https://www.youtube.com/watch?v=example' } }
+    }).job;
+    const reused = service.registerSourceVideo(job.id, {
+      expectedRevision: urlJob.revision, ...upload, path: join(tempDir, 'duplicate.mp4')
+    });
+
+    expect(reused.deduplicated).toBe(true);
+    expect(reused.job.state).toMatchObject({ sourceType: 'file', sourceArtifactId: first.artifact.id, sourceUrl: '' });
+    expect(reused.job.artifacts.filter(artifact => artifact.kind === 'source_video')).toHaveLength(1);
+    db.close();
+  });
   it('registers and deduplicates manually uploaded article images', () => {
     const { db, service } = setup();
     const job = service.createJob({
@@ -548,6 +571,7 @@ describe('creator service', () => {
       expectedRevision: 0,
       input: {
         patch: {
+          __creatorUserEdited: true,
           currentStep: 1,
           furthestStep: 1,
           workspacePhase: 'configure'
@@ -559,6 +583,7 @@ describe('creator service', () => {
 
     expect(uiOnly.job.revision).toBe(1);
     expect(uiOnly.job.state.currentStep).toBe(1);
+    expect(uiOnly.job.state.__creatorUserEdited).toBe(true);
     expect(uiOnly.job.activities.map(activity => activity.action)).toEqual(['create-job']);
 
     const mixed = service.applyAction(job.id, {
@@ -580,6 +605,22 @@ describe('creator service', () => {
       action: 'update-settings:draft',
       details: { objectId: 'prompt' }
     });
+    db.close();
+  });
+
+  it('keeps the draft edit marker out of result snapshots', () => {
+    const { db, service } = setup();
+    const job = service.createJob({
+      projectId: 'project_1', templateId: 'cover',
+      state: { prompt: 'Portrait', __creatorUserEdited: true }
+    });
+    const state = appendCreatorResultSnapshot({
+      job, version: 1, changedArtifacts: [], action: 'run-stage', description: 'Generated cover'
+    });
+
+    expect(state.resultSnapshots).toMatchObject([{ state: { prompt: 'Portrait' } }]);
+    expect((state.resultSnapshots as Array<{ state: Record<string, unknown> }>)[0]?.state)
+      .not.toHaveProperty('__creatorUserEdited');
     db.close();
   });
 
@@ -734,6 +775,54 @@ describe('creator service', () => {
     expect(updated.job.state.dubbing).toBe(false);
     expect(updated.job.state).not.toHaveProperty('needsInput');
     db.close();
+  });
+
+  it.each([
+    ['target_subtitle', '采访.片段.srt'],
+    ['vertical_subtitle', '采访.片段.srt'],
+    ['target_subtitle', '采访.片段.opencreator-bilingual-v1.opencreator-bilingual-v2.srt']
+  ] as const)('keeps subtitle names bounded and previous files intact across repeated edits of %s from %s', (kind, fileName) => {
+    const { db, repository, service } = setup();
+    try {
+      const job = service.createJob({ projectId: 'project_1', templateId: 'video-translation', state: {} });
+      const path = join(tempDir, fileName);
+      writeFileSync(path, '1\n00:00:00,000 --> 00:00:01,000\nOriginal\n');
+      let subtitle = repository.insertArtifact({ jobId: job.id, kind, status: 'completed', path,
+        sourceArtifactIds: [], metadata: { fileName, resultVersion: 1 } });
+      repository.updateJob({ id: job.id, status: 'completed', revision: 0, state: {
+        ...job.state, resultVersion: 1, latestResultVersion: 1,
+        resultSnapshots: [{ version: 1, createdAt: subtitle.createdAt, action: 'stage-succeeded', stageId: 'subtitle',
+          description: 'Initial subtitles', artifactRefs: { [kind]: [subtitle.id] },
+          changedArtifactIds: [subtitle.id], staleArtifactIds: [], state: {} }]
+      } });
+      let current = service.getJob(job.id)!;
+      const savedFiles = new Map([[path, readFileSync(path, 'utf8')]]);
+      const label = kind === 'target_subtitle' ? 'horizontal' : 'vertical';
+      for (const [index, preserveResultVersion] of [false, true, false].entries()) {
+        const response = service.applyAction(job.id, { actor: 'user', action: 'edit-subtitle', expectedRevision: current.revision,
+          input: { artifactId: subtitle.id, baseResultVersion: current.state.resultVersion!, preserveResultVersion,
+            cues: [{ id: 1, start: '00:00:00,000', end: '00:00:01,000', text: `Translation ${index}`,
+              ...(kind === 'target_subtitle' ? { sourceText: `Source ${index}` } : {}) }] }
+        });
+        current = response.job;
+        subtitle = current.artifacts.filter(artifact => artifact.kind === kind).at(-1)!;
+        const resultVersion = index === 2 ? 3 : 2;
+        const editSuffix = index === 1 ? '-edit2' : '';
+        expect(subtitle.metadata.fileName).toBe(`采访.片段.opencreator-${label}-v${resultVersion}${editSuffix}.srt`);
+        for (const [savedPath, content] of savedFiles) expect(readFileSync(savedPath, 'utf8')).toBe(content);
+        const editedArtifacts = current.artifacts.filter(artifact => !savedFiles.has(artifact.path!));
+        for (const artifact of editedArtifacts) {
+          const content = readFileSync(artifact.path!, 'utf8');
+          expect(content).toContain(artifact.kind === 'source_subtitle' ? `Source ${index}` : `Translation ${index}`);
+          if (artifact.kind === 'target_subtitle') expect(content).not.toContain(`Source ${index}`);
+          if (artifact.kind === 'source_subtitle') expect(content).not.toContain(`Translation ${index}`);
+          if (artifact.kind === 'bilingual_subtitle') expect(content).toContain(`Source ${index}`);
+          savedFiles.set(artifact.path!, content);
+        }
+      }
+    } finally {
+      db.close();
+    }
   });
 
   it('stales subtitle-dependent outputs without invalidating source video or other versions', () => {
