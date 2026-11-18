@@ -41,7 +41,8 @@ import { createCreatorStageRunner } from '../creator/stage-runner.js';
 import { publishCreatorArtifacts } from '../creator/artifact-publisher.js';
 import { createCreatorStageScheduler } from '../creator/stage-scheduler.js';
 import { createCreatorCommandDispatcher } from '../creator/command-dispatcher.js';
-import type { CreatorExecutor } from '../creator/executor.js';
+import type { CreatorExecutor, CreatorExecutorInput } from '../creator/executor.js';
+import { creatorResultSnapshotForVersion } from '../creator/result-snapshots.js';
 import { createKrillinExecutor } from '../creator/krillin/adapter.js';
 import { createKrillinDependencyLoader } from '../creator/krillin/dependency-loader.js';
 import { readKrillinRuntimeManifest, resolveInside } from '../creator/krillin/manifest.js';
@@ -51,12 +52,13 @@ import {
 } from '../creator/krillin/runtime-verifier.js';
 import { createKrillinTtsService } from '../creator/krillin/tts-service.js';
 import { createSubtitlePreviewService } from '../creator/krillin/subtitle-preview.js';
+import { createSubtitleRenderService } from '../creator/krillin/subtitle-render.js';
 import {
   createKrillinCodexLlmGateway,
   KRILLIN_LLM_ROUTE_PREFIX
 } from '../creator/krillin/codex-llm-gateway.js';
 import { createDownloadExecutor } from '../creator/download/executor.js';
-import { resolveYtDlpRuntime } from '../creator/yt-dlp/runtime.js';
+import { createYtDlpRuntimeScope, resolveYtDlpRuntime } from '../creator/yt-dlp/runtime.js';
 import {
   createYtDlpUpdateManager,
   type YtDlpUpdateManager
@@ -90,7 +92,7 @@ import { createStickmanRemotionExecutor } from '../creator/stickman/remotion-exe
 import { createRemotionComponentManager } from '../creator/stickman/remotion-component.js';
 import { createStickmanMediaValidationExecutor } from '../creator/stickman/media-validation-executor.js';
 import { createStickmanDeliveryExecutor } from '../creator/stickman/delivery-executor.js';
-import { CreatorProviderRequestLedger } from '../creator/provider-requests.js';
+import { CreatorProviderRequestLedger, hasPendingPaidCreatorRequests } from '../creator/provider-requests.js';
 import { createCreatorProjectCoverService } from '../creator/project-cover.js';
 import { createVideoGenerationService } from '../video-generation/service.js';
 import { createImageGenerationService } from '../image-generation/service.js';
@@ -160,7 +162,8 @@ import {
   isCodexCredentialStoreConfigurationDiagnostic
 } from '../codex/credential-storage.js';
 import { resolveCodexHome } from '../codex/home.js';
-import { createFollowingLocalCodexHome, importLocalCodexConfiguration } from '../codex/probe-home.js';
+import { createFollowingLocalCodexHome, synchronizeLocalCodexConfiguration } from '../codex/probe-home.js';
+import { readLocalCodexModelConfiguration } from '../codex/local-provider.js';
 import {
   createCodexModelCatalog,
   type CodexModelCatalog
@@ -201,6 +204,9 @@ import {
   creatorStageEventId
 } from '../creator/events.js';
 import { createCreatorRepository } from '../creator/repository.js';
+import { createCreatorTelemetryOutbox } from '../telemetry/outbox.js';
+import { createCreatorTelemetrySink } from '../telemetry/creator.js';
+import { registerTelemetryRoutes } from '../telemetry/routes.js';
 import { createCreatorIssueService } from '../creator/issues.js';
 import { createCreatorService, type CreatorService } from '../creator/service.js';
 import {
@@ -240,6 +246,7 @@ import { registerCreatorServicesRoutes } from './routes.creator-services.js';
 import { registerGatewayAccountRoutes } from './routes.gateway-account.js';
 import { createGatewayAccountService, type GatewayAccountService } from '../gateway/account-service.js';
 import { createGatewayClient, GatewayError, type GatewayClient } from '../gateway/client.js';
+import { createOfficialVoicePreview, createOfficialVoicePreviewLanguages } from '../gateway/voice-preview.js';
 import { createGatewayRuntimeBindings } from '../gateway/runtime-bindings.js';
 import { createOfficialFetch } from '../gateway/official-fetch.js';
 import { createOfficialModelAccess } from '../gateway/model-access.js';
@@ -271,6 +278,21 @@ import { registerVideoMetadataRoutes } from './routes.video-metadata.js';
 import { PlatformConnectionService } from '../platform-connections/service.js';
 import { supportedVideoSourcePlatform, gatewayModelReady } from '@opencreator/protocol';
 import { registerPlatformConnectionRoutes } from './routes.platform-connections.js';
+
+function stageConnectionPlatform(executorId: string, stage: CreatorExecutorInput) {
+  if (executorId === 'wechat-article') return null;
+  const { stageId, progress } = stage.stageRun;
+  const state = stageId === 'prepare-source-video' && executorId === 'download'
+    ? typeof progress.inputResultVersion === 'number'
+      ? creatorResultSnapshotForVersion(stage.job, progress.inputResultVersion)?.state
+      : undefined
+    : stage.job.state;
+  if (!state || (stageId !== 'preview-source-video' && (state.sourceType === 'file' || state.sourceType === 'subtitle'))) return null;
+  const url = executorId === 'download' && stageId === 'preview-source-video' ? progress.previewSourceUrl
+    : executorId === 'download' && stageId === 'download' && typeof progress.sourceUrl === 'string' ? progress.sourceUrl
+    : state.sourceUrl;
+  return typeof url === 'string' ? supportedVideoSourcePlatform(url) : null;
+}
 
 export type BuildServerInput = {
   token: string;
@@ -316,6 +338,7 @@ export type BuildServerInput = {
   creatorService?: CreatorService;
   creatorPresetRegistry?: CreatorPresetRegistry;
   creatorPresetCatalogRoot?: string;
+  creatorPresetAssetsRoot?: string;
   creatorReferenceImageUploadService?: CreatorReferenceImageUploadService;
   creatorReferenceImageMaxSizeBytes?: number;
   creatorSourceUploadService?: CreatorSourceUploadService;
@@ -358,6 +381,8 @@ export async function buildServer(input: BuildServerInput) {
   const dataDir = resolve(input.dataDir ?? '.runtime');
   const appHome = resolve(input.appHome ?? dataDir);
   const configFile = resolve(input.configFile ?? join(appHome, 'config.toml'));
+  const databasePath = join(dataDir, 'app.sqlite');
+  const existingProfile = input.db !== undefined || existsSync(databasePath);
   const runtimeDir = resolve(input.runtimeDir ?? join(dataDir, 'creator-runtime'));
   const creatorDir = resolve(input.creatorDir ?? join(dataDir, 'creator'));
   const defaultManagedProjectRoot = join(
@@ -367,7 +392,7 @@ export async function buildServer(input: BuildServerInput) {
   const openCreatorSettingsStore = createOpenCreatorSettingsStore(configFile, {
     defaultProjectRoot: defaultManagedProjectRoot,
     outputRoot: join(defaultManagedProjectRoot, 'Exports')
-  });
+  }, existingProfile);
   const codexBin = input.codexBin ?? 'codex';
   const defaultCwd = input.defaultCwd ?? process.cwd();
   const resolvedCodexHome =
@@ -381,7 +406,11 @@ export async function buildServer(input: BuildServerInput) {
     && resolvedCodexHome.mode === 'isolated'
     && localCodexHome !== codexHome
   ) {
-    importLocalCodexConfiguration(localCodexHome, codexHome);
+    try {
+      synchronizeLocalCodexConfiguration(localCodexHome, codexHome);
+    } catch {
+      console.warn('Local Codex configuration could not be synchronized. The assistant will check it again before use.');
+    }
   }
   try {
     await ensureCodexFileCredentialStore(codexHome);
@@ -395,8 +424,9 @@ export async function buildServer(input: BuildServerInput) {
   const capabilities = withRuntimeSkillCapabilities(
     input.capabilities ?? createUnknownCapabilityMatrix()
   );
-  const db = input.db ?? openRuntimeDatabase(join(dataDir, 'app.sqlite'));
+  const db = input.db ?? openRuntimeDatabase(databasePath);
   const ownsDb = input.db === undefined;
+  const creatorTelemetryOutbox = createCreatorTelemetryOutbox(db);
   const runRepository = createRunRepository(db);
   const threadRepository = createThreadRepository(db);
   const scheduleRepository = new ScheduleRepository(db);
@@ -510,7 +540,7 @@ export async function buildServer(input: BuildServerInput) {
   await purgeLegacyStickmanJobs({ db, jobsRoot: creatorJobsRoot });
   migrateStickmanVisualAssetState({ db });
   let gatewayCreatorSource: ReturnType<typeof createGatewayCreatorSource> | undefined;
-  const creatorRepository = createCreatorRepository(db, { serviceBinding: () => gatewayCreatorSource?.snapshot() ?? { source: 'manual' } });
+  const creatorRepository = createCreatorRepository(db, { serviceBinding: templateId => gatewayCreatorSource?.snapshot(templateId) ?? { source: 'manual' } });
   const creatorIssueService = createCreatorIssueService(creatorRepository, {
     onChanged(issue) {
       if (issue.scope.kind !== 'creator-job') return;
@@ -554,7 +584,7 @@ export async function buildServer(input: BuildServerInput) {
     hasActiveTasks: () => [appServerRuntimeManager, creatorAppServerRuntimeManager, stickmanContentRuntimeManager]
       .some(manager => manager?.listScopes().some(scope => scope.active || scope.pending > 0))
       || creatorRepository.listJobs().some(job => job.status === 'running' || job.stages.some(stage => stage.status === 'queued')) || gatewayCreatorSource?.isBusy() === true,
-    hasPendingTasks: () => creatorRepository.listJobs().some(job => job.providerRequests.some(request => request.billingSideEffect && ['submitting', 'waiting_remote', 'unknown_remote_acceptance'].includes(request.status))),
+    hasPendingTasks: () => hasPendingPaidCreatorRequests(creatorRepository.listJobs()),
     async closeRuntime() {
       await gatewayCreatorSource?.revoke();
       officialBindings?.beginLogout();
@@ -606,18 +636,47 @@ export async function buildServer(input: BuildServerInput) {
     }
   });
   await gatewayAccount.initialize();
+  const creatorTelemetry = createCreatorTelemetrySink({
+    outbox: creatorTelemetryOutbox,
+    enabled: process.env.OPENCREATOR_TELEMETRY_ENABLED !== '0',
+    readAccount(job) {
+      const account = gatewayAccount.peekState();
+      const recharge = gatewayAccount.peekTelemetryRechargeState();
+      const binding = creatorRepository.getServiceBinding(job.id);
+      return {
+        userId: binding.source === 'gateway' ? binding.accountId : account.account?.id,
+        authState: account.authState === 'signed_in'
+          ? 'signed_in'
+          : account.authState === 'signed_out' ? 'signed_out' : 'unknown',
+        rechargeState: recharge.state,
+        accountStateObservedAt: recharge.observedAt
+      };
+    }
+  });
   const creatorAgentRepository = createCreatorAgentRepository(db);
   const creatorAgentReconciler = createCreatorAgentReconciler({
     repository: creatorAgentRepository
   });
   creatorAgentReconciler.reconcileAfterDaemonRestart();
   const creatorTemplates = createDefaultCreatorTemplateRegistry();
+  for (const stage of creatorRepository.listRecoveredInterruptedStageRuns?.() ?? []) {
+    const job = creatorRepository.getJob(stage.jobId);
+    if (job === undefined) continue;
+    const template = creatorTemplates.get(job.templateId, job.templateVersion);
+    creatorTelemetry.stageFinished(job, stage, template.id, 'interrupted');
+  }
   const creatorPresetCatalogRoot = resolve(
     input.creatorPresetCatalogRoot ?? resolveCreatorPresetCatalogRoot()
+  );
+  const creatorPresetAssetsRoot = resolve(
+    input.creatorPresetAssetsRoot
+      ?? (process.env.OPENCREATOR_PRESET_ASSETS_ROOT?.trim()
+        || join(creatorPresetCatalogRoot, 'assets'))
   );
   const creatorPresetRegistry = input.creatorPresetRegistry
     ?? await loadCreatorPresetCatalog({
       root: creatorPresetCatalogRoot,
+      assetsRoot: creatorPresetAssetsRoot,
       templates: creatorTemplates,
       verificationCachePath: join(
         dataDir,
@@ -634,6 +693,8 @@ export async function buildServer(input: BuildServerInput) {
     codexBin,
     codexHome,
     cwd: dataDir,
+    readLocalConfiguration: () => readLocalCodexModelConfiguration({ codexHome: localCodexHome }),
+    readProxy: async () => (await storedCreatorServicesConfigStore.read()).proxy,
     readConfiguration: createFollowingLocalCodexHome(localCodexHome,
       join(runtimeDir, 'creator-text-codex'))
   });
@@ -718,8 +779,12 @@ export async function buildServer(input: BuildServerInput) {
       storedCreatorServicesConfigStore,
       localCodexTextModelDefaults
     );
-  gatewayCreatorSource = createGatewayCreatorSource({ account: gatewayAccount, manual: manualCreatorServicesConfigStore, getLocalOrigin: getAgentToolBaseUrl, readJobBinding: creatorRepository.getServiceBinding, readJobState: id => creatorRepository.getJob(id)?.state, readStageRun: creatorRepository.getStageRun, ledger: creatorProviderRequestLedger, directRequestsRoot: join(dataDir, 'gateway', 'requests') });
+  gatewayCreatorSource = createGatewayCreatorSource({ account: gatewayAccount, manual: manualCreatorServicesConfigStore, getLocalOrigin: getAgentToolBaseUrl, readJobBinding: creatorRepository.getServiceBinding, readJobState: id => creatorRepository.getJob(id)?.state, readJobTemplateId: id => creatorRepository.getJob(id)?.templateId, readStageRun: creatorRepository.getStageRun, ledger: creatorProviderRequestLedger, directRequestsRoot: join(dataDir, 'gateway', 'requests') });
   const creatorServicesConfigStore = gatewayCreatorSource.store;
+  // Validation must resolve the same frozen binding and task model choices as execution.
+  const readCreatorConfigForJob = (jobId: string) => gatewayCreatorSource!.runForJob(
+    jobId, `preflight:${jobId}`, () => creatorServicesConfigStore.read()
+  );
   if (stickmanContentRuntimeManager) stickmanContentRuntimeManager = createRuntimeSource(stickmanContentRuntimeManager, gatewayAccount.peekState, () => officialManagers.get('stickman'));
   let getCreatorYtDlpRuntime: ((sourceUrl?: string) => ReturnType<typeof resolveYtDlpRuntime>) | undefined;
   const youtubeConnection = new PlatformConnectionService({
@@ -737,9 +802,15 @@ export async function buildServer(input: BuildServerInput) {
   const videoMetadataService = input.videoMetadataService ?? createVideoMetadataService({
     getProxy: async () => (await readCommonProxy()).trim(),
     getYtDlpRuntime: sourceUrl => getCreatorYtDlpRuntime?.(sourceUrl),
-    isYouTubeConnected: () => youtubeConnection.hasAuthentication(),
+    isYouTubeConnected: async () => {
+      await youtubeConnection.refreshBrowserSession();
+      return youtubeConnection.hasAuthentication();
+    },
     withYouTubeCookies: operation => youtubeConnection.withCookies(operation),
-    withDouyinCookies: operation => douyinConnection.withCookies(operation)
+    withDouyinCookies: async operation => {
+      await douyinConnection.refreshBrowserSession();
+      return douyinConnection.withCookies(operation);
+    }
   });
   const creatorService = input.creatorService ?? createCreatorService({
     jobsRoot: creatorJobsRoot,
@@ -747,7 +818,8 @@ export async function buildServer(input: BuildServerInput) {
     templates: creatorTemplates,
     providerRequestLedger: creatorProviderRequestLedger,
     presets: creatorPresetRegistry,
-    creatorServicesConfig: creatorServicesConfigStore
+    creatorServicesConfig: creatorServicesConfigStore,
+    telemetry: creatorTelemetry
   });
   const creatorRuntimeRoot = process.env.OPENCREATOR_CREATOR_RUNTIME_ROOT
     ?? join(runtimeDir, 'krillinai');
@@ -770,6 +842,11 @@ export async function buildServer(input: BuildServerInput) {
     resourceRoot: creatorRuntimeRoot,
     workRoot: join(creatorJobsRoot, '.tts'),
     configStore: creatorServicesConfigStore,
+    officialPreviewLanguages: createOfficialVoicePreviewLanguages({ origin: gatewayClient.origin,
+      fetcher: createOfficialFetch({ readProxy: readCommonProxy }) }),
+    officialPreview: createOfficialVoicePreview({ origin: gatewayClient.origin,
+      getState: () => gatewayAccount.peekState(),
+      fetcher: createOfficialFetch({ readProxy: readCommonProxy }) }),
     verificationCachePath: krillinVerificationCachePath,
     ensureRuntimeReady: () => ensureKrillinRuntimeReady()
   });
@@ -863,6 +940,8 @@ export async function buildServer(input: BuildServerInput) {
   let creatorFfmpegPath: string | undefined;
   let creatorFfprobePath: string | undefined;
   let creatorYtDlpUpdateManager = input.creatorYtDlpUpdateManager;
+  let bundledYtDlp: ReturnType<typeof resolveYtDlpRuntime>;
+  const ytDlpScope = createYtDlpRuntimeScope(() => creatorYtDlpUpdateManager?.getRuntime() ?? bundledYtDlp);
   let getYtDlpRuntime: ((sourceUrl?: string) => ReturnType<typeof resolveYtDlpRuntime>) | undefined;
   try {
     const runtimeManifest = readKrillinRuntimeManifest(creatorRuntimeRoot);
@@ -901,6 +980,7 @@ export async function buildServer(input: BuildServerInput) {
         ? {}
         : { overridePath: input.creatorYtDlpPath })
     });
+    bundledYtDlp = ytDlp;
     if (
       creatorYtDlpUpdateManager === undefined
       && input.creatorYtDlpPath === undefined
@@ -910,16 +990,15 @@ export async function buildServer(input: BuildServerInput) {
         creatorYtDlpUpdateManager = await createYtDlpUpdateManager({
           root: join(runtimeDir, 'yt-dlp'),
           bundledRuntime: ytDlp,
-          async readProxy() {
-            return (await creatorServicesConfigStore.read()).proxy.trim();
-          }
+          restoreInBackground: true,
+          readProxy: async () => (await readCommonProxy()).trim()
         });
       } catch (error) {
         console.warn(`yt-dlp updater is unavailable: ${formatError(error)}`);
       }
     }
     getYtDlpRuntime = sourceUrl => (sourceUrl && supportedVideoSourcePlatform(sourceUrl) === 'douyin'
-      ? douyinConnection : youtubeConnection).authenticatedRuntime(creatorYtDlpUpdateManager?.getRuntime() ?? ytDlp);
+      ? douyinConnection : youtubeConnection).authenticatedRuntime(ytDlpScope.getRuntime());
     getCreatorYtDlpRuntime = getYtDlpRuntime;
     if (input.creatorExecutors === undefined) {
       creatorExecutors.push(createKrillinExecutor({
@@ -1034,6 +1113,7 @@ export async function buildServer(input: BuildServerInput) {
   }
   const creatorPreflight = createCreatorPreflight({
     assertServiceSource: gatewayCreatorSource.assertJob,
+    readConfigForJob: readCreatorConfigForJob,
     validateOfficialModel: gatewayAccount.validateModel,
     readCodexImageStatus,
     videoMetadataService,
@@ -1100,19 +1180,29 @@ export async function buildServer(input: BuildServerInput) {
         issueService: creatorIssueService,
         templates: creatorService.templates,
         workRoot: creatorJobsRoot,
+        telemetry: creatorTelemetry,
         executors: creatorExecutors.map(executor => ({
           id: executor.id,
-          run: stage => gatewayCreatorSource!.runForJob(stage.job.id, stage.stageRun.id, () =>
-            ['download', 'krillinai', 'cover-analysis', 'wechat-article'].includes(executor.id)
-              ? youtubeConnection.withCookies(() => douyinConnection.withCookies(() => executor.run(stage)))
-              : executor.run(stage))
+          supportsProcessPause: executor.supportsProcessPause,
+          run: stage => gatewayCreatorSource!.runForJob(stage.job.id, stage.stageRun.id, async () => {
+            if (!['download', 'krillinai', 'cover-analysis', 'wechat-article'].includes(executor.id)) return executor.run(stage);
+            return ytDlpScope.run(async () => {
+              const platform = stageConnectionPlatform(executor.id, stage);
+              const connection = platform === 'youtube' ? youtubeConnection : platform === 'douyin' ? douyinConnection : undefined;
+              if (connection) {
+                await connection.refreshBrowserSession();
+                return connection.withCookies(() => executor.run(stage));
+              }
+              return youtubeConnection.withCookies(() => douyinConnection.withCookies(() => executor.run(stage)));
+            });
+          })
         })),
         async beforeRun(job, stageId) {
           gatewayCreatorSource!.assertJob(job.id);
           assertCreatorPresetStageRequirement({
             job,
             stageId,
-            services: await creatorServicesConfigStore.read()
+            services: await readCreatorConfigForJob(job.id)
           });
         },
         onJobChanged(job) {
@@ -1134,6 +1224,12 @@ export async function buildServer(input: BuildServerInput) {
             kind: 'stage_progress',
             payload: { stage }
           });
+          if ((stage.stageId === 'subtitle' && stage.status === 'running')
+            || (stage.progress.backgroundSourceDownload === true && ['failed', 'canceled', 'interrupted'].includes(stage.status))) {
+            void videoTranslationWorkflow?.handleStageChanged(stage).catch(error => {
+              console.warn(`Video translation source download failed to start: ${formatError(error)}`);
+            });
+          }
           if (['failed', 'canceled', 'interrupted'].includes(stage.status)) {
             void stickmanVideoWorkflow?.handleStageChanged(stage).catch(error => {
               console.warn(`Stickman video workflow reconciliation failed: ${formatError(error)}`);
@@ -1230,6 +1326,7 @@ export async function buildServer(input: BuildServerInput) {
         creator: creatorService,
         dispatcher: creatorCommandDispatcher,
         configStore: creatorServicesConfigStore,
+        readConfigForJob: readCreatorConfigForJob,
         videoMetadataService
       });
   coverWorkflow = creatorStageRunner === undefined
@@ -1237,7 +1334,8 @@ export async function buildServer(input: BuildServerInput) {
     : createCoverWorkflow({
         creator: creatorService,
         dispatcher: creatorCommandDispatcher,
-        configStore: creatorServicesConfigStore
+        configStore: creatorServicesConfigStore,
+        readConfigForJob: readCreatorConfigForJob
       });
   stickmanVideoWorkflow = creatorStageRunner === undefined
     ? undefined
@@ -1245,6 +1343,7 @@ export async function buildServer(input: BuildServerInput) {
         creator: creatorService,
         dispatcher: creatorCommandDispatcher,
         configStore: creatorServicesConfigStore,
+        readConfigForJob: readCreatorConfigForJob,
         repository: creatorRepository,
         providerLedger: creatorProviderRequestLedger
       });
@@ -1274,9 +1373,14 @@ export async function buildServer(input: BuildServerInput) {
     codexHome,
     processInjector: agentToolProcessInjector
   });
+  const readCreatorLocalConfiguration = localCodexHome === codexHome
+    ? undefined
+    : createFollowingLocalCodexHome(localCodexHome, codexHome);
   creatorAppServerRuntimeManager = createAppServerRuntimeManager({
     codexBin,
     codexHome,
+    // Keep existing rollouts while following the same local configuration as AI Services.
+    readConfiguration: readCreatorLocalConfiguration,
     processInjector: creatorAgentToolProcessInjector
   });
   officialInjectors = { general: agentToolProcessInjector, creator: creatorAgentToolProcessInjector };
@@ -1289,6 +1393,12 @@ export async function buildServer(input: BuildServerInput) {
         skillPath: creatorAgentBootstrap.skillPath,
         guideVersion: creatorAgentBootstrap.guideVersion,
         guideHash: creatorAgentBootstrap.hash,
+        async recheckConfigurationAfterFailure() {
+          if (gatewayAccount.peekState().source !== 'manual' || readCreatorLocalConfiguration === undefined) return false;
+          const checked = readCreatorLocalConfiguration({ verifyRuntime: true });
+          if (checked.repaired) await creatorAppServerRuntimeManager?.invalidate('local_codex_configuration_repaired');
+          return checked.repaired;
+        },
         available: true
       })
     : createUnavailableAgentRuntimeAdapter(creatorAgentBootstrap.error));
@@ -1431,6 +1541,9 @@ export async function buildServer(input: BuildServerInput) {
   let closing = false;
   let backgroundStartup: Promise<void> | undefined;
   server.addHook('onListen', () => {
+    void creatorYtDlpUpdateManager?.update().catch(error => {
+      if (!closing) console.warn(`Background yt-dlp update failed: ${formatError(error)}`);
+    });
     backgroundStartup = (async () => {
       await gatewayAccount.startBackgroundRestore();
       if (closing) return;
@@ -1492,8 +1605,10 @@ export async function buildServer(input: BuildServerInput) {
     await capture(() => codexSessionProvider.close());
     await capture(() => codexModelCatalog.close());
     await capture(() => codexControlClient.close());
-    await capture(() => creatorStageScheduler?.close());
-    await capture(() => creatorStageRunner?.close());
+    await Promise.all([
+      capture(() => creatorStageScheduler?.close()),
+      capture(() => creatorStageRunner?.close())
+    ]);
     await capture(() => agentCapabilityTokens.close());
     if (ownsDb) {
       await capture(() => {
@@ -1599,6 +1714,7 @@ export async function buildServer(input: BuildServerInput) {
     async () => gatewayAccount.peekState().source === 'gateway'
       ? { authentication: 'api_key' as const, apiKeyConfigured: false, baseUrl: '', model: gatewayAccount.peekState().selectedModels?.text ?? '' }
       : localCodexTextModelDefaults.readStatus(),
+    storedCreatorServicesConfigStore,
     storedCreatorServicesConfigStore
   );
   await registerGatewayAccountRoutes(server, gatewayAccount);
@@ -1627,6 +1743,7 @@ export async function buildServer(input: BuildServerInput) {
     stageRunner: creatorStageRunner,
     presets: creatorPresetRegistry,
     presetCatalogRoot: creatorPresetCatalogRoot,
+    presetAssetsRoot: creatorPresetAssetsRoot,
     readServicesConfig: () => creatorServicesConfigStore.read(),
     codexImageRuntime,
     preflight: creatorPreflight,
@@ -1636,12 +1753,18 @@ export async function buildServer(input: BuildServerInput) {
       workRoot: join(creatorJobsRoot, '.previews'),
       ensureRuntimeReady: () => ensureKrillinRuntimeReady(),
       getYtDlpRuntime: () => getCreatorYtDlpRuntime?.()
+    }),
+    subtitleRenderService: createSubtitleRenderService({
+      resourceRoot: creatorRuntimeRoot,
+      workRoot: join(creatorJobsRoot, '.previews'),
+      ensureRuntimeReady: () => ensureKrillinRuntimeReady()
     })
   });
   await registerAttachmentRoutes(server, attachmentService, {
     maxSizeBytes: input.attachmentMaxSizeBytes
   });
   await registerApprovalRoutes(server, approvalManager);
+  await registerTelemetryRoutes(server, creatorTelemetryOutbox, creatorTelemetry);
   await registerNotificationRoutes(server, notificationService);
   await registerTaskRoutes(server, taskService);
   await registerMemoryRoutes(server, memoryService, {

@@ -1,3 +1,4 @@
+import AppSelect from '../../components/forms/Select.js';
 import { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Link2, Loader2, RefreshCw, Unlink, Upload, X } from 'lucide-react';
 import type { ConnectionPlatform, PlatformConnectionState } from '@opencreator/protocol';
@@ -53,6 +54,7 @@ function PlatformConnectionRow(props: { connected: boolean; service?: PlatformCo
   const disabled = !props.connected || !service || !state || busy;
   const connecting = state?.status === 'connecting';
   const connected = state?.status === 'connected';
+  const canDisconnect = connected || state?.status === 'expired' || (state?.status === 'error' && Boolean(state.connectedAt));
   const managed = state?.connectionMethod === 'browser-login';
   const profiles = managed ? [] : state?.profiles ?? [];
   const profileId = profiles.some(profile => profile.id === selectedProfile) ? selectedProfile
@@ -75,17 +77,17 @@ function PlatformConnectionRow(props: { connected: boolean; service?: PlatformCo
         </div>
       </div>
       <div className="platform-connection-actions">
-        {profiles.length ? <select aria-label={l('浏览器账号', 'Browser profile')} value={profileId} disabled={disabled || connecting}
+        {profiles.length ? <AppSelect aria-label={l('浏览器账号', 'Browser profile')} value={profileId} disabled={disabled || connecting}
           onChange={event => setSelectedProfile(event.target.value)}>
           {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
-        </select> : null}
+        </AppSelect> : null}
         {awaitingLogin ? <button type="button" disabled={disabled} onClick={() => service && void act(service.completeYouTubeLogin)}>
           <CheckCircle2 size={16} />{l('完成登录', 'Finish sign-in')}</button> : null}
         {connecting ? <button type="button" disabled={disabled} onClick={() => service && void act(youtube ? service.cancelYouTube : service.cancelDouyin)}><X size={16} />{l('取消', 'Cancel')}</button>
           : <button type="button" disabled={disabled} onClick={() => service && void act(() => youtube ? service.connectYouTube(profileId) : service.connectDouyin(profileId))}>
             {connected || state?.status === 'expired' ? <RefreshCw size={16} /> : <Link2 size={16} />}
             {connected || state?.status === 'expired' ? l('重新连接', 'Reconnect') : l('连接', 'Connect')}</button>}
-        {connected || state?.status === 'expired' ? <button type="button" disabled={disabled} onClick={() => service && void act(youtube ? service.disconnectYouTube : service.disconnectDouyin)}><Unlink size={16} />{l('断开', 'Disconnect')}</button> : null}
+        {canDisconnect ? <button type="button" disabled={disabled} onClick={() => service && void act(youtube ? service.disconnectYouTube : service.disconnectDouyin)}><Unlink size={16} />{l('断开', 'Disconnect')}</button> : null}
         {!connecting ? <button type="button" disabled={disabled} aria-label={l('导入 Cookie 文件', 'Import cookie file')} title={l('导入 Cookie 文件', 'Import cookie file')} onClick={() => fileInput.current?.click()}><Upload size={16} /></button> : null}
       </div>
     </div>

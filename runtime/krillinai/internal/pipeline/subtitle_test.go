@@ -18,23 +18,25 @@ import (
 )
 
 type fakeStageService struct {
-	downloadErr       error
-	processErr        error
-	calls             []string
-	prepareVTT        []bool
-	prepareEmbedTypes []string
-	lastPrepare       *types.SubtitleTaskStepParam
-	lastYouTube       *service.YoutubeSubtitleReq
-	lastSpeech        *types.SubtitleTaskStepParam
-	lastCoverPrompt   string
-	lastCoverSize     string
-	coverImageB64     string
-	preparedVideoPath string
-	preparedAudioPath string
-	audioProgress     []uint8
-	audioErr          error
-	omitPreparedVideo bool
-	translatedBlocks  []*util.SrtBlock
+	downloadErr         error
+	processErr          error
+	calls               []string
+	prepareVTT          []bool
+	prepareEmbedTypes   []string
+	lastPrepare         *types.SubtitleTaskStepParam
+	lastYouTube         *service.YoutubeSubtitleReq
+	lastSpeech          *types.SubtitleTaskStepParam
+	lastCoverPrompt     string
+	lastCoverSize       string
+	coverImageB64       string
+	preparedVideoPath   string
+	preparedAudioPath   string
+	audioProgress       []uint8
+	audioErr            error
+	omitPreparedVideo   bool
+	translatedBlocks    []*util.SrtBlock
+	translationProgress []ProgressCounts
+	detailedProgress    []types.TaskProgress
 }
 
 func TestImportedSubtitlesSkipRecognitionAndPreserveMultilineText(t *testing.T) {
@@ -99,6 +101,45 @@ func TestStandaloneSRTTranslatesWithoutMediaAndPreservesTimeline(t *testing.T) {
 	}
 }
 
+func TestStandaloneSRTReportsActualTranslationProgress(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "source.srt")
+	if err := os.WriteFile(path, []byte("1\n00:00:00,000 --> 00:00:02,000\nHello world.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeStageService{translationProgress: []ProgressCounts{{0, 12}, {3, 12}, {9, 12}, {12, 12}}}
+	var percentages []int
+	var translated []ProgressCounts
+	translationStarted := false
+	_, err := GenerateSubtitles(context.Background(), fake, SubtitleRequest{
+		Workdir: root, TaskID: "srt-progress", OriginLang: "en", TargetLang: "zh_cn", InputSRT: path,
+		ReportProgress: func(phase string, percent int, _ string, counts ...ProgressCounts) {
+			if translationStarted && phase == "preparing_source" {
+				t.Error("translation reused the video preparation reporter")
+			}
+			if phase == "translating_subtitles" {
+				translationStarted = true
+			}
+			if len(counts) > 0 {
+				translated = append(translated, counts[0])
+			}
+			if len(percentages) > 0 && percent < percentages[len(percentages)-1] || percent >= 100 {
+				t.Errorf("invalid progress: %v followed by %d", percentages, percent)
+			}
+			percentages = append(percentages, percent)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(translated, fake.translationProgress) {
+		t.Fatalf("translation counts = %v, want %v", translated, fake.translationProgress)
+	}
+	if !reflect.DeepEqual(percentages, []int{1, 3, 5, 5, 27, 72, 95, 96, 98}) {
+		t.Fatalf("progress = %v", percentages)
+	}
+}
+
 func fmtBool(value bool) string {
 	if value {
 		return "translated"
@@ -106,8 +147,12 @@ func fmtBool(value bool) string {
 	return "source"
 }
 
-func (f *fakeStageService) TranslateSubtitleBlocks(_ context.Context, blocks []*util.SrtBlock, _ *types.SubtitleTaskStepParam) ([]*util.SrtBlock, error) {
+func (f *fakeStageService) TranslateSubtitleBlocks(_ context.Context, blocks []*util.SrtBlock, step *types.SubtitleTaskStepParam) ([]*util.SrtBlock, error) {
 	f.calls = append(f.calls, "translate-import")
+	for _, counts := range f.translationProgress {
+		step.TaskPtr.SetProgress(40 + uint8(counts.Completed*50/counts.Total))
+		step.TaskPtr.SetTranslationProgress(counts.Completed, counts.Total)
+	}
 	if f.translatedBlocks != nil {
 		return f.translatedBlocks, f.processErr
 	}
@@ -122,6 +167,9 @@ func (f *fakeStageService) PrepareMedia(_ context.Context, p *types.SubtitleTask
 	f.prepareVTT = append(f.prepareVTT, p.VttSwitch)
 	f.prepareEmbedTypes = append(f.prepareEmbedTypes, p.EmbedSubtitleVideoType)
 	f.lastPrepare = p
+	for _, event := range f.detailedProgress {
+		p.TaskPtr.ReportProgress(event)
+	}
 	if f.preparedVideoPath != "" {
 		p.InputVideoPath = f.preparedVideoPath
 	}
@@ -141,6 +189,9 @@ func (f *fakeStageService) PrepareMedia(_ context.Context, p *types.SubtitleTask
 
 func (f *fakeStageService) GenerateSubtitlesFromAudio(_ context.Context, p *types.SubtitleTaskStepParam) error {
 	f.calls = append(f.calls, "audio")
+	for _, event := range f.detailedProgress {
+		p.TaskPtr.ReportProgress(event)
+	}
 	for _, percent := range f.audioProgress {
 		p.TaskPtr.SetProgress(percent)
 	}
@@ -150,6 +201,9 @@ func (f *fakeStageService) GenerateSubtitlesFromAudio(_ context.Context, p *type
 func (f *fakeStageService) GenerateSpeechFromSRT(_ context.Context, p *types.SubtitleTaskStepParam) error {
 	f.calls = append(f.calls, "speech")
 	f.lastSpeech = p
+	for _, event := range f.detailedProgress {
+		p.TaskPtr.ReportProgress(event)
+	}
 	return nil
 }
 
@@ -174,12 +228,18 @@ func (f *fakeStageService) ProcessYouTubeSubtitle(_ context.Context, req *servic
 	if req.TaskPtr != nil {
 		req.TaskPtr.SetProgress(40)
 		req.TaskPtr.SetProgress(65)
+		for _, counts := range f.translationProgress {
+			req.TaskPtr.SetTranslationProgress(counts.Completed, counts.Total)
+		}
 		req.TaskPtr.SetProgress(90)
 	}
 	return "bilingual_srt.srt", f.processErr
 }
 
-func (f *fakeStageService) RenderVideo(context.Context, service.RenderVideoRequest) (string, error) {
+func (f *fakeStageService) RenderVideo(_ context.Context, req service.RenderVideoRequest) (string, error) {
+	for _, event := range f.detailedProgress {
+		req.StepParam.TaskPtr.ReportProgress(event)
+	}
 	return "", nil
 }
 
@@ -244,7 +304,7 @@ func TestGenerateSubtitlesPreservesPlatformAndAudioFallbackErrors(t *testing.T) 
 }
 
 func TestGenerateSubtitlesPreservesTranscriptionClassification(t *testing.T) {
-	for _, code := range []string{"audio_no_speech", "audio_transcription_empty", "audio_transcription_invalid_response", "audio_transcription_timestamps_missing", "audio_transcription_api_failed"} {
+	for _, code := range []string{"audio_no_speech", "audio_transcription_empty", "audio_transcription_invalid_response", "audio_transcription_timestamps_missing", "audio_transcription_api_failed", "audio_transcription_pending"} {
 		for _, fallback := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/fallback=%v", code, fallback), func(t *testing.T) {
 				classified := &whisper.TranscriptionError{Code: code, Message: "fixture reason"}
@@ -255,11 +315,20 @@ func TestGenerateSubtitlesPreservesTranscriptionClassification(t *testing.T) {
 					fake.downloadErr = errors.New("no captions")
 				}
 				response, err := GenerateSubtitles(context.Background(), fake, req)
-				if !errors.Is(err, classified) || response.Error == nil || response.Error.Code != code || response.Error.Retryable != classified.Retryable() {
+				wantRetryable := classified.Retryable() || code == "audio_transcription_pending"
+				if !errors.Is(err, classified) || response.Error == nil || response.Error.Code != code || response.Error.Retryable != wantRetryable {
 					t.Fatalf("response = %+v, error = %v", response.Error, err)
 				}
 			})
 		}
+	}
+}
+
+func TestSubtitleFailureResponsePreservesHTTPDiagnostics(t *testing.T) {
+	cause := &whisper.TranscriptionError{Code: "audio_transcription_api_failed", Message: "private response", HTTPStatus: 503, UpstreamCode: "server_error", RequestID: "ocreq_" + strings.Repeat("b", 48)}
+	response := subtitleFailureResponse(SubtitleRequest{}, nil, ErrorKindRetryable, cause.Code, fmt.Errorf("segment 1: %w", cause))
+	if response.Error == nil || response.Error.Code != cause.Code || response.Error.HTTPStatus != 503 || response.Error.UpstreamCode != "server_error" || response.Error.RequestID != cause.RequestID {
+		t.Fatalf("diagnostics = %+v", response.Error)
 	}
 }
 
@@ -331,7 +400,7 @@ func TestGenerateSubtitlesMapsDetailedAudioProgress(t *testing.T) {
 		OriginLang:    "zh_cn",
 		TargetLang:    "en",
 		CaptionSource: CaptionSourceWhisper,
-		ReportProgress: func(_ string, percent int, _ string) {
+		ReportProgress: func(_ string, percent int, _ string, _ ...ProgressCounts) {
 			reported = append(reported, percent)
 		},
 	}
@@ -340,7 +409,7 @@ func TestGenerateSubtitlesMapsDetailedAudioProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []int{39, 45, 52, 58, 67, 75, 83}
+	want := []int{31, 39, 48, 57, 68, 78, 90}
 	for _, percent := range want {
 		if !containsInt(reported, percent) {
 			t.Fatalf("reported progress %v does not contain %d", reported, percent)
@@ -491,7 +560,7 @@ func TestGenerateSubtitlesReportsPlatformTranslationAndMediaProgress(t *testing.
 		TargetLang:    "zh_cn",
 		CaptionSource: CaptionSourceAny,
 		PrepareVideo:  true,
-		ReportProgress: func(phase string, percent int, _ string) {
+		ReportProgress: func(phase string, percent int, _ string, _ ...ProgressCounts) {
 			updates = append(updates, update{phase: phase, percent: percent})
 		},
 	}
@@ -508,9 +577,9 @@ func TestGenerateSubtitlesReportsPlatformTranslationAndMediaProgress(t *testing.
 		}
 		t.Fatalf("missing progress %s/%d in %+v", phase, percent, updates)
 	}
-	assertProgress("translating_subtitles", 57)
-	assertProgress("preparing_original_media", 76)
-	assertProgress("collecting_outputs", 95)
+	assertProgress("translating_subtitles", 50)
+	assertProgress("preparing_original_media", 88)
+	assertProgress("collecting_outputs", 98)
 }
 
 func TestGenerateSubtitlesWhisperSkipsYouTubeDownload(t *testing.T) {
@@ -637,7 +706,7 @@ func TestUnusablePlatformCaptionsFallBackToAudio(t *testing.T) {
 	response, err := GenerateSubtitles(context.Background(), fake, SubtitleRequest{
 		Input: "https://www.youtube.com/watch?v=m5yrQMnc_jQ", Workdir: t.TempDir(), TaskID: "invalid-vtt",
 		OriginLang: "en", TargetLang: "zh_cn", CaptionSource: CaptionSourceAny,
-		ReportProgress: func(phase string, _ int, message string) {
+		ReportProgress: func(phase string, _ int, message string, _ ...ProgressCounts) {
 			if phase == "fallback_to_transcription" {
 				messages = append(messages, message)
 			}

@@ -1,5 +1,6 @@
 import type {
   CreatorArtifact,
+  CreatorJob,
   CreatorJson,
   CreatorStageRun,
   DownloadMediaType,
@@ -20,18 +21,21 @@ import {
   LoaderCircle,
   Music2,
   PackageOpen,
+  Pause,
   Play,
   RefreshCw,
   Subtitles,
   Video,
   XCircle
 } from 'lucide-react';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { formatRoute, parseRoute } from '../../app/routes.js';
 import { useAppLanguage } from '../../i18n/LanguageProvider.js';
 import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
 import NativeSelect from '../../components/forms/NativeSelect.js';
 import CreatorTaskSummary from './CreatorTaskSummary.js';
 import CreatorToolShell from './CreatorToolShell.js';
+import { useCreatorRecoveryCopy } from './creator-recovery-copy.js';
 import SupportedVideoSources from './SupportedVideoSources.js';
 import VideoDownloadThumbnail from './VideoDownloadThumbnail.js';
 import {
@@ -60,10 +64,14 @@ export default function VideoDownloadWorkspace(props: {
   onBack(): void;
   promptHint?: string;
   runtimeDependencies?: RuntimeDependenciesController;
-  onOpenRuntimeComponents?(): void;
+  embedded?: boolean;
+  embeddedTabs?: ReactNode;
+  forceComposer?: boolean;
+  onGenerated?(job: CreatorJob): void;
   batch?: VideoDownloadBatchView;
 }) {
   const l = useLocalizedCopy();
+  const recoveryCopy = useCreatorRecoveryCopy();
   const { language } = useAppLanguage();
   const session = useOptionalCreatorSession();
   const [url, setUrl] = useState(() => readString(session?.state.sourceUrl) ?? '');
@@ -77,18 +85,24 @@ export default function VideoDownloadWorkspace(props: {
   const [resultTab, setResultTab] = useState<DownloadResultTab>('formats');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [localRecovery, setLocalRecovery] = useState<{ message: string; code?: string }>();
   const [thumbnailDownloading, setThumbnailDownloading] = useState(false);
   const thumbnailDownloadPendingRef = useRef(false);
   const [submittingOptionIds, setSubmittingOptionIds] = useState<ReadonlySet<string>>(
     () => new Set()
   );
   const submittingOptionIdsRef = useRef(new Set<string>());
+  const workspaceRequestedOptionIdsRef = useRef(new Set<string>());
   const downloadSubmissionTailRef = useRef<Promise<void>>(Promise.resolve());
+  const downloadControlsRef = useRef(new Set<string>());
+  const [downloadControlsPending, setDownloadControlsPending] = useState<ReadonlySet<string>>(() => new Set());
   const [taskControlPending, setTaskControlPending] = useState<
     'canceling' | 'resuming'
   >();
   const [ytDlpRecoveryError, setYtDlpRecoveryError] = useState('');
+  const [ytDlpUpdateNetworkFailure, setYtDlpUpdateNetworkFailure] = useState(false);
   const [artifactPreview, setArtifactPreview] = useState<DownloadArtifactPreview>();
+  const mountedRef = useRef(false);
   const artifactPreviewRequestRef = useRef(0);
   const artifactPreviewUrlRef = useRef<string>();
   const artifactPreviewMediaRef = useRef<HTMLMediaElement | null>(null);
@@ -98,10 +112,10 @@ export default function VideoDownloadWorkspace(props: {
     [session?.job.artifacts, url]
   );
   const probe = useMemo(
-    () => probeArtifact === undefined || props.batch?.hasSelectedSource === false
+    () => props.forceComposer || probeArtifact === undefined || props.batch?.hasSelectedSource === false
       ? undefined
       : readDownloadProbe(probeArtifact.metadata),
-    [probeArtifact, props.batch?.hasSelectedSource]
+    [probeArtifact, props.batch?.hasSelectedSource, props.forceComposer]
   );
   const legacy = (session?.job.templateVersion ?? 2) < 2;
   const options = useMemo(() => {
@@ -185,13 +199,15 @@ export default function VideoDownloadWorkspace(props: {
     [downloadArtifacts, downloadStages, options, probe, probeArtifact, props.batch?.jobs]
   );
   const latestTaskStage = session?.job.stages.at(-1);
-  const resumableStage = latestTaskStage?.status === 'canceled'
-    || latestTaskStage?.status === 'interrupted'
+  const resumableStage = ((latestTaskStage?.progress.downloadControl === 'paused' && latestTaskStage.status === 'running') || latestTaskStage?.status === 'canceled'
+    || latestTaskStage?.status === 'interrupted') && latestTaskStage.progress.downloadControl !== 'canceled'
     ? latestTaskStage
     : undefined;
   const failedStage = latestTaskStage?.status === 'failed'
     ? latestTaskStage
     : undefined;
+  const showFailureWorkbench = failedStage !== undefined
+    && !props.forceComposer && props.batch?.hasSelectedSource !== false;
   const ytDlpUpdateSuggested = shouldSuggestYtDlpUpdate(failedStage);
   const probing = activeStages.some(stage => stage.stageId === 'probe');
   const validUrl = isSupportedUrl(url);
@@ -212,14 +228,33 @@ export default function VideoDownloadWorkspace(props: {
       ? `${platform} · ${probing ? l('正在解析', 'Analyzing') : l('待解析', 'Waiting to analyze')}`
       : l('等待公开视频链接', 'Waiting for a public video link')
     : `${platform} · ${formatDuration(probe.duration)} · ${options.length} ${l('种规格', 'formats')}`;
-  const currentIssue = error
-    || session?.error?.message
+  const currentIssue = ytDlpRecoveryError || error
+    || (session?.error ? formatDownloadError(`${session.error.code}: ${session.error.message}`, l) : undefined)
     || (failedStage === undefined
       ? undefined
       : formatDownloadError(
           new Error(`${failedStage.errorCode ?? ''}: ${failedStage.errorMessage ?? ''}`),
           l
         ));
+  const recoveryCode = ytDlpRecoveryError
+    ? ytDlpUpdateNetworkFailure ? 'network_unavailable' : 'yt_dlp_update_recommended'
+    : error
+    ? localRecovery?.message === error ? localRecovery.code : undefined
+    : session?.error?.code ?? failedStage?.errorCode;
+  const currentRoute = parseRoute(window.location.hash);
+  const returnPath = formatRoute(currentRoute.view === 'workbench'
+    && currentRoute.tool === 'video-download'
+    && currentRoute.jobId === session?.job.id
+    ? currentRoute
+    : { view: 'workbench', tool: 'video-download', jobId: session?.job.id });
+  const issueSettingsLink = downloadIssueSettingsLink(recoveryCode, returnPath, recoveryCopy.checkProxy, l);
+  const showWorkspaceIssue = Boolean(currentIssue && !(error && !validUrl)
+    && (props.batch?.hasMultipleSources !== true || !showFailureWorkbench || ytDlpUpdateSuggested || error || ytDlpRecoveryError));
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
     const sourceUrl = readString(session?.state.sourceUrl);
@@ -241,11 +276,15 @@ export default function VideoDownloadWorkspace(props: {
       && artifactMatchesProbe(artifact, probeArtifact, probe)
     ));
     if (newArtifacts.length === 0) return;
+    let openOutputs = false;
     for (const artifact of newArtifacts) {
       seenDownloadArtifactIdsRef.current.add(artifact.id);
+      const optionId = readString(artifact.metadata.optionId);
+      const requestedInWorkspace = optionId !== undefined && workspaceRequestedOptionIdsRef.current.delete(optionId);
+      if (!requestedInWorkspace) openOutputs = true;
     }
     setCurrentStep(1);
-    setResultTab('outputs');
+    if (openOutputs) setResultTab('outputs');
   }, [downloadArtifacts, probe, probeArtifact]);
 
   useEffect(() => {
@@ -296,6 +335,12 @@ export default function VideoDownloadWorkspace(props: {
     artifactPreview?.status
   ]);
 
+  function clearIssue() {
+    setError('');
+    setYtDlpRecoveryError('');
+    setYtDlpUpdateNetworkFailure(false);
+  }
+
   function updateUrl(value: string) {
     const sourceUrl = extractDouyinShareUrl(value);
     setUrl(sourceUrl);
@@ -303,14 +348,14 @@ export default function VideoDownloadWorkspace(props: {
     setCurrentStep(0);
     setResultTab('formats');
     setNotice('');
-    setError('');
+    clearIssue();
     session?.updateDraft({
       sourceUrl,
       selectedOptionId: null
     });
   }
 
-  async function analyze() {
+  async function analyze(): Promise<CreatorJob | undefined> {
     if (probing || hasActiveDownloads) return;
     if (!validUrl) {
       setError(l(
@@ -326,15 +371,12 @@ export default function VideoDownloadWorkspace(props: {
       ));
       return;
     }
-    setError('');
+    clearIssue();
     setNotice('');
-    session.updateDraft({
-      sourceUrl: url.trim(),
-      selectedOptionId: null
-    }, { semantic: true });
+    session.updateDraft({ sourceUrl: url.trim(), selectedOptionId: null }, { semantic: true });
     try {
       await session.flush();
-      await session.applyAction({
+      const job = await session.applyAction({
         actor: 'user',
         action: 'run-stage',
         input: { stageId: 'probe' }
@@ -343,8 +385,12 @@ export default function VideoDownloadWorkspace(props: {
         '解析任务已提交，真实规格返回后会自动显示',
         'Analysis started. Available formats will appear automatically.'
       ));
+      return job;
     } catch (caught) {
-      setError(formatDownloadError(caught, l));
+      const message = formatDownloadError(caught, l);
+      setLocalRecovery({ message, code: recoveryCodeFromError(caught) });
+      setError(message);
+      return;
     }
   }
 
@@ -369,7 +415,7 @@ export default function VideoDownloadWorkspace(props: {
   function selectOption(option: DownloadOption) {
     setMediaType(option.mediaType);
     setSelectedOptionId(option.id);
-    setError('');
+    clearIssue();
     if (legacy) {
       session?.updateDraft({
         mediaType: option.mediaType,
@@ -394,10 +440,11 @@ export default function VideoDownloadWorkspace(props: {
       return;
     }
     submittingOptionIdsRef.current.add(option.id);
+    workspaceRequestedOptionIdsRef.current.add(option.id);
     setSubmittingOptionIds(new Set(submittingOptionIdsRef.current));
     setMediaType(option.mediaType);
     setSelectedOptionId(option.id);
-    setError('');
+    clearIssue();
     setNotice('');
     const sourceUrl = probe?.requestedUrl ?? url.trim();
     const work = downloadSubmissionTailRef.current
@@ -413,14 +460,13 @@ export default function VideoDownloadWorkspace(props: {
             sourceUrl
           }
         });
-        setResultTab('outputs');
-        setNotice(l(
-          '下载任务已加入队列，完成后文件会保存到当前项目',
-          'Download queued. The file will be saved to this project.'
-        ));
+        setResultTab('formats');
       })
       .catch(caught => {
-        setError(formatDownloadError(caught, l));
+        workspaceRequestedOptionIdsRef.current.delete(option.id);
+        const message = formatDownloadError(caught, l);
+        setLocalRecovery({ message, code: recoveryCodeFromError(caught) });
+        setError(message);
       })
       .finally(() => {
         submittingOptionIdsRef.current.delete(option.id);
@@ -433,7 +479,7 @@ export default function VideoDownloadWorkspace(props: {
     if (session === null || probeArtifact === undefined || probe?.thumbnailUrl == null || thumbnailDownloadPendingRef.current) return;
     thumbnailDownloadPendingRef.current = true;
     setThumbnailDownloading(true);
-    setError('');
+    clearIssue();
     try {
       const response = await session.openDownloadThumbnail(probeArtifact.id);
       if (!response.ok) throw new Error('thumbnail_download_failed');
@@ -458,7 +504,7 @@ export default function VideoDownloadWorkspace(props: {
     }
   }
 
-  async function downloadArtifact(artifact: CreatorArtifact) {
+  async function saveArtifactLocally(artifact: CreatorArtifact) {
     try {
       const owner = artifactSession(artifact);
       const objectUrl = await createCreatorArtifactObjectUrl(
@@ -472,7 +518,7 @@ export default function VideoDownloadWorkspace(props: {
       link.download = artifactFileName(artifact);
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
-      setNotice(l('文件下载已开始', 'File download started'));
+      setNotice('');
     } catch (caught) {
       setError(formatDownloadError(caught, l));
     }
@@ -555,10 +601,32 @@ export default function VideoDownloadWorkspace(props: {
     });
   }
 
+  function downloadSession(item: DownloadHistoryItem) {
+    return item.ownerJobId === undefined ? session : props.batch?.resolveSession(item.ownerJobId);
+  }
+
+  async function controlDownload(item: DownloadHistoryItem, action: 'pause' | 'resume' | 'cancel') {
+    const owner = downloadSession(item);
+    const stage = item.stage;
+    if (!owner?.controlDownload || !stage || downloadControlsRef.current.has(stage.id)) return;
+    downloadControlsRef.current.add(stage.id);
+    setDownloadControlsPending(new Set(downloadControlsRef.current));
+    clearIssue();
+    setNotice('');
+    try {
+      await owner.controlDownload(stage.id, action);
+    } catch (caught) {
+      setError(formatDownloadError(caught, l));
+    } finally {
+      downloadControlsRef.current.delete(stage.id);
+      setDownloadControlsPending(new Set(downloadControlsRef.current));
+    }
+  }
+
   async function cancelTask() {
     if (session === null || activeStage === undefined || taskControlPending) return;
     setTaskControlPending('canceling');
-    setError('');
+    clearIssue();
     try {
       await session.cancelJob();
     } catch (caught) {
@@ -571,7 +639,7 @@ export default function VideoDownloadWorkspace(props: {
   async function resumeTask() {
     if (session === null || resumableStage === undefined || taskControlPending) return;
     setTaskControlPending('resuming');
-    setError('');
+    clearIssue();
     try {
       await session.resumeJob();
     } catch (caught) {
@@ -590,8 +658,7 @@ export default function VideoDownloadWorkspace(props: {
       return;
     }
     const previousVersion = props.runtimeDependencies.ytDlpStatus?.currentVersion;
-    setYtDlpRecoveryError('');
-    setError('');
+    clearIssue();
     setNotice('');
     try {
       const status = await props.runtimeDependencies.updateYtDlp();
@@ -608,8 +675,10 @@ export default function VideoDownloadWorkspace(props: {
             'yt-dlp is current and the task was retried'
           ));
     } catch (caught) {
-      session?.captureCreatorFailure('video-download.update-yt-dlp', caught, formatYtDlpUpdateError(caught, l));
-      setYtDlpRecoveryError(formatYtDlpUpdateError(caught, l));
+      const message = formatYtDlpUpdateError(caught, l);
+      session?.captureCreatorFailure('video-download.update-yt-dlp', caught, message);
+      setYtDlpUpdateNetworkFailure(/creator_yt_dlp_update_download_failed/i.test(caught instanceof Error ? caught.message : String(caught)));
+      setYtDlpRecoveryError(message);
     }
   }
 
@@ -651,6 +720,58 @@ export default function VideoDownloadWorkspace(props: {
     setResultTab('outputs');
   }
 
+  if (props.embedded && probe === undefined && !showFailureWorkbench) {
+    return (
+      <div className="creator-tool-embedded">
+        <div className="creator-tool-stack image-generation-studio">
+          <form className="image-generation-composer dashboard-download-composer" aria-label={l('视频下载', 'Video Downloader')} onSubmit={event => {
+            event.preventDefault();
+            void analyze().then(job => {
+              if (job !== undefined && mountedRef.current) props.onGenerated?.(job);
+            });
+          }}>
+            <fieldset className="image-generation-fields" disabled={probing || hasActiveDownloads}>
+              <div className="image-generation-editor">
+                <div className="image-generation-composer-heading">{props.embeddedTabs}</div>
+                <div className="image-generation-prompt-field dashboard-download-url-field">
+                  <label className="image-generation-visually-hidden" htmlFor="dashboard-download-video-url">{l('视频链接', 'Video link')}</label>
+                  <div className="dashboard-translation-url-input dashboard-download-url-input">
+                    <Link2 size={18} strokeWidth={1.8} aria-hidden="true" />
+                    <input
+                      id="dashboard-download-video-url"
+                      type="url"
+                      aria-label={l('视频链接', 'Video link')}
+                      placeholder={l('粘贴视频链接', 'Paste a video URL')}
+                      value={url}
+                      onChange={event => updateUrl(event.target.value)}
+                    />
+                    {url ? (
+                      <button className="dashboard-translation-url-clear" type="button" aria-label={l('清除视频链接', 'Clear video link')} title={l('清除视频链接', 'Clear video link')} onClick={() => updateUrl('')}>
+                        <XCircle size={16} strokeWidth={1.8} />
+                      </button>
+                    ) : null}
+                  </div>
+                  <SupportedVideoSources compact label={l('支持平台', 'Supported platforms')} />
+                  <p className={error ? 'dashboard-translation-message is-error' : 'dashboard-translation-message'} role={error ? 'alert' : undefined}>
+                    {error || notice || l('支持公开视频、音频及字幕下载', 'Download public videos, audio, and subtitles')}
+                  </p>
+                </div>
+              </div>
+              <div className="image-generation-action-bar dashboard-download-action-bar">
+                <div className="image-generation-submit-row">
+                  <button className="creator-tool-primary" type="submit" disabled={probing || hasActiveDownloads}>
+                    {probing ? <LoaderCircle className="smart-dubbing-spinner" size={16} /> : <Download size={16} strokeWidth={1.8} />}
+                    {probing ? l('正在解析', 'Analyzing') : l('获取', 'Fetch')}
+                  </button>
+                </div>
+              </div>
+            </fieldset>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   const resultToolbar = (
     <div className="video-result-toolbar video-download-result-toolbar">
       <div className="video-result-tabs" role="tablist" aria-label={l('下载结果类型', 'Download result types')}>
@@ -670,7 +791,8 @@ export default function VideoDownloadWorkspace(props: {
   return (
     <CreatorToolShell
       title={l('视频下载', 'Video Downloader')}
-      pageClassName="video-download-workspace-page"
+      pageClassName={showFailureWorkbench ? 'video-download-workspace-page video-download-failure-page' : 'video-download-workspace-page'}
+      showAgentPanel={showFailureWorkbench}
       subtitle={l(
         '解析公开链接并把视频或音频保存到项目',
         'Analyze a public link and save video or audio to the project'
@@ -705,19 +827,24 @@ export default function VideoDownloadWorkspace(props: {
         : activeStage?.stageId === 'download'
           ? l('下载到项目', 'Download to project')
           : l('视频下载', 'Video download')}
-      currentIssue={currentIssue}
-      quickActions={ytDlpUpdateSuggested ? [{
+      currentIssue={showFailureWorkbench ? currentIssue : undefined}
+      workspaceIssue={showWorkspaceIssue ? {
+        title: failedStage?.stageId === 'probe' || probe === undefined
+          ? recoveryCopy.analysisFailed : recoveryCopy.downloadFailed,
+        description: currentIssue,
+        settingsLink: issueSettingsLink,
+        actions: ytDlpUpdateSuggested ? <div className="issue-presenter-actions">
+          <button type="button" disabled={props.runtimeDependencies?.phase !== 'idle'} onClick={() => void updateYtDlpAndRetry()}>
+            {ytDlpRecoveryError ? l('重试更新', 'Retry update') : l('更新并重试', 'Update and retry')}
+          </button>
+        </div> : undefined
+      } : undefined}
+      quickActions={!showWorkspaceIssue && ytDlpUpdateSuggested ? [{
         id: 'update-yt-dlp',
         label: ytDlpRecoveryError ? l('重试更新', 'Retry update') : l('更新并重试', 'Update and retry'),
         kind: 'action',
         onAction: () => void updateYtDlpAndRetry(),
         disabled: props.runtimeDependencies?.phase !== 'idle'
-      }, {
-        id: 'open-runtime-components',
-        label: l('前往第三方组件', 'Open third-party components'),
-        kind: 'action',
-        onAction: props.onOpenRuntimeComponents,
-        disabled: props.onOpenRuntimeComponents === undefined
       }] : undefined}
       onCancelTask={activeStage === undefined ? undefined : cancelTask}
       onResumeTask={resumableStage === undefined ? undefined : resumeTask}
@@ -915,6 +1042,7 @@ export default function VideoDownloadWorkspace(props: {
                             const running = stage?.status === 'running';
                             const normalizing = running
                               && stage.progress.phase === 'normalizing_media';
+                            const percent = downloadProgressPercent(stage, undefined);
                             const inProgress = queued || running;
                             return (
                               <label
@@ -939,10 +1067,10 @@ export default function VideoDownloadWorkspace(props: {
                                 {downloaded ? (
                                   <span
                                     className="video-download-option-complete"
-                                    aria-label={`${l('已完成', 'Completed')} ${optionLabel(option, l)}`}
+                                    aria-label={`OK ${optionLabel(option, l)}`}
                                   >
                                     <CheckCircle2 size={16} strokeWidth={1.9} aria-hidden="true" />
-                                    {l('已完成', 'Completed')}
+                                    OK
                                   </span>
                                 ) : (
                                   <button
@@ -954,6 +1082,7 @@ export default function VideoDownloadWorkspace(props: {
                                     {inProgress
                                       ? <LoaderCircle className="smart-dubbing-spinner" size={16} />
                                       : <Download size={16} strokeWidth={1.8} aria-hidden="true" />}
+                                    {running && !normalizing ? <span className="video-download-option-progress">{Math.round(percent)}%</span> : null}
                                     {normalizing
                                       ? l('转换中', 'Converting')
                                       : running
@@ -1007,7 +1136,15 @@ export default function VideoDownloadWorkspace(props: {
                           ? stage?.status ?? 'queued'
                           : 'succeeded';
                         const percent = downloadProgressPercent(stage, artifact);
-                        const preparing = status === 'running'
+                        const active = status === 'queued' || status === 'running';
+                        const paused = stage?.progress.downloadControl === 'paused' && (status === 'running' || status === 'interrupted');
+                        const resumable = paused || ((status === 'canceled' || status === 'interrupted') && stage?.progress.downloadControl !== 'canceled');
+                        const controllable = !legacy && stage !== undefined && downloadSession(item)?.controlDownload !== undefined;
+                        const controlPending = stage !== undefined && (downloadControlsPending.has(stage.id)
+                          || (active && stage.progress.cancelRequested === true));
+                        const restoring = status === 'running' && !paused && stage?.progress.phase === 'preparing_download'
+                          && typeof stage.progress.resumedFromStageRunId === 'string';
+                        const preparing = !paused && !restoring && status === 'running'
                           && stage?.progress.phase === 'preparing_download';
                         const previewOpen = artifact !== undefined
                           && artifactPreview?.artifactId === artifact.id;
@@ -1020,7 +1157,7 @@ export default function VideoDownloadWorkspace(props: {
                             ? <h3 className="video-download-work-source">{item.sourceTitle}</h3> : null}
                           <div
                             className="video-result-file-row video-download-progress-row"
-                            data-status={status}
+                            data-status={paused ? 'paused' : status}
                             key={artifact?.id ?? stage?.id ?? `${option?.id ?? 'download'}-${index}`}
                           >
                             <span aria-hidden="true">
@@ -1037,7 +1174,7 @@ export default function VideoDownloadWorkspace(props: {
                                   ? downloadStageDescription(stage, option, l)
                                   : artifactDescription(artifact, l)}
                               </small>
-                              {status === 'queued' || status === 'running' ? (
+                              {active || resumable ? (
                                 <div
                                   className="video-download-row-progress"
                                   data-indeterminate={preparing || undefined}
@@ -1061,17 +1198,36 @@ export default function VideoDownloadWorkspace(props: {
                               ) : null}
                             </div>
                             {artifact === undefined ? (
+                              <div className="video-download-row-controls">
                               <span className="video-download-row-status">
-                                {status === 'failed'
+                                {active && stage?.progress.cancelRequested === true
+                                  ? stage.progress.downloadControl === 'paused' ? l('暂停中', 'Pausing') : l('取消中', 'Canceling')
+                                  : paused ? l('已暂停', 'Paused') : status === 'failed'
                                   ? l('失败', 'Failed')
                                   : status === 'canceled'
-                                    ? l('已取消', 'Canceled')
+                                    ? resumable ? l('已停止', 'Stopped') : l('已取消', 'Canceled')
                                     : status === 'interrupted'
                                       ? l('已中断', 'Interrupted')
                                       : preparing
                                         ? l('准备中', 'Preparing')
                                         : `${Math.round(percent)}%`}
                               </span>
+                              {paused ? <span className="video-download-row-status">{Math.round(percent)}%</span> : null}
+                              {controllable && (active || resumable) ? <>
+                                <button type="button" disabled={controlPending}
+                                  onClick={() => void controlDownload(item, resumable ? 'resume' : 'pause')}
+                                  aria-label={`${resumable ? l('继续下载', 'Resume download') : l('暂停下载', 'Pause download')} ${downloadPendingTitle(item.sourceTitle ?? probe?.title ?? url, option, l)}`}>
+                                  {controlPending ? <LoaderCircle size={14} className="smart-dubbing-spinner" />
+                                    : resumable ? <Play size={14} /> : <Pause size={14} />}
+                                  {resumable ? l('继续', 'Resume') : l('暂停', 'Pause')}
+                                </button>
+                                <button type="button" disabled={controlPending} className="video-download-cancel-button"
+                                  onClick={() => void controlDownload(item, 'cancel')}
+                                  aria-label={`${l('取消下载', 'Cancel download')} ${downloadPendingTitle(item.sourceTitle ?? probe?.title ?? url, option, l)}`}>
+                                  {l('取消', 'Cancel')}
+                                </button>
+                              </> : null}
+                              </div>
                             ) : (
                               <div className="video-download-file-actions">
                                 {artifact.kind !== 'source_subtitle' ? <button
@@ -1096,7 +1252,7 @@ export default function VideoDownloadWorkspace(props: {
                                 </button> : null}
                                 <button
                                   type="button"
-                                  onClick={() => void downloadArtifact(artifact)}
+                                  onClick={() => void saveArtifactLocally(artifact)}
                                   aria-label={`${l('保存到本机', 'Save locally')} ${fileName}`}
                                   title={l('保存到本机', 'Save locally')}
                                 >
@@ -1199,6 +1355,13 @@ export default function VideoDownloadWorkspace(props: {
       </div>
     </CreatorToolShell>
   );
+}
+
+export function hasDownloadFormats(job: CreatorJob): boolean {
+  const sourceUrl = readString(job.state.sourceUrl);
+  if (sourceUrl === undefined) return false;
+  const artifact = latestMatchingProbe(job.artifacts, sourceUrl);
+  return artifact !== undefined && (readDownloadProbe(artifact.metadata)?.options.length ?? 0) > 0;
 }
 
 function latestMatchingProbe(
@@ -1417,7 +1580,7 @@ function downloadProgressPercent(
   if (artifact !== undefined || stage?.status === 'succeeded') return 100;
   const percent = readNumber(stage?.progress.percent);
   if (percent === undefined) return 0;
-  return Math.min(100, Math.max(0, percent));
+  return Math.min(100, Math.max(0, Math.round(percent)));
 }
 
 function downloadPendingTitle(
@@ -1436,18 +1599,32 @@ function downloadStageDescription(
   l: ReturnType<typeof useLocalizedCopy>
 ): string {
   const detail = option === undefined ? undefined : optionDetail(option, l);
-  const status = stage === undefined || stage.status === 'queued'
+  const status = stage?.progress.downloadControl === 'paused' && stage.progress.cancelRequested !== true
+    && (stage.status === 'running' || stage.status === 'interrupted')
+    ? l('下载已暂停，可继续下载', 'Download paused. Resume when ready.')
+    : stage === undefined || stage.status === 'queued'
     ? l('等待前面的规格下载完成', 'Waiting for earlier formats')
     : stage.status === 'running'
-      ? downloadPhaseLabel(stage, l)
+      ? stage.progress.cancelRequested === true
+        ? stage.progress.downloadControl === 'paused' ? l('正在暂停下载', 'Pausing download') : l('正在取消下载', 'Canceling download')
+        : downloadPhaseLabel(stage, l)
       : stage.status === 'succeeded'
         ? l('已保存到项目', 'Saved to project')
         : stage.status === 'failed'
           ? l('下载未完成', 'Download did not complete')
-          : stage.status === 'canceled'
-            ? l('下载已取消，可返回规格列表重新提交', 'Canceled. Submit it again from formats.')
-            : l('下载已中断，可返回规格列表重新提交', 'Interrupted. Submit it again from formats.');
-  return [detail, status].filter(Boolean).join(' · ');
+          : stage.progress.downloadControl === 'paused'
+            ? l('下载已暂停，可继续下载', 'Download paused. Resume when ready.')
+            : stage.progress.downloadControl === 'canceled'
+              ? l('下载已取消', 'Download canceled')
+              : l('下载已停止，可继续下载', 'Download stopped. Resume when ready.');
+  const bytesPerSecond = stage?.status === 'running' && stage.progress.downloadControl !== 'paused'
+    && stage.progress.phase === 'downloading' && stage.progress.cancelRequested !== true
+    ? readNumber(stage.progress.bytesPerSecond)
+    : undefined;
+  const speed = bytesPerSecond !== undefined && bytesPerSecond >= 0
+    ? `${formatBytes(bytesPerSecond)}/s`
+    : undefined;
+  return [detail, status, speed].filter(Boolean).join(' · ');
 }
 
 function downloadPhaseLabel(
@@ -1456,7 +1633,9 @@ function downloadPhaseLabel(
 ): string {
   switch (stage.progress.phase) {
     case 'preparing_download':
-      return l('正在准备下载', 'Preparing download');
+      return typeof stage.progress.resumedFromStageRunId === 'string'
+        ? l('正在恢复下载', 'Reconnecting to resume download')
+        : l('正在准备下载', 'Preparing download');
     case 'merging_media':
       return l('正在合并音视频', 'Merging video and audio');
     case 'extracting_audio':
@@ -1471,6 +1650,7 @@ function downloadPhaseLabel(
 }
 
 function downloadHistoryIcon(item: DownloadHistoryItem) {
+  if (item.stage?.progress.downloadControl === 'paused' && ['running', 'interrupted'].includes(item.stage.status)) return <Pause size={18} />;
   if (item.artifact !== undefined) {
     if (item.artifact.kind === 'source_subtitle') return <Subtitles size={18} strokeWidth={1.7} />;
     return item.artifact.kind === 'source_audio'
@@ -1646,7 +1826,7 @@ function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
   const unit = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(1_024)),
+    Math.max(0, Math.floor(Math.log(bytes) / Math.log(1_024))),
     units.length - 1
   );
   const value = bytes / 1_024 ** unit;
@@ -1682,7 +1862,24 @@ function readNumber(value: CreatorJson | undefined): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function formatDownloadError(
+function downloadIssueSettingsLink(
+  code: string | null | undefined,
+  returnPath: string,
+  checkProxyLabel: string,
+  l: ReturnType<typeof useLocalizedCopy>
+) {
+  if (code === 'network_unavailable') return {
+    href: `#/settings?${new URLSearchParams({ returnPath })}`,
+    label: checkProxyLabel
+  };
+  if (code === 'yt_dlp_update_recommended') return {
+    href: `#/settings?${new URLSearchParams({ tab: 'local-components', returnPath })}`,
+    label: l('第三方组件', 'Third-party Components')
+  };
+  return undefined;
+}
+
+export function formatDownloadError(
   caught: unknown,
   l: ReturnType<typeof useLocalizedCopy>
 ): string {
@@ -1736,6 +1933,13 @@ function formatDownloadError(
     );
   }
   return l('视频下载失败，请在 Agent 区域查看诊断后重试', 'Video download failed. Review the diagnosis in the Agent panel and retry.');
+}
+
+function recoveryCodeFromError(caught: unknown): string | undefined {
+  const message = caught instanceof Error ? caught.message : String(caught);
+  if (/network_unavailable/i.test(message)) return 'network_unavailable';
+  if (/yt_dlp_update_recommended/i.test(message)) return 'yt_dlp_update_recommended';
+  return undefined;
 }
 
 function shouldSuggestYtDlpUpdate(stage: CreatorStageRun | undefined): boolean {
