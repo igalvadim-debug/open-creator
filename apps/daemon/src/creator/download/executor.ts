@@ -8,7 +8,7 @@ import type {
   DownloadOption,
   DownloadProbe
 } from '@opencreator/protocol';
-import { extractDouyinShareUrl, normalizeVideoSourceUrl, supportedVideoSourcePlatform, parseBilibiliVideoSource, videoSourceIdentity, sanitizePublicErrorFacts } from '@opencreator/protocol';
+import { extractDouyinShareUrl, normalizeVideoSourceUrl, supportedVideoSourcePlatform, parseBilibiliVideoSource, videoSourceIdentity } from '@opencreator/protocol';
 import { creatorResultSnapshotForVersion } from '../result-snapshots.js';
 import type {
   CreatorExecutor,
@@ -17,11 +17,12 @@ import type {
 } from '../executor.js';
 import type { CreatorServicesConfigStore } from '../../creator-services/config-store.js';
 import { CreatorExecutorError } from '../executor.js';
-import { sanitizeIssueDetail } from '../issues.js';
 import { spawnCreatorProcess } from '../process-tree.js';
 import { validateMediaFile } from '../validators/media.js';
 import { validateSrtFile } from '../validators/srt.js';
 import { withYtDlpProxy } from '../yt-dlp/args.js';
+import { classifyYtDlpFailure } from '../yt-dlp/failure.js';
+import { attachFailureDiagnostic, processFailureDiagnostic } from '../../telemetry/diagnostic.js';
 import type { YtDlpRuntime } from '../yt-dlp/runtime.js';
 import { parseDownloadProbe } from './probe-parser.js';
 
@@ -50,6 +51,10 @@ type PlaybackOutput = PlaybackCodecs & {
 };
 
 const YT_DLP_UTF8_ARGS = ['--encoding', 'utf-8'];
+const PREVIEW_DOWNLOAD_END = 75;
+const PREVIEW_MERGE_PERCENT = 77;
+const PREVIEW_VALIDATING_PERCENT = 79;
+const PREVIEW_CONVERSION_START = 80;
 
 function isPreviewStage(stage: CreatorExecutorInput): boolean {
   return stage.stageRun.stageId === 'prepare-source-video' || stage.stageRun.stageId === 'preview-source-video';
@@ -60,6 +65,7 @@ export function createDownloadExecutor(
 ): CreatorExecutor {
   return {
     id: 'download',
+    supportsProcessPause: true,
     async run(stage) {
       if (stage.job.templateId === 'video-translation' && isPreviewStage(stage)) {
         return preparePreviewSource(input, stage);
@@ -216,7 +222,7 @@ async function downloadSelectedOption(
   stage.reportProgress({
     status: 'running',
     phase: 'preparing_download',
-    percent: 2,
+    percent: typeof stage.stageRun.progress.percent === 'number' ? stage.stageRun.progress.percent : 2,
     message: 'Preparing the selected format'
   });
   const outputTemplate = join(
@@ -282,6 +288,7 @@ async function downloadSelectedOption(
     status: 'succeeded',
     phase: 'completed',
     percent: 100,
+    phasePercent: 100,
     message: option.mediaType === 'audio'
       ? 'Audio downloaded to the project'
       : 'Video downloaded to the project'
@@ -421,6 +428,7 @@ async function preparePreviewSource(
         progress: {
           phase: 'completed',
           percent: 100,
+          phasePercent: 100,
           message: 'Source video is ready; existing subtitles are preserved'
         }
       };
@@ -467,7 +475,12 @@ async function downloadPlaybackSource(
         '--progress',
         '--progress-delta',
         '0.5',
-        ...(preview ? ['--progress-template', 'download:oc-preview:%(progress)j'] : []),
+        ...(preview ? [
+          '--print', 'before_dl:oc-preview-formats:%(format_id)s',
+          '--print', 'before_dl:oc-preview-duration:%(duration)s',
+          '--print', 'before_dl:oc-preview-metadata:%(requested_formats.:.{format_id,filesize,filesize_approx,tbr,abr})j',
+          '--progress-template', 'download:[download] %(progress._percent_str)s oc-preview:%(progress)j'
+        ] : []),
         '-f',
         preview ? 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best' : 'bestvideo+bestaudio/best',
         '--merge-output-format',
@@ -496,7 +509,7 @@ async function downloadPlaybackSource(
   stage.reportProgress({
     status: 'running',
     phase: 'validating_output',
-    percent: preview ? null : 97,
+    percent: preview ? PREVIEW_VALIDATING_PERCENT : 97,
     message: preview ? 'Checking the video for subtitle preview' : 'Checking the YouTube source'
   });
   const output = await normalizeVideoForPlayback(
@@ -518,6 +531,7 @@ async function downloadPlaybackSource(
     status: 'succeeded',
     phase: 'completed',
     percent: 100,
+    phasePercent: 100,
     message: preview ? 'Source video is ready; existing subtitles are preserved' : 'YouTube source downloaded'
   };
   stage.reportProgress(progress);
@@ -550,7 +564,57 @@ async function downloadPlaybackSource(
 }
 
 function createPreviewProgressReporter(stage: CreatorExecutorInput): (line: string) => void {
+  type PreviewResource = {
+    bytes: number;
+    total: number | null;
+    percent: number | null;
+  };
+
+  const resources = new Map<string, PreviewResource>();
+  let anonymousResourceKey = 'anonymous:0';
+  let reportedPercent = 2;
+  let expectedResourceCount: number | null = null;
+  let selectedFormats: Array<Record<string, unknown>> | null = null;
+  let duration: number | null = null;
+
+  const selectedFormatSizes = (): Array<{ bytes: number; estimated: boolean }> | null => {
+    if (selectedFormats === null) return null;
+    const sizes = selectedFormats.map(format => {
+      const exact = positiveNumber(format.filesize);
+      if (exact !== null) return { bytes: exact, estimated: false };
+      const approximate = positiveNumber(format.filesize_approx);
+      if (approximate !== null) return { bytes: approximate, estimated: true };
+      const bytes = estimatedDownloadFormatBytes(null,
+        positiveNumber(format.tbr) ?? positiveNumber(format.abr), duration);
+      return bytes > 0 ? { bytes, estimated: true } : null;
+    });
+    return sizes.every((size): size is { bytes: number; estimated: boolean } => size !== null)
+      ? sizes : null;
+  };
+
   return line => {
+    if (line.startsWith('oc-preview-formats:')) {
+      const formatIds = line.slice('oc-preview-formats:'.length).trim();
+      expectedResourceCount = formatIds && formatIds !== 'NA'
+        ? formatIds.split('+').length
+        : null;
+      return;
+    }
+    if (line.startsWith('oc-preview-duration:')) {
+      duration = positiveNumber(Number(line.slice('oc-preview-duration:'.length)));
+      return;
+    }
+    if (line.startsWith('oc-preview-metadata:')) {
+      try {
+        const formats = JSON.parse(line.slice('oc-preview-metadata:'.length)) as unknown;
+        if (Array.isArray(formats) && formats.length > 0) {
+          expectedResourceCount = formats.length;
+          selectedFormats = formats.every(format => typeof format === 'object' && format !== null && !Array.isArray(format))
+            ? formats as Array<Record<string, unknown>> : null;
+        }
+      } catch {}
+      return;
+    }
     const marker = line.indexOf('oc-preview:');
     if (marker >= 0) {
       try {
@@ -558,25 +622,86 @@ function createPreviewProgressReporter(stage: CreatorExecutorInput): (line: stri
         const bytes = typeof data.downloaded_bytes === 'number' && Number.isFinite(data.downloaded_bytes)
           ? Math.max(0, data.downloaded_bytes)
           : 0;
-        const total = typeof data.total_bytes === 'number' && Number.isFinite(data.total_bytes) && data.total_bytes > 0
+        const unboundedFragment = data.fragment_index !== undefined
+          && positiveNumber(data.fragment_count) === null
+          && data.status !== 'finished';
+        const total = unboundedFragment ? null
+          : typeof data.total_bytes === 'number' && Number.isFinite(data.total_bytes) && data.total_bytes > 0
           ? data.total_bytes
           : typeof data.total_bytes_estimate === 'number' && Number.isFinite(data.total_bytes_estimate) && data.total_bytes_estimate > 0
             ? data.total_bytes_estimate
             : null;
+        const identifiedKey = previewResourceKey(data);
+        let resourceKey = identifiedKey ?? anonymousResourceKey;
+        const previous = resources.get(resourceKey);
+        if (identifiedKey === null
+          && previous !== undefined
+          && previous.percent !== null
+          && previous.percent >= 99
+          && bytes < previous.bytes) {
+          resourceKey = `anonymous:${resources.size}`;
+          anonymousResourceKey = resourceKey;
+        }
+        const existing = resources.get(resourceKey);
+        const partPercent = unboundedFragment ? null : parseDownloadPartPercent(line);
+        const resource: PreviewResource = {
+          bytes: Math.max(existing?.bytes ?? 0, bytes),
+          total: unboundedFragment ? null : total ?? existing?.total ?? null,
+          percent: unboundedFragment ? null
+            : total === null ? partPercent ?? existing?.percent ?? null : Math.min(100, Math.max(0, bytes / total * 100))
+        };
+        resources.set(resourceKey, resource);
+        const currentResources = [...resources.values()];
+        const downloadedBytes = currentResources
+          .reduce((sum, current) => sum + current.bytes, 0);
+        const knownTotals = currentResources.map(current => current.total);
+        const selectedSizes = selectedFormatSizes();
+        const measuredSizes = selectedSizes !== null && currentResources.length <= selectedSizes.length
+          ? selectedSizes.map(size => size.bytes) : null;
+        const totalBytes = measuredSizes !== null
+          ? measuredSizes.reduce((sum, size) => sum + size, 0)
+          : currentResources.length === expectedResourceCount && knownTotals.every(current => current !== null)
+            ? knownTotals.reduce((sum, current) => sum + (current ?? 0), 0)
+            : null;
+        const weights = measuredSizes ?? Array.from({ length: Math.max(expectedResourceCount ?? 1, currentResources.length) }, () => 1);
+        const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+        const completedWeight = currentResources.reduce((sum, current, index) => {
+          const resourceTotal = current.total ?? measuredSizes?.[index] ?? null;
+          const fraction = measuredSizes !== null
+            ? current.bytes / measuredSizes[index]!
+            : current.percent === null
+              ? resourceTotal === null ? 0 : current.bytes / resourceTotal
+              : current.percent / 100;
+          return sum + weights[index]! * Math.min(1, fraction);
+        }, 0);
+        if (totalBytes !== null) {
+          reportedPercent = Math.max(reportedPercent,
+            scaledDownloadPercent(completedWeight, totalWeight, PREVIEW_DOWNLOAD_END));
+        }
         stage.reportProgress({
           phase: 'downloading',
-          percent: total === null ? null : Math.min(100, Math.max(0, bytes / total * 100)),
+          percent: totalBytes === null ? null : reportedPercent,
           message: 'Downloading the current original-video resource; existing subtitles are preserved',
-          downloadedBytes: bytes,
-          totalBytes: total
+          downloadedBytes,
+          totalBytes,
+          totalBytesEstimated: measuredSizes !== null && selectedSizes?.some(size => size.estimated) === true
         });
       } catch {}
       return;
     }
     if (/\[(?:Merger|VideoRemuxer)\]/.test(line)) {
-      stage.reportProgress({ phase: 'merging_media', percent: null, message: 'Merging video and audio for subtitle preview' });
+      reportedPercent = Math.max(reportedPercent, PREVIEW_MERGE_PERCENT);
+      stage.reportProgress({ phase: 'merging_media', percent: reportedPercent, message: 'Merging video and audio for subtitle preview' });
     }
   };
+}
+
+function previewResourceKey(data: Record<string, unknown>): string | null {
+  for (const field of ['format_id', 'format', 'filename', 'tmpfilename']) {
+    const value = data[field];
+    if (typeof value === 'string' && value.trim()) return `resource:${value}`;
+  }
+  return null;
 }
 
 async function downloadLegacy(
@@ -661,8 +786,10 @@ async function downloadLegacy(
 }
 
 async function readProbe(stage: CreatorExecutorInput): Promise<DownloadProbe> {
-  const probeArtifact = stage.inputArtifacts.find(
+  const pinnedProbeId = stage.stageRun.progress.probeArtifactId;
+  const probeArtifact = (typeof pinnedProbeId === 'string' ? stage.job.artifacts : stage.inputArtifacts).find(
     artifact => artifact.kind === 'download_probe'
+      && (typeof pinnedProbeId !== 'string' || artifact.id === pinnedProbeId)
   );
   if (probeArtifact?.path === null || probeArtifact?.path === undefined) {
     throw new CreatorExecutorError(
@@ -705,16 +832,19 @@ function estimatedProbeFormatBytes(
 ): number {
   const format = probe.formats.find(candidate => candidate.id === formatId);
   if (format === undefined) return 0;
-  if (format.bytes !== null && format.bytes > 0) return format.bytes;
-  if (
-    probe.duration === null
-    || format.bitrateKbps === null
-    || probe.duration <= 0
-    || format.bitrateKbps <= 0
-  ) {
-    return 0;
-  }
-  return probe.duration * format.bitrateKbps * 1_000 / 8;
+  return estimatedDownloadFormatBytes(format.bytes, format.bitrateKbps, probe.duration);
+}
+
+function positiveNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function estimatedDownloadFormatBytes(bytes: number | null, bitrateKbps: number | null, duration: number | null): number {
+  const knownBytes = positiveNumber(bytes);
+  if (knownBytes !== null) return knownBytes;
+  const rate = positiveNumber(bitrateKbps);
+  const seconds = positiveNumber(duration);
+  return rate === null || seconds === null ? 0 : seconds * rate * 1_000 / 8;
 }
 
 function audioDownloadArgs(
@@ -734,6 +864,7 @@ function audioDownloadArgs(
     '--no-playlist',
     ...(option.playlistIndex === undefined ? [] : ['--playlist-items', String(option.playlistIndex)]),
     '--newline',
+    '--continue',
     '--windows-filenames',
     '--ffmpeg-location',
     ffmpegPath,
@@ -775,6 +906,7 @@ function videoDownloadArgs(
     '--no-playlist',
     ...(option.playlistIndex === undefined ? [] : ['--playlist-items', String(option.playlistIndex)]),
     '--newline',
+    '--continue',
     '--windows-filenames',
     '--ffmpeg-location',
     ffmpegPath,
@@ -875,10 +1007,13 @@ async function normalizeVideoForPlayback(
     );
   }
 
+  const conversionDuration = duration ?? await readMediaDuration(path, input, stage);
+  const conversionStart = isPreviewStage(stage) ? PREVIEW_CONVERSION_START : 98;
   stage.reportProgress({
     status: 'running',
     phase: 'normalizing_media',
-    percent: isPreviewStage(stage) ? null : 98,
+    percent: conversionStart,
+    phasePercent: 0,
     message: 'Converting video for local playback'
   });
   const outputPath = playbackOutputPath(path);
@@ -918,7 +1053,7 @@ async function normalizeVideoForPlayback(
       input.ffmpegPath,
       [...(input.ffmpegPrefixArgs ?? []), ...args],
       stage,
-      line => reportPlaybackConversionProgress(stage, line, duration)
+      line => reportPlaybackConversionProgress(stage, line, conversionDuration)
     );
     await validateMediaFile(
       outputPath,
@@ -950,7 +1085,7 @@ function reportPlaybackConversionProgress(
   line: string,
   duration: number | null
 ): void {
-  if (duration === null || duration <= 0 || isPreviewStage(stage)) return;
+  if (duration === null || duration <= 0) return;
   const match = line.match(/^out_time=(\d+):(\d+):([\d.]+)$/);
   if (match === null) return;
   const elapsed = (
@@ -959,12 +1094,39 @@ function reportPlaybackConversionProgress(
     + Number(match[3])
   );
   if (!Number.isFinite(elapsed)) return;
+  const phasePercent = Math.min(100, Math.max(0, Math.round(elapsed / duration * 100)));
+  const conversionStart = isPreviewStage(stage) ? PREVIEW_CONVERSION_START : 98;
   stage.reportProgress({
     status: 'running',
     phase: 'normalizing_media',
-    percent: Math.min(99, 98 + Math.max(0, elapsed / duration)),
+    percent: Math.min(99, Math.max(conversionStart,
+      Math.round(conversionStart + (99 - conversionStart) * phasePercent / 100))),
+    phasePercent,
     message: 'Converting video for local playback'
   });
+}
+
+async function readMediaDuration(
+  path: string,
+  input: DownloadExecutorOptions,
+  stage: CreatorExecutorInput
+): Promise<number | null> {
+  try {
+    const stdout = await run(input.ffprobePath, [
+      ...(input.ffprobePrefixArgs ?? []),
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration',
+      '-of',
+      'default=noprint_wrappers=1:nokey=1',
+      path
+    ], stage);
+    const duration = Number(stdout.trim());
+    return Number.isFinite(duration) && duration > 0 ? duration : null;
+  } catch {
+    return null;
+  }
 }
 
 async function readPlaybackCodecs(
@@ -1049,12 +1211,11 @@ function createDownloadProgressReporter(
     : [1];
   let completedParts = 0;
   let previousPartPercent = 0;
-  let reportedPercent = 2;
+  let reportedPercent = typeof stage.stageRun.progress.percent === 'number'
+    ? Math.min(95, Math.max(2, Math.round(stage.stageRun.progress.percent))) : 2;
   return line => {
-    const match = line.match(/\[download\]\s+([\d.]+)%/);
-    if (match !== null) {
-      const partPercent = Math.max(0, Math.min(100, Number(match[1])));
-      if (!Number.isFinite(partPercent)) return;
+    const partPercent = parseDownloadPartPercent(line);
+    if (partPercent !== null) {
       if (
         partPercent < previousPartPercent
         && previousPartPercent >= 99
@@ -1070,21 +1231,15 @@ function createDownloadProgressReporter(
         .slice(0, completedParts)
         .reduce((sum, weight) => sum + weight, 0);
       const currentWeight = weights[completedParts] ?? weights.at(-1) ?? 1;
-      const combinedPercent = 2 + (
-        (
-          completedWeight
-          + currentWeight * partPercent / 100
-        )
-        / totalWeight
-      ) * 93;
       reportedPercent = Math.max(
         reportedPercent,
-        Math.min(95, combinedPercent)
+        scaledDownloadPercent(completedWeight + currentWeight * partPercent / 100, totalWeight, 95)
       );
       stage.reportProgress({
         status: 'running',
         phase: 'downloading',
         percent: reportedPercent,
+        bytesPerSecond: parseDownloadByteQuantity(/\bat\s+([\d.]+)\s*([KMGT]?i?B)\/s\b/i.exec(line)),
         message: mediaType === 'audio' ? 'Downloading audio' : 'Downloading video'
       });
       return;
@@ -1111,11 +1266,26 @@ function createDownloadProgressReporter(
   };
 }
 
+function parseDownloadPartPercent(line: string): number | null {
+  const match = /\[download\]\s+([\d.]+)%/.exec(line);
+  if (match === null) return null;
+  const percent = Number(match[1]);
+  return Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
+}
+
+function scaledDownloadPercent(completedWeight: number, totalWeight: number, endPercent: number): number {
+  return Math.min(endPercent, Math.round(2 + completedWeight / totalWeight * (endPercent - 2)));
+}
+
 function parseDownloadTotalBytes(line: string): number | null {
-  const match = /\bof\s+~?\s*([\d.]+)\s*([KMGT]?i?B)\b/i.exec(line);
+  const bytes = parseDownloadByteQuantity(/\bof\s+~?\s*([\d.]+)\s*([KMGT]?i?B)\b/i.exec(line));
+  return bytes !== null && bytes > 0 ? bytes : null;
+}
+
+function parseDownloadByteQuantity(match: RegExpExecArray | null): number | null {
   if (match === null) return null;
   const amount = Number(match[1]);
-  if (!Number.isFinite(amount) || amount <= 0) return null;
+  if (!Number.isFinite(amount) || amount < 0) return null;
   const unit = match[2]!.toLowerCase();
   const multipliers: Record<string, number> = {
     b: 1,
@@ -1128,7 +1298,8 @@ function parseDownloadTotalBytes(line: string): number | null {
     tb: 1_000_000_000_000,
     tib: 1_099_511_627_776
   };
-  return amount * (multipliers[unit] ?? 1);
+  const bytes = amount * (multipliers[unit] ?? 1);
+  return Number.isFinite(bytes) ? bytes : null;
 }
 
 async function safeOutputPath(workdir: string, path: string): Promise<string> {
@@ -1180,13 +1351,15 @@ function printedOutputPath(stdout: string): string | undefined {
   return path;
 }
 
-function run(
+async function run(
   binary: string,
   args: string[],
   stage: CreatorExecutorInput,
   onLine?: (line: string) => void,
   env?: NodeJS.ProcessEnv
 ): Promise<string> {
+  await stage.processControl?.waitUntilResumed();
+  stage.signal.throwIfAborted();
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawnCreatorProcess(binary, args, {
       cwd: stage.workdir,
@@ -1195,7 +1368,19 @@ function run(
         ...env
       },
       stdio: ['ignore', 'pipe', 'pipe']
-    }, stage.signal);
+    }, stage.signal, stage.processControl);
+    const tool = /(?:^|[/\\])ff(?:mpeg|probe)(?:\.exe)?$/i.test(binary) ? 'ffmpeg' : 'yt-dlp';
+    const proxyIndex = args.indexOf('--proxy');
+    const proxy = proxyIndex >= 0 ? args[proxyIndex + 1] ?? ''
+      : env?.HTTPS_PROXY ?? env?.https_proxy ?? process.env.HTTPS_PROXY ?? process.env.https_proxy ?? '';
+    const diagnostic = (output: string, exitCode?: number | null) => processFailureDiagnostic({
+      operation: `${tool}.${stage.stageRun.stageId}`,
+      tool,
+      output,
+      exitCode,
+      proxy,
+      sourceUrl: args.filter(argument => /^https?:\/\//i.test(argument)).at(-1)
+    });
     let stdout = '';
     let stderr = '';
     const stdoutDecoder = new StringDecoder('utf8');
@@ -1224,7 +1409,7 @@ function run(
     child.once('error', error => {
       if (settled) return;
       settled = true;
-      rejectPromise(error);
+      rejectPromise(attachFailureDiagnostic(error, diagnostic(error.message)));
     });
     child.once('close', code => {
       if (settled) return;
@@ -1237,131 +1422,12 @@ function run(
       emitLines(trailingStderr, 'stderr');
       if (stdoutBuffer) onLine?.(stdoutBuffer);
       if (stderrBuffer) onLine?.(stderrBuffer);
-      if (code === 0) resolvePromise(stdout);
-      else rejectPromise(classifyDownloadError(stderr, code));
+      if (code === 0) {
+        void (stage.processControl?.waitUntilResumed() ?? Promise.resolve()).then(() => resolvePromise(stdout), rejectPromise);
+      }
+      else rejectPromise(attachFailureDiagnostic(classifyYtDlpFailure(stderr, code), diagnostic(stderr, code)));
     });
   });
-}
-
-function classifyDownloadError(stderr: string, exitCode: number | null): CreatorExecutorError {
-  const text = stderr.toLowerCase();
-  const douyin = /\[douyin(?:\+[^\]]+)?\]/.test(text);
-  const failure = (
-    code: string,
-    message: string,
-    kind: NonNullable<CreatorExecutorError['publicFacts']>['kind'],
-    httpStatus?: number,
-    upstreamMessage?: string
-  ) => new CreatorExecutorError(code, message, {}, {
-    ...sanitizePublicErrorFacts({ kind, upstreamMessage }),
-    kind,
-    provider: 'yt-dlp',
-    ...(httpStatus === undefined ? {} : { httpStatus })
-  });
-  if (douyin && text.includes('douyin request signature is required')) {
-    return failure('platform_request_signature_required',
-      'Douyin rejected the downloader because its required browser request signature is not supported. Reconnecting cookies alone cannot fix this; use a local video file.',
-      'unsupported', 403, stderr);
-  }
-  if (douyin && (text.includes('fresh cookies') || text.includes('douyin browser identity was rejected'))) {
-    const status = /http error\s+(\d{3})\b/i.exec(stderr);
-    return failure('platform_session_required',
-      'Douyin did not accept the browser session or requires website verification. Reconnect Douyin in Settings > Platform connections and retry; signing in is not necessarily required.',
-      'unauthorized', status === null ? undefined : Number(status[1]), stderr);
-  }
-  if (/bilibili risk control (?:rejected the media request|blocked media extraction)/.test(text)
-    || (text.includes('bilibili risk control') && text.includes('no video formats found'))) {
-    return failure('download_failed', 'Bilibili risk control rejected the media request. Wait and retry, or use a local video file.', 'http-rejected');
-  }
-  if (/proxyerror|proxy connection|proxy (?:server )?(?:timed out|refused|unreachable|failed)/.test(text)) {
-    const reason = /timed out|timeout/.test(text) ? 'timed out' : /refused/.test(text) ? 'was refused' : 'failed';
-    return failure('network_unavailable', `yt-dlp proxy connection ${reason}. Check the proxy address and whether the proxy service is running.`,
-      reason === 'timed out' ? 'timeout' : reason === 'was refused' ? 'connection-refused' : 'unavailable');
-  }
-  if (/temporary failure in name resolution|name or service not known|no address associated|nodename nor servname|dns error|failed to resolve/.test(text)) {
-    return failure('network_unavailable', 'yt-dlp could not resolve the video platform host. Check DNS, network, and proxy settings.', 'dns');
-  }
-  if (
-    text.includes('connection timed out')
-    || text.includes('connect timeout')
-    || text.includes('timed out')
-  ) {
-    return failure('network_unavailable', 'yt-dlp connection to the video platform timed out. Check the network or proxy settings.', 'timeout');
-  }
-  if (
-    text.includes('network is unreachable')
-    || text.includes('unable to connect')
-    || text.includes('connection refused')
-    || text.includes('connection reset')
-  ) {
-    const kind = text.includes('refused') ? 'connection-refused'
-      : text.includes('reset') ? 'connection-reset' : 'unavailable';
-    const reason = kind === 'connection-refused' ? 'the connection was refused'
-      : kind === 'connection-reset' ? 'the connection was reset' : 'the network is unavailable';
-    return failure('network_unavailable', `yt-dlp could not connect to the video platform: ${reason}. Check the network or proxy settings.`, kind);
-  }
-  const httpStatus = /http error\s+(\d{3})\b/i.exec(stderr);
-  if (httpStatus !== null) {
-    const status = Number(httpStatus[1]);
-    const kind = status === 429 ? 'rate-limited'
-      : status === 401 || status === 403 ? 'unauthorized'
-        : status >= 500 ? 'unavailable' : 'http-rejected';
-    return failure('download_http_error', `The video platform returned HTTP ${status} to yt-dlp.`, kind, status);
-  }
-  if (
-    text.includes('requested format is not available')
-    || text.includes('no video formats found')
-  ) {
-    return failure('format_unavailable', 'yt-dlp could not find the requested video or audio format.', 'not-found');
-  }
-  if (
-    text.includes('sign in')
-    || text.includes('login')
-    || text.includes('cookies')
-  ) {
-    return failure('login_required', 'yt-dlp reports that platform login or fresh cookies are required.', 'unauthorized');
-  }
-  if (
-    text.includes('copyright')
-    || text.includes('not available in your country')
-    || text.includes('geo-restricted')
-  ) {
-    return failure('region_or_copyright_restricted', 'yt-dlp reports that the video is region or copyright restricted.', 'unauthorized');
-  }
-  if (
-    text.includes('please update')
-    || text.includes('confirm you are on the latest version')
-    || text.includes('signature extraction failed')
-    || text.includes('nsig extraction failed')
-    || text.includes('unable to extract')
-    || text.includes('extractor error')
-  ) {
-    return failure('yt_dlp_update_recommended', 'yt-dlp could not extract this video; its platform extractor may be outdated.', 'unsupported');
-  }
-  if (text.includes('no space left')) {
-    return failure('disk_full', 'yt-dlp could not save the video because disk space is exhausted.', 'storage');
-  }
-  const detail = publicYtDlpErrorLine(stderr);
-  return failure(
-    'download_failed',
-    detail === undefined
-      ? `yt-dlp exited with code ${exitCode ?? 'unknown'} without a usable error detail.`
-      : `yt-dlp exited with code ${exitCode ?? 'unknown'}: ${detail}`,
-    'unknown'
-  );
-}
-
-function publicYtDlpErrorLine(stderr: string): string | undefined {
-  const line = stderr.split(/\r?\n/).reverse()
-    .find(candidate => /^\s*ERROR:/i.test(candidate));
-  if (line === undefined) return undefined;
-  const redacted = line
-    .replace(/\u001b\[[0-9;]*m/g, '')
-    .replace(/(?:https?|ftp):\/\/[^\s"'<>]+/gi, '[URL]')
-    .replace(/\b[A-Za-z]:[\\/][^\s"'<>]+/g, '[local path]')
-    .replace(/\b(?:cookie|token|authorization|password)\s*[:=]\s*[^\s,;]+/gi, '[redacted]')
-    .replace(/\b[A-Za-z0-9_=-]{32,}\b/g, '[redacted]');
-  return sanitizeIssueDetail(redacted, 300);
 }
 
 function currentYtDlpRuntime(input: DownloadExecutorOptions, sourceUrl: string): YtDlpRuntime {

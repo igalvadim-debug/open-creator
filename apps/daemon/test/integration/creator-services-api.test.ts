@@ -41,6 +41,7 @@ describe('creator services API', () => {
         provider: 'aliyun' as const,
         model: 'qwen3-tts-flash',
         voiceId: request.voiceId,
+        language: 'en',
         format: 'mp3' as const
       }))
     };
@@ -62,6 +63,16 @@ describe('creator services API', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ ready: false, authentication: 'none', executionMode: null });
     expect(response.headers['cache-control']).toBe('no-store');
+    expect(store.write).not.toHaveBeenCalled();
+  });
+
+  it('validates a draft proxy before probing without changing saved configuration', async () => {
+    const invalid = await server.inject({ method: 'POST', url: '/creator-services/network/test',
+      payload: { proxy: 'socks5://127.0.0.1:1080' } });
+    expect(invalid.statusCode).toBe(400);
+    const unset = await server.inject({ method: 'POST', url: '/creator-services/network/test', payload: { proxy: '' } });
+    expect(unset.statusCode).toBe(200);
+    expect(unset.json()).toEqual({ status: 'not_configured' });
     expect(store.write).not.toHaveBeenCalled();
   });
 
@@ -125,6 +136,47 @@ describe('creator services API', () => {
       proxy: 'http://127.0.0.1:7897',
       llm: expect.objectContaining({ apiKey: 'initial-secret' })
     }));
+  });
+
+  it('clears only explicitly selected credentials', async () => {
+    const current = createDefaultCreatorServicesConfig();
+    current.transcription.provider = 'volcengine';
+    current.transcription.volcengine.appId = 'legacy-app-id';
+    current.transcription.volcengine.accessToken = 'new-api-key';
+    vi.mocked(store.read).mockResolvedValue(current);
+    const presented = await server.inject({ method: 'GET', url: '/creator-services/config' });
+
+    // Switching to the newer console means dropping the App ID, but a blank
+    // field on its own means "keep", so the clear has to be named explicitly.
+    const saved = await server.inject({
+      method: 'PATCH',
+      url: '/creator-services/config',
+      payload: {
+        config: presented.json().config,
+        clearCredentials: ['transcription.volcengine.appId']
+      }
+    });
+
+    expect(saved.statusCode).toBe(200);
+    expect(store.write).toHaveBeenCalledWith(expect.objectContaining({
+      transcription: expect.objectContaining({
+        volcengine: expect.objectContaining({ appId: '', accessToken: 'new-api-key' })
+      })
+    }));
+  });
+
+  it('rejects an unsupported clearCredentials field', async () => {
+    const current = createDefaultCreatorServicesConfig();
+    vi.mocked(store.read).mockResolvedValue(current);
+
+    const saved = await server.inject({
+      method: 'PATCH',
+      url: '/creator-services/config',
+      payload: { config: current, clearCredentials: ['proxy'] }
+    });
+
+    expect(saved.statusCode).toBe(400);
+    expect(store.write).not.toHaveBeenCalled();
   });
 
   it('does not return the FunASR API key from settings reads or saves', async () => {
@@ -289,18 +341,21 @@ describe('creator services API', () => {
         provider: 'aliyun',
         model: 'qwen3-tts-flash',
         voiceId: 'Cherry',
+        language: 'ja-JP',
         text: '试听文本'
       }
     });
 
     expect(preview.statusCode).toBe(200);
     expect(preview.headers['content-type']).toContain('audio/mpeg');
+    expect(preview.headers['content-language']).toBe('en');
     expect(preview.headers['cache-control']).toBe('no-store');
     expect(preview.rawPayload.toString()).toBe('preview:Cherry');
     expect(ttsService.preview).toHaveBeenCalledWith({
       provider: 'aliyun',
       model: 'qwen3-tts-flash',
       voiceId: 'Cherry',
+      language: 'ja-JP',
       text: '试听文本'
     });
   });

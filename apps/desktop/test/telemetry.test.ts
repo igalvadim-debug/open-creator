@@ -56,6 +56,32 @@ function logger(): DesktopLogger {
   };
 }
 
+function daemonEvent() {
+  return {
+    event_id: '9d9dd73e-b27f-4f0f-a5ef-0f5763d04c1a',
+    event_type: 'task_finished',
+    occurred_at: '2026-09-07T02:00:00.000Z',
+    task_id: 'creator_job_1',
+    attempt_id: 'creator_stage_run_1',
+    feature: 'smart-dubbing',
+    outcome: 'failed',
+    auth_state: 'signed_out',
+    recharge_state: 'unknown',
+    account_state_observed_at: '2026-09-07T02:00:00.000Z',
+    user_id: 'account-123',
+    app_version: 'daemon-must-not-win',
+    failure: {
+      stage: 'tts',
+      error_code: 'creator_stage_failed',
+      upstream_code: 'connection_refused',
+      request_id: `ocreq_${'a'.repeat(48)}`,
+      user_message: 'Creator stage failed.',
+      technicalDetail: 'must-not-send',
+      detail: { prompt: 'must-not-send' }
+    }
+  };
+}
+
 describe('desktop telemetry', () => {
   it('keeps daily launch and active-minute counters', () => {
     const memory = memoryPersistence();
@@ -347,5 +373,238 @@ describe('desktop telemetry', () => {
     await controller.stop();
 
     expect(requestSignal?.aborted).toBe(true);
+  });
+
+  it('delivers daemon events with desktop metadata and acknowledges only accepted batches', async () => {
+    const requests: Array<{ url: string; body?: Record<string, unknown> }> = [];
+    let pending = true;
+    const controller = startDesktopTelemetry({
+      path: '/virtual/telemetry.json',
+      settings: memorySettings(),
+      logger: logger(),
+      appVersion: '3.2.9',
+      isOfficialBuild: false,
+      endpointOverride: 'http://127.0.0.1:8790/api/v1/public/desktop-usage',
+      platform: 'darwin',
+      architecture: 'arm64',
+      getDaemonConnection: () => ({ address: 'http://127.0.0.1:31234', token: 'local-token' }),
+      isWindowActive: () => false,
+      fetchImpl: async (url, init) => {
+        const target = String(url);
+        requests.push({
+          url: target,
+          ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) as Record<string, unknown> })
+        });
+        if (target.includes('/telemetry/events?')) {
+          return Response.json({ events: pending ? [daemonEvent()] : [] });
+        }
+        if (target.endsWith('/telemetry/events/ack')) {
+          pending = false;
+          return Response.json({ acknowledged: 1 });
+        }
+        return Response.json({});
+      },
+      persistence: memoryPersistence().persistence as TelemetryPersistence
+    });
+
+    await controller.reportNow();
+    controller.dispose();
+
+    const delivered = requests.find(request => request.url.endsWith('/desktop-usage/events'));
+    expect(delivered?.body).toMatchObject({ install_id: expect.any(String) });
+    const events = delivered?.body?.events as Array<Record<string, unknown>>;
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event_id: daemonEvent().event_id,
+      user_id: 'account-123',
+      app_version: '3.2.9',
+      operating_system: 'darwin',
+      architecture: 'arm64'
+    });
+    expect(events[0]!.failure).toEqual({
+      stage: 'tts', error_code: 'creator_stage_failed', upstream_code: 'connection_refused',
+      request_id: `ocreq_${'a'.repeat(48)}`,
+      user_message: 'Creator stage failed.'
+    });
+    expect(JSON.stringify(delivered?.body)).not.toContain('must-not-send');
+    expect(requests.some(request => request.url.endsWith('/telemetry/events/ack'))).toBe(true);
+  });
+
+  it('drops arbitrary diagnostic content and retries the base event when diagnostics are rejected', async () => {
+    const posted: Array<Record<string, unknown>> = [];
+    let acknowledged = false;
+    const event = daemonEvent();
+    event.failure = {
+      ...event.failure,
+      diagnostic: {
+        version: 1, operation: 'yt-dlp.probe', causes: [{ name: 'CreatorExecutorError', code: 'network_unavailable' }],
+        network: { route: 'proxy', peer: 'proxy', proxy_scope: 'loopback', proxy_port: 7890 },
+        evidence: ['connection_refused', 'https://private.test/secret'], raw_log: 'Bearer secret'
+      }
+    } as typeof event.failure;
+    const controller = startDesktopTelemetry({
+      path: '/virtual/telemetry.json', settings: memorySettings(), logger: logger(), appVersion: '3.3.1',
+      isOfficialBuild: false, endpointOverride: 'http://127.0.0.1:8790/api/v1/public/desktop-usage',
+      getDaemonConnection: () => ({ address: 'http://127.0.0.1:31234', token: 'local-token' }),
+      isWindowActive: () => false,
+      fetchImpl: async (url, init) => {
+        const target = String(url);
+        if (target.includes('/telemetry/events?')) return Response.json({ events: acknowledged ? [] : [event] });
+        if (target.endsWith('/telemetry/events/ack')) {
+          acknowledged = true;
+          return Response.json({ acknowledged: 1 });
+        }
+        if (target.endsWith('/desktop-usage/events')) {
+          posted.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return Response.json({}, { status: posted.length === 1 ? 400 : 200 });
+        }
+        return Response.json({});
+      },
+      persistence: memoryPersistence().persistence as TelemetryPersistence
+    });
+    await controller.reportNow();
+    controller.dispose();
+    expect(posted).toHaveLength(2);
+    expect(JSON.stringify(posted[0])).not.toMatch(/private\.test|raw_log|Bearer secret/);
+    const first = (posted[0]!.events as Array<{ failure: Record<string, unknown> }>)[0]!.failure;
+    expect(first.diagnostic).toMatchObject({ operation: 'yt-dlp.probe', evidence: ['connection_refused'] });
+    const second = (posted[1]!.events as Array<{ failure: Record<string, unknown> }>)[0]!.failure;
+    expect(second.diagnostic).toBeUndefined();
+    expect(acknowledged).toBe(true);
+  });
+
+  it('serializes rapid telemetry setting changes on the local daemon', async () => {
+    const settings = memorySettings({ telemetryEnabled: false });
+    const observed: boolean[] = [];
+    const controller = startDesktopTelemetry({
+      path: '/virtual/telemetry.json', settings, logger: logger(), appVersion: '3.3.1',
+      isOfficialBuild: false, isWindowActive: () => false,
+      getDaemonConnection: () => ({ address: 'http://127.0.0.1:31234', token: 'local-token' }),
+      fetchImpl: async (_url, init) => {
+        observed.push((JSON.parse(String(init?.body)) as { enabled: boolean }).enabled);
+        return Response.json({});
+      },
+      persistence: memoryPersistence().persistence as TelemetryPersistence
+    });
+    const disabled = controller.setEnabled(false);
+    const enabled = controller.setEnabled(true);
+    await Promise.all([disabled, enabled]);
+    controller.dispose();
+    expect(observed).toEqual([false, true]);
+  });
+
+  it('retries without ack after a non-2xx event response', async () => {
+    let accepted = false;
+    let acknowledgments = 0;
+    let posts = 0;
+    const controller = startDesktopTelemetry({
+      path: '/virtual/telemetry.json',
+      settings: memorySettings(),
+      logger: logger(),
+      appVersion: '3.2.9',
+      isOfficialBuild: false,
+      endpointOverride: 'http://127.0.0.1:8790/api/v1/public/desktop-usage',
+      getDaemonConnection: () => ({ address: 'http://127.0.0.1:31234', token: 'local-token' }),
+      isWindowActive: () => false,
+      fetchImpl: async url => {
+        const target = String(url);
+        if (target.includes('/telemetry/events?')) return Response.json({ events: [daemonEvent()] });
+        if (target.endsWith('/telemetry/events/ack')) {
+          acknowledgments += 1;
+          return Response.json({ acknowledged: 1 });
+        }
+        if (target.endsWith('/desktop-usage/events')) {
+          posts += 1;
+          return Response.json({}, { status: accepted ? 200 : 503 });
+        }
+        return Response.json({});
+      },
+      persistence: memoryPersistence().persistence as TelemetryPersistence
+    });
+
+    await controller.reportNow();
+    expect(posts).toBeGreaterThan(0);
+    expect(acknowledgments).toBe(0);
+    accepted = true;
+    await controller.reportNow();
+    controller.dispose();
+    expect(acknowledgments).toBe(1);
+  });
+
+  it('does not pull or deliver daemon events while disabled', async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const controller = startDesktopTelemetry({
+      path: '/virtual/telemetry.json',
+      settings: memorySettings({ telemetryEnabled: false }),
+      logger: logger(),
+      appVersion: '3.2.9',
+      isOfficialBuild: true,
+      getDaemonConnection: () => ({ address: 'http://127.0.0.1:31234', token: 'local-token' }),
+      isWindowActive: () => false,
+      fetchImpl,
+      persistence: memoryPersistence().persistence as TelemetryPersistence
+    });
+
+    await controller.reportNow();
+    controller.dispose();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('pulls, delivers and acknowledges events over real local HTTP connections', async () => {
+    const delivered: Array<Record<string, unknown>> = [];
+    let acknowledged = 0;
+    let pending = true;
+    const daemon = createServer((request, response) => {
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', chunk => { body += chunk; });
+      request.on('end', () => {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        if (request.url?.startsWith('/telemetry/events?')) {
+          response.end(JSON.stringify({ events: pending ? [daemonEvent()] : [] }));
+        } else {
+          acknowledged = (JSON.parse(body) as { event_ids: string[] }).event_ids.length;
+          pending = false;
+          response.end(JSON.stringify({ acknowledged }));
+        }
+      });
+    });
+    const admin = createServer((request, response) => {
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', chunk => { body += chunk; });
+      request.on('end', () => {
+        if (request.url?.endsWith('/events')) delivered.push(JSON.parse(body) as Record<string, unknown>);
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end('{}');
+      });
+    });
+    await Promise.all([daemon, admin].map(server => new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    })));
+    const daemonPort = (daemon.address() as AddressInfo).port;
+    const adminPort = (admin.address() as AddressInfo).port;
+    const controller = startDesktopTelemetry({
+      path: '/virtual/telemetry.json',
+      settings: memorySettings(),
+      logger: logger(),
+      appVersion: '3.2.9',
+      isOfficialBuild: false,
+      endpointOverride: `http://127.0.0.1:${adminPort}/api/v1/public/desktop-usage`,
+      getDaemonConnection: () => ({ address: `http://127.0.0.1:${daemonPort}`, token: 'local-token' }),
+      isWindowActive: () => false,
+      persistence: memoryPersistence().persistence as TelemetryPersistence
+    });
+    try {
+      await controller.reportNow();
+    } finally {
+      controller.dispose();
+      await Promise.all([daemon, admin].map(server => new Promise<void>((resolve, reject) => {
+        server.close(error => error === undefined ? resolve() : reject(error));
+      })));
+    }
+    expect(delivered).toHaveLength(1);
+    expect(acknowledged).toBe(1);
   });
 });

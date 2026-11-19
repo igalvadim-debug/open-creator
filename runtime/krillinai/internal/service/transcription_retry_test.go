@@ -37,6 +37,8 @@ func TestTranscriptionRetriesOnlyRetryableFailures(t *testing.T) {
 		{"audio_no_speech", 3, 1},
 		{"audio_transcription_invalid_response", 3, 1},
 		{"audio_transcription_timestamps_missing", 3, 1},
+		{"audio_transcription_pending", 3, 1},
+		{"credits_insufficient", 3, 1},
 		{"audio_transcription_api_failed", 3, 3},
 		{"audio_transcription_api_failed", 0, 1},
 	} {
