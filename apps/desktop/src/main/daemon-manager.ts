@@ -28,6 +28,7 @@ export type DaemonStartInput = {
   entryPath: string;
   cwd: string;
   env: NodeJS.ProcessEnv;
+  telemetryEnabled?: boolean;
   appHome: string;
   codexBin: string;
   codexHome: string;
@@ -35,6 +36,7 @@ export type DaemonStartInput = {
   codexCommit: string | null;
   dataDir: string;
   creatorRuntimeRoot?: string;
+  creatorPresetAssetsRoot?: string;
   stickmanRuntimeRoot?: string;
   codexRuntimeRoot?: string;
   codexRuntimeMode?: 'bundled' | 'external';
@@ -316,6 +318,7 @@ export function buildDaemonEnvironment(
   const env = { ...input.env };
   Object.assign(env, {
     OPENCREATOR_HOME: input.appHome,
+    OPENCREATOR_TELEMETRY_ENABLED: input.telemetryEnabled === false ? '0' : '1',
     OPENCREATOR_MANAGED_PARENT_PID: String(process.pid),
     OPENCREATOR_CODEX_BIN: input.codexBin,
     OPENCREATOR_CODEX_VERSION: input.codexVersion,
@@ -329,6 +332,9 @@ export function buildDaemonEnvironment(
     ...(input.creatorRuntimeRoot === undefined
       ? {}
       : { OPENCREATOR_CREATOR_RUNTIME_ROOT: input.creatorRuntimeRoot }),
+    ...(input.creatorPresetAssetsRoot === undefined
+      ? {}
+      : { OPENCREATOR_PRESET_ASSETS_ROOT: input.creatorPresetAssetsRoot }),
     ...(input.stickmanRuntimeRoot === undefined
       ? {}
       : { OPENCREATOR_STICKMAN_RUNTIME_ROOT: input.stickmanRuntimeRoot }),

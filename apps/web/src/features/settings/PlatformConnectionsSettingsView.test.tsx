@@ -1,7 +1,9 @@
+import { selectOption } from '../../test/select-option.js';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
 import { expect, it, vi } from 'vitest';
 import type { PlatformConnectionState, YouTubeConnectionState } from '@opencreator/protocol';
+import { LanguageProvider } from '../../i18n/LanguageProvider.js';
 import { PlatformConnectionsSettingsView } from './PlatformConnectionsSettingsView.js';
 
 const windowsState: YouTubeConnectionState = { platform: 'youtube', status: 'disconnected', connectionMethod: 'browser-login' };
@@ -26,6 +28,23 @@ function api(initial: YouTubeConnectionState['status'] = 'disconnected') {
     finish: () => { state = { platform: 'youtube', status: 'connected' }; }
   };
 }
+
+it.each([
+  ['zh-CN', '抖音', '重新连接', '断开'],
+  ['en-US', 'Douyin', 'Reconnect', 'Disconnect']
+] as const)('keeps the manual connection actions without an auto-reconnect switch in %s', async (language, douyinLabel, reconnect, disconnect) => {
+  const service = api();
+  const saved = { status: 'connected', profileId: 'b'.repeat(24), autoReconnect: false } as const;
+  service.getYouTube.mockResolvedValue({ platform: 'youtube', ...saved });
+  service.getDouyin.mockResolvedValue({ platform: 'douyin', ...saved });
+  render(<LanguageProvider initialPreference={language}><PlatformConnectionsSettingsView connected service={service} /></LanguageProvider>);
+  for (const platform of ['YouTube', douyinLabel]) {
+    const row = within(screen.getByRole('group', { name: platform }));
+    expect(await row.findByRole('button', { name: reconnect })).toBeEnabled();
+    expect(row.getByRole('button', { name: disconnect })).toBeEnabled();
+    expect(row.queryByRole('switch')).not.toBeInTheDocument();
+  }
+});
 
 it('connects with one click, polls automatic completion, and allows disconnect', async () => {
   const service = api(); const user = userEvent.setup();
@@ -91,7 +110,7 @@ it('preserves browser profile selection and the original macOS connection interf
   ] });
   render(<PlatformConnectionsSettingsView connected service={service} />);
   const row = within(screen.getByRole('group', { name: 'YouTube' }));
-  await user.selectOptions(await row.findByRole('combobox', { name: '浏览器账号' }), 'b'.repeat(24));
+  await selectOption(await row.findByRole('combobox', { name: '浏览器账号' }), 'b'.repeat(24));
   await user.click(row.getByRole('button', { name: '连接' }));
   expect(service.connectYouTube).toHaveBeenCalledWith('b'.repeat(24));
   expect(screen.queryByRole('button', { name: '下载浏览器连接器' })).not.toBeInTheDocument();

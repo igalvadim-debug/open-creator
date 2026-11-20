@@ -10,7 +10,6 @@ import type {
   ConversationSearchResult,
   CreatorJob,
   OpenCreatorIssue,
-  CreatorPresetSummary,
   CreateMemoryRequest,
   CreateThreadRequest,
   RunDiagnosticsResponse,
@@ -35,13 +34,11 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, us
 import { AppLayout } from '../components/layout/AppLayout.js';
 import { RuntimeConnectionNotice, RuntimeConnectionProvider } from './runtime-connection-context.js';
 import { DesktopWindowControls } from '../components/layout/DesktopWindowControls.js';
-import { beginPaneResize } from '../components/layout/pane-resize-2026-07-29.js';
+import { beginPaneResize, paneInlineDirection } from '../components/layout/pane-resize-2026-07-29.js';
 import { Timeline, type TimelineHandle } from '../components/timeline/Timeline.js';
 import { eventToTimelineItem, type TimelineItem } from '../components/timeline/timeline-model.js';
 import type { CapabilitiesViewProps } from '../features/capabilities/CapabilitiesView.js';
 import { ConversationEmptyState } from '../features/conversation/ConversationEmptyState.js';
-import type { CreatorSkill } from '../features/conversation/CreatorDashboard.js';
-import { getCreatorSkillPromptHint } from '../features/conversation/creator-skill-prompt-hint.js';
 import {
   creatorWorkspaceForTemplate,
   type CreatorSkillLaunch
@@ -105,14 +102,16 @@ import type {
   RuntimeStatus
 } from '../features/settings/OpenCreatorSettingsView.js';
 import {
-  confirmAgentSetup,
-  isAgentSetupConfirmed,
-  type AgentSetupSnapshot
+  availableAgentMode,
+  hasLegacyAgentSetupConfirmation
 } from '../features/settings/agent-setup-state.js';
+import { useAgentOnboarding } from '../features/settings/use-agent-onboarding.js';
 import '../features/settings/startup-agent-shell.css';
 import { useLocalizedCopy } from '../i18n/useLocalizedCopy.js';
 import type { McpCapabilities } from '../features/settings/McpSettingsView.js';
 import { OpenCreatorSidebar } from '../features/shell/OpenCreatorSidebar.js';
+import type { CreatorWorkspace } from '../features/dashboard/creator-workspace.js';
+import { selectDashboardGenerationMode, type DashboardGenerationMode } from '../features/dashboard/DashboardGenerationComposer.js';
 import {
   createScheduleDraftSidebarSummaries,
   createSidebarTaskSummaries
@@ -218,9 +217,6 @@ const WORKSPACE_AUTO_COLLAPSE_MAX_WIDTH =
 const WORKSPACE_AUTO_COLLAPSE_MEDIA_QUERY =
   `(min-width: ${MOBILE_NAVIGATION_MAX_WIDTH + 1}px) and (max-width: ${WORKSPACE_AUTO_COLLAPSE_MAX_WIDTH}px)`;
 const RESIZE_KEY_STEP = 32;
-const CREATOR_PRESET_CREATION_TIMEOUT_MS = 15_000;
-const CREATOR_PRESET_CREATION_STORAGE_PREFIX =
-  'opencreator.creator-preset-creation.v1:';
 function canScrollVertically(
   target: EventTarget | null,
   boundary: HTMLElement,
@@ -258,10 +254,6 @@ const FilesPage = lazy(() => import('../features/files/FilesPage.js'));
 const ProjectsPage = lazy(() => import('../features/projects/ProjectsPage.js'));
 const PluginsPage = lazy(() => import('../features/plugins/PluginsPage.js'));
 const DashboardPage = lazy(() => import('../features/dashboard/DashboardPage.js'));
-const CreatorDashboard = lazy(async () => {
-  const module = await import('../features/conversation/CreatorDashboard.js');
-  return { default: module.CreatorDashboard };
-});
 const ScheduleThreadHeader = lazy(async () => {
   const module = await import('../features/schedules/ScheduleThreadHeader.js');
   return { default: module.ScheduleThreadHeader };
@@ -273,6 +265,10 @@ const AgentDiagnosticsPanel = lazy(() => import('../features/issues/AgentDiagnos
 const StartupAgentSetup = lazy(async () => {
   const module = await import('../features/settings/StartupAgentSetup.js');
   return { default: module.StartupAgentSetup };
+});
+const CodexRuntimeSettingsView = lazy(async () => {
+  const module = await import('../features/settings/CodexRuntimeSettingsView.js');
+  return { default: module.CodexRuntimeSettingsView };
 });
 const PersonalCenterPage = lazy(() => import('../features/account/PersonalCenterPage.js'));
 const TaskCenterPage = lazy(() => import('../features/tasks/TaskCenterPage.js'));
@@ -335,10 +331,6 @@ export function AppController(props: AppControllerProps) {
   const [creatorJobsLoading, setCreatorJobsLoading] = useState(false);
   const [creatorJobsError, setCreatorJobsError] = useState<string>();
   const [hasActiveCreatorTasks, setHasActiveCreatorTasks] = useState(false);
-  const [creatorPresets, setCreatorPresets] = useState<CreatorPresetSummary[]>([]);
-  const [creatorPresetsLoading, setCreatorPresetsLoading] = useState(false);
-  const [creatorPresetsError, setCreatorPresetsError] = useState<string>();
-  const [creatorPresetsReloadKey, setCreatorPresetsReloadKey] = useState(0);
   const defaultFileService = useMemo(() => createUnavailableFileService(), []);
   const fileService = props.fileService ?? defaultFileService;
   const hostBridge = props.hostBridge ?? browserBridge;
@@ -376,9 +368,10 @@ export function AppController(props: AppControllerProps) {
   const [historyLoadingThreadId, setHistoryLoadingThreadId] = useState<string>();
   const [historyLoadedThreadId, setHistoryLoadedThreadId] = useState<string>();
   const [threadConfigUpdateError, setThreadConfigUpdateError] = useState<string>();
-  const [agentSetup, setAgentSetup] = useState<'checking' | 'ready' | 'needed' | 'skipped'>('checking');
-  const [agentSetupRequested, setAgentSetupRequested] = useState(false);
-  const [agentSetupSnapshot, setAgentSetupSnapshot] = useState<AgentSetupSnapshot>();
+  const [agentSetup, setAgentSetup] = useState<'checking' | 'ready' | 'needed'>('checking');
+  const [agentSetupCheckAttempt, setAgentSetupCheckAttempt] = useState(0);
+  const [previouslyUsedApp] = useState(() => persistedNavigation !== null || hasLegacyAgentSetupConfirmation());
+  const [agentSettingsExpanded, setAgentSettingsExpanded] = useState(false);
   const [runDiagnosticsById, setRunDiagnosticsById] = useState<Record<string, RunDiagnosticsResponse | undefined>>({});
   const [runAttachmentsById, setRunAttachmentsById] = useState<Record<string, AttachmentResponse[] | undefined>>({});
   const [runContextById, setRunContextById] = useState<Record<string, RunContextResponse | undefined>>({});
@@ -390,8 +383,6 @@ export function AppController(props: AppControllerProps) {
     readCachedModelCatalog
   );
   const [codexModelsLoading, setCodexModelsLoading] = useState(false);
-  const [codexModelsLoadError, setCodexModelsLoadError] = useState<string>();
-  const [codexModelsNotice, setCodexModelsNotice] = useState<string>();
   const [codexSkills, setCodexSkills] = useState<CodexSkillListResponse>();
   const [codexMcp, setCodexMcp] = useState<CodexMcpListResponse>();
   const [codexProfiles, setCodexProfiles] = useState<CodexProfileListResponse>();
@@ -406,6 +397,8 @@ export function AppController(props: AppControllerProps) {
   const [pendingComposerFocusRequestId, setPendingComposerFocusRequestId] = useState<number>();
   const [homeSkillPromptHint, setHomeSkillPromptHint] = useState<string>();
   const [creatorSkillLaunch, setCreatorSkillLaunch] = useState<CreatorSkillLaunch>();
+  const [activeGenerationMode, setActiveGenerationMode] = useState<DashboardGenerationMode>();
+  const projectsHistoryInitialTypeRef = useRef<'all' | 'image' | 'video' | 'text' | 'audio' | undefined>();
   const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
   const [capabilitiesLoadError, setCapabilitiesLoadError] = useState<string>();
   const [pendingRunStartsById, setPendingRunStartsById] = useState<PendingRunStartsById>({});
@@ -552,15 +545,10 @@ export function AppController(props: AppControllerProps) {
   const nextComposerFocusRequestIdRef = useRef(0);
   const composerAttachmentDraftIdsRef = useRef(new Map<string, string>());
   const retainedAttachmentPreviewUrlsRef = useRef(new Map<string, string>());
-  const creatorPresetCreationIntentsRef = useRef(new Map<string, {
-    creationKey: string;
-    request?: Promise<CreatorJob>;
-  }>());
-  const codexModelsRef = useRef(codexModels);
+  const lastManualCodexModels = useRef(codexModels);
   runRegistryRef.current = runRegistry;
   runtimeThreadsRef.current = runtimeThreads;
   currentProjectIdRef.current = state.currentProjectId;
-  codexModelsRef.current = codexModels;
 
   const runtimeClient = useMemo(
     () => connectionConfig === null ? null : new RuntimeClient({ ...connectionConfig, fetchImpl: runtimeFetch }),
@@ -611,6 +599,8 @@ export function AppController(props: AppControllerProps) {
     () => runtimeClient === null ? null : createModelService(runtimeClient),
     [runtimeClient]
   );
+  const codexModelsRequest = useRef(0);
+  const codexModelsWork = useRef<{ service: ReturnType<typeof createModelService>; promise: Promise<CodexModelListResponse> }>();
   const diagnosticsService = useMemo(
     () => runtimeClient === null ? null : createDiagnosticsService(runtimeClient),
     [runtimeClient]
@@ -630,7 +620,8 @@ export function AppController(props: AppControllerProps) {
   const platformConnectionsService = useMemo(() => runtimeClient === null ? null : createPlatformConnectionsService(runtimeClient), [runtimeClient]);
   const [gatewayAccountState, setGatewayAccountState] = useState<GatewayAccountState>();
   const officialTextModels = useMemo(() => {
-    if (!gatewayAccountState || (gatewayAccountState.source === 'manual' && gatewayAccountState.authState === 'signed_out')) return undefined;
+    if (!gatewayAccountState || gatewayAccountState.authState === 'authorizing'
+      || (gatewayAccountState.source === 'manual' && gatewayAccountState.authState === 'signed_out')) return undefined;
     return { models: gatewayAccountState.models.filter(model => model.modality === 'text' && model.capabilities.includes('responses')).map((model, index) => ({
       id: model.id, model: model.id, displayName: model.id.split('/').pop()!, description: '',
       supportedReasoningEfforts: [], defaultReasoningEffort: null, inputModalities: ['text' as const],
@@ -640,10 +631,14 @@ export function AppController(props: AppControllerProps) {
   const previousGatewaySource = useRef<'manual' | 'gateway'>('manual');
   const onGatewayStateChange = useCallback((next: GatewayAccountState) => {
     setGatewayAccountState(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
-    if (next.source === 'gateway') setAgentSetup(next.authState === 'signed_in' && next.activationState === 'ready' ? 'ready' : 'skipped');
+    if (next.source === 'gateway') setAgentSetup(next.authState === 'signed_in' && next.activationState === 'ready' ? 'ready' : 'needed');
     else if (previousGatewaySource.current === 'gateway') setAgentSetup('checking');
     previousGatewaySource.current = next.source;
   }, []);
+  useEffect(() => hostBridge.subscribeAuthorizationReturn?.(() => {
+    if (!gatewayAccountService) return;
+    void gatewayAccountService.getState({ checkAuthorization: true }).then(onGatewayStateChange).catch(() => undefined);
+  }), [hostBridge, gatewayAccountService, onGatewayStateChange]);
   useEffect(() => {
     if (connectionState.status !== 'connected' || !gatewayAccountService) return;
     let canceled = false;
@@ -672,6 +667,18 @@ export function AppController(props: AppControllerProps) {
     () => runtimeClient === null ? null : createOpenCreatorSettingsService(runtimeClient),
     [runtimeClient]
   );
+  const agentOnboarding = useAgentOnboarding(
+    connectionState.status === 'connected' ? openCreatorSettingsService : null,
+    !previouslyUsedApp && gatewayAccountState?.authState !== 'signed_in' && (
+      props.route.view === 'home' || props.route.view === 'chat'
+      || (props.route.view === 'workbench' && props.route.tool === undefined)
+    )
+  );
+  const recheckAgentSetup = useCallback(() => {
+    if (previousGatewaySource.current === 'gateway') return;
+    setAgentSetup('checking');
+    setAgentSetupCheckAttempt(attempt => attempt + 1);
+  }, []);
   const creatorService = useMemo(
     () => runtimeClient === null ? null : createCreatorService(runtimeClient),
     [runtimeClient]
@@ -879,105 +886,6 @@ export function AppController(props: AppControllerProps) {
     });
     setPendingComposerFocusRequestId(nextComposerFocusRequestIdRef.current);
   }, []);
-  function applyDashboardSkill(skill: CreatorSkill) {
-    const promptHint = getCreatorSkillPromptHint(skill, language === 'zh-CN' ? 'zh-CN' : 'en-US');
-    if (skill.interaction?.type === 'workspace') {
-      setHomeSkillPromptHint(undefined);
-      setCreatorSkillLaunch({
-        skillId: skill.id,
-        workspace: skill.interaction.workspace,
-        promptHint
-      });
-      closeMobileSidebar();
-      dispatch({ type: 'set_active_view', activeView: 'dashboard' });
-      navigateToRoute({ view: 'workbench', tool: skill.interaction.workspace });
-      return;
-    }
-
-    setHomeSkillPromptHint(promptHint);
-    nextComposerFocusRequestIdRef.current += 1;
-    setPendingComposerFocusRequestId(nextComposerFocusRequestIdRef.current);
-  }
-  async function applyDashboardPreset(preset: CreatorPresetSummary): Promise<void> {
-    if (creatorService === null) {
-      throw new Error(createLocalizedCopy(language)('本地创作服务不可用。', 'The local creator service is unavailable.'));
-    }
-    const projectId = state.currentProjectId;
-    if (projectId === undefined) {
-      throw new Error(createLocalizedCopy(language)('请先选择项目，再使用模板。', 'Select a project before using a preset.'));
-    }
-    const scope = [
-      projectId,
-      preset.module,
-      preset.id,
-      preset.version,
-      language
-    ].join(':');
-    let intent = creatorPresetCreationIntentsRef.current.get(scope);
-    if (intent === undefined) {
-      intent = {
-        creationKey: readOrCreateCreatorPresetCreationKey(scope)
-      };
-      creatorPresetCreationIntentsRef.current.set(scope, intent);
-    }
-    let request = intent.request;
-    if (request === undefined) {
-      request = withCreatorPresetCreationTimeout(
-        creatorService.createJob({
-          projectId,
-          preset: {
-            module: preset.module,
-            id: preset.id,
-            version: preset.version
-          },
-          locale: language === 'zh-CN' ? 'zh-CN' : 'en-US',
-          creationKey: intent.creationKey
-        }).then(response => response.job),
-        createLocalizedCopy(language)('模板任务创建超时，请重试。', 'Preset creation timed out. Try again.')
-      );
-      intent.request = request;
-    }
-    let job: CreatorJob;
-    try {
-      job = await request;
-    } catch (error) {
-      if (
-        creatorPresetCreationIntentsRef.current.get(scope) === intent
-        && intent.request === request
-      ) {
-        intent.request = undefined;
-        if (isTerminalCreatorPresetCreationError(error)) {
-          creatorPresetCreationIntentsRef.current.delete(scope);
-          clearCreatorPresetCreationKey(scope, intent.creationKey);
-        }
-      }
-      if (
-        error instanceof ApiClientError
-        && error.code === 'creator_preset_not_found'
-      ) {
-        setCreatorPresetsReloadKey(value => value + 1);
-        throw new Error(createLocalizedCopy(language)('该模板已不可用，模板目录已刷新。', 'This preset is no longer available. The catalog has been refreshed.'));
-      }
-      throw error;
-    }
-    if (
-      creatorPresetCreationIntentsRef.current.get(scope) === intent
-      && intent.request === request
-    ) {
-      creatorPresetCreationIntentsRef.current.delete(scope);
-      clearCreatorPresetCreationKey(scope, intent.creationKey);
-    }
-    rememberCreatorJob(job);
-    setCreatorSkillLaunch(undefined);
-    closeMobileSidebar();
-    dispatch({ type: 'set_active_view', activeView: 'dashboard' });
-    navigateToRoute({
-      view: 'workbench',
-      tool: preset.module,
-      jobId: job.id,
-      returnTo: 'home'
-    });
-  }
   const handleCreatorWorkspaceModeChange = useCallback((active: boolean) => {
     setImmersiveWorkspace(active);
     if (active) setCreatorSkillLaunch(undefined);
@@ -1240,59 +1148,50 @@ export function AppController(props: AppControllerProps) {
   }, [connectionState.status]);
 
   useEffect(() => {
-    let canceled = false;
-
     if (officialTextModels) {
       setCodexModels(officialTextModels);
       setCodexModelsLoading(false);
-      setCodexModelsLoadError(undefined);
-      setCodexModelsNotice(undefined);
-      return;
-    }
-
-    if (connectionState.status !== 'connected' || modelService === null) {
-      setCodexModels(current => current ?? readCachedModelCatalog());
+    } else if (connectionState.status !== 'connected' || modelService === null) {
+      const cachedModels = readCachedModelCatalog();
+      if (cachedModels) lastManualCodexModels.current = cachedModels;
+      setCodexModels(current => current ?? cachedModels);
       setCodexModelsLoading(false);
-      setCodexModelsLoadError(undefined);
-      setCodexModelsNotice(undefined);
-      return () => {
-        canceled = true;
-      };
+    } else {
+      const cachedModels = readCachedModelCatalog();
+      if (cachedModels !== undefined) {
+        lastManualCodexModels.current = cachedModels;
+      }
+      setCodexModels(cachedModels ?? lastManualCodexModels.current);
     }
+    return () => { codexModelsRequest.current++; };
+  }, [connectionState.status, modelService, officialTextModels]);
 
+  const loadCodexModels = useCallback(() => {
+    if (officialTextModels || connectionState.status !== 'connected' || modelService === null) return;
+    const request = ++codexModelsRequest.current;
     const cachedModels = readCachedModelCatalog();
-    if (cachedModels !== undefined) setCodexModels(cachedModels);
+    if (cachedModels !== undefined) {
+      lastManualCodexModels.current = cachedModels;
+      setCodexModels(cachedModels);
+    }
     setCodexModelsLoading(true);
-    setCodexModelsLoadError(undefined);
-    setCodexModelsNotice(undefined);
-    modelService
-      .listModels()
+    const promise = codexModelsWork.current?.service === modelService
+      ? codexModelsWork.current.promise : modelService.listModels();
+    codexModelsWork.current = { service: modelService, promise };
+    void promise
       .then(response => {
-        if (!canceled) {
+        if (request === codexModelsRequest.current) {
+          lastManualCodexModels.current = response;
           setCodexModels(response);
-          setCodexModelsNotice(undefined);
         }
       })
       .catch(() => {
-        if (!canceled) {
-          const fallbackModels = readCachedModelCatalog()
-            ?? codexModelsRef.current;
-          if (fallbackModels !== undefined && fallbackModels.models.length > 0) {
-            setCodexModels(fallbackModels);
-            setCodexModelsNotice('模型目录刷新失败，当前使用本地缓存');
-          } else {
-            setCodexModels(undefined);
-            setCodexModelsLoadError('无法加载模型列表');
-          }
-        }
+        if (request === codexModelsRequest.current) setCodexModels(readCachedModelCatalog() ?? lastManualCodexModels.current);
       })
       .finally(() => {
-        if (!canceled) setCodexModelsLoading(false);
+        if (codexModelsWork.current?.promise === promise) codexModelsWork.current = undefined;
+        if (request === codexModelsRequest.current) setCodexModelsLoading(false);
       });
-
-    return () => {
-      canceled = true;
-    };
   }, [connectionState.status, modelService, officialTextModels]);
 
   useEffect(() => {
@@ -1316,21 +1215,33 @@ export function AppController(props: AppControllerProps) {
   }, [fileService]);
 
   useEffect(() => {
-    if (connectionState.status !== 'connected' || connectionService === null || agentSetup !== 'checking') return;
+    if (connectionState.status !== 'connected' || connectionService === null || agentSetup !== 'checking' || agentOnboarding.phase !== 'closed') return;
     let canceled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const retryCheck = () => {
+      retryTimer = setTimeout(() => setAgentSetupCheckAttempt(attempt => attempt + 1), 1_000);
+    };
     void Promise.all([
       connectionService.getCodexReadiness(), connectionService.getCodexProvider(), gatewayAccountService?.getState().catch(() => undefined)
     ]).then(([readiness, provider, gateway]) => {
       if (canceled) return;
       if (gateway?.source === 'gateway') { onGatewayStateChange(gateway); return; }
       const snapshot = { readiness, provider };
-      setAgentSetupSnapshot(snapshot);
-      setAgentSetup(isAgentSetupConfirmed(snapshot) ? 'ready' : 'needed');
+      if (
+        readiness.state === 'blocked' || readiness.binary.status !== 'ready'
+        || readiness.protocol.status !== 'ready' || readiness.models.status !== 'ready'
+        || readiness.account.status === 'unavailable'
+      ) {
+        retryCheck();
+        return;
+      }
+      setAgentSetup(availableAgentMode(snapshot) === null ? 'needed' : 'ready');
     }).catch(() => {
-      if (!canceled) setAgentSetup('needed');
+      if (canceled) return;
+      retryCheck();
     });
-    return () => { canceled = true; };
-  }, [agentSetup, connectionService, connectionState.status, gatewayAccountService, onGatewayStateChange]);
+    return () => { canceled = true; clearTimeout(retryTimer); };
+  }, [agentOnboarding.phase, agentSetup, agentSetupCheckAttempt, connectionService, connectionState.status, gatewayAccountService, onGatewayStateChange]);
 
   useEffect(() => {
     let canceled = false;
@@ -1455,43 +1366,6 @@ export function AppController(props: AppControllerProps) {
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
   }, [connectionState.status, hostBridge, projectService, threadService]);
-
-  useEffect(() => {
-    let canceled = false;
-    if (connectionState.status !== 'connected' || creatorService === null) {
-      setCreatorPresetsLoading(false);
-      return () => {
-        canceled = true;
-      };
-    }
-
-    setCreatorPresetsLoading(true);
-    setCreatorPresetsError(undefined);
-    void creatorService.listPresets(language === 'zh-CN' ? 'zh-CN' : 'en-US')
-      .then(response => {
-        if (!canceled) setCreatorPresets(response.presets);
-      })
-      .catch(error => {
-        if (!canceled) {
-          setCreatorPresetsError(getRuntimeErrorMessage(
-            error,
-            createLocalizedCopy(language)('无法加载创作模板', 'Unable to load creator presets')
-          ));
-        }
-      })
-      .finally(() => {
-        if (!canceled) setCreatorPresetsLoading(false);
-      });
-
-    return () => {
-      canceled = true;
-    };
-  }, [
-    connectionState.status,
-    creatorPresetsReloadKey,
-    creatorService,
-    language
-  ]);
 
   useEffect(() => {
     let canceled = false;
@@ -3037,6 +2911,10 @@ export function AppController(props: AppControllerProps) {
 
   function openPrimaryView(activeView: ActiveView) {
     if ((activeView === 'account' || activeView === 'subscription') && props.route.view !== 'account' && props.route.view !== 'subscription') accountReturnRouteRef.current = props.route;
+    if (activeView === 'projects') {
+      projectsHistoryInitialTypeRef.current = props.route.view === 'workbench' && (props.route.tool === 'video-generation' || props.route.tool === 'video-translation')
+        ? 'video' : undefined;
+    }
     closeMobileSidebar();
     if (activeView === 'files') {
       followedFileWorkspaceThreadIdRef.current = undefined;
@@ -3048,6 +2926,7 @@ export function AppController(props: AppControllerProps) {
       return;
     }
 
+    if (activeView === 'dashboard') setCreatorSkillLaunch(undefined);
     dispatch({ type: 'set_active_view', activeView });
     navigateToRoute(routeForActiveView(activeView, state.selectedThreadId));
   }
@@ -4214,7 +4093,7 @@ export function AppController(props: AppControllerProps) {
 
     const rect = layout.getBoundingClientRect();
     setConversationPaneWidth(clampPaneWidth(
-      clientX - rect.left,
+      paneInlineDirection(layout) === -1 ? rect.right - clientX : clientX - rect.left,
       CONVERSATION_PANE_MIN_WIDTH,
       Math.max(
         CONVERSATION_PANE_MIN_WIDTH,
@@ -4250,10 +4129,10 @@ export function AppController(props: AppControllerProps) {
   function handleConversationResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     if (event.key === 'ArrowLeft') {
       event.preventDefault();
-      adjustConversationPaneWidth(-RESIZE_KEY_STEP);
+      adjustConversationPaneWidth(-RESIZE_KEY_STEP * paneInlineDirection(conversationFileLayoutRef.current));
     } else if (event.key === 'ArrowRight') {
       event.preventDefault();
-      adjustConversationPaneWidth(RESIZE_KEY_STEP);
+      adjustConversationPaneWidth(RESIZE_KEY_STEP * paneInlineDirection(conversationFileLayoutRef.current));
     }
   }
 
@@ -4267,6 +4146,7 @@ export function AppController(props: AppControllerProps) {
     && runsLoadingThreadId === state.selectedThreadId;
   const conversationNeedsProject =
     selectedThread === undefined || selectedThread.purpose === 'conversation';
+  const agentSetupNeeded = agentSetup === 'needed';
   const composerDisabled = (
     conversationNeedsProject && currentProject === undefined
   )
@@ -4274,10 +4154,10 @@ export function AppController(props: AppControllerProps) {
     || selectedRunsLoading
     || !runtimeWorkspaceReady
     || connectionState.status !== 'connected'
-    || agentSetup === 'skipped';
+    || agentSetupNeeded;
   const composerDisabledReason = connectionState.status !== 'connected'
     ? t('conversation.connectingRuntime')
-    : agentSetup === 'skipped'
+    : agentSetupNeeded
       ? gatewayAccountState?.source === 'gateway' ? l('请在账户页面连接模型服务', 'Connect model services from your account') : l('请先配置 Agent 模型服务', 'Configure the Agent model service first')
     : projectLoadError !== undefined
       ? t('conversation.checkingTask')
@@ -4331,8 +4211,6 @@ export function AppController(props: AppControllerProps) {
   const conversationConfirmedEmpty = conversationEmpty && !conversationHistoryPending;
   const showConversationEmptyState = conversationConfirmedEmpty
     && (selectedThread === undefined || selectedThread.purpose === 'conversation');
-  const showCreatorHome = props.route.view === 'home'
-    && state.selectedThreadId === undefined;
   const showConversationHeader = selectedThread !== undefined
     || selectedScheduleTask !== undefined
     || selectedConversation !== undefined;
@@ -4381,18 +4259,6 @@ export function AppController(props: AppControllerProps) {
   const pendingComposerApproval = [...timelineItems].reverse().find(item => (
     item.kind === 'approval' && item.approval.status === 'pending'
   ));
-  const creatorDashboard = (
-    <Suspense fallback={<div role="status">{createLocalizedCopy(language)('正在加载模板...', 'Loading templates...')}</div>}>
-      <CreatorDashboard
-        presets={creatorPresets}
-        loading={creatorPresetsLoading}
-        error={creatorPresetsError}
-        onRetry={() => setCreatorPresetsReloadKey(value => value + 1)}
-        onSelectPreset={applyDashboardPreset}
-        onSelectSkill={applyDashboardSkill}
-      />
-    </Suspense>
-  );
   const conversationComposer = (
     <Composer
       key={composerAttachmentScope}
@@ -4406,8 +4272,7 @@ export function AppController(props: AppControllerProps) {
       reasoning={effectiveComposerConfig.reasoning}
       models={officialTextModels?.models ?? codexModels?.models}
       modelsLoading={codexModelsLoading}
-      modelsError={codexModelsLoadError}
-      modelsNotice={codexModelsNotice}
+      onLoadModels={loadCodexModels}
       disabled={composerDisabled}
       disabledReason={composerDisabledReason}
       promptHint={showConversationEmptyState ? homeSkillPromptHint : undefined}
@@ -4476,8 +4341,7 @@ export function AppController(props: AppControllerProps) {
     <section
       className={[
         'conversation-page',
-        showConversationEmptyState || showCreatorHome ? 'is-empty' : undefined,
-        showCreatorHome ? 'is-creator-home' : undefined,
+        showConversationEmptyState ? 'is-empty' : undefined,
         !useIntegratedConversationTitleBar && showConversationHeader
           ? 'has-header'
           : undefined,
@@ -4493,7 +4357,7 @@ export function AppController(props: AppControllerProps) {
           {conversationTaskToolbar}
         </div>
       ) : null}
-      {showCreatorHome ? null : (
+      {(
         <div className="conversation-body">
           {showConversationEmptyState ? null : (
             <Timeline
@@ -4540,11 +4404,7 @@ export function AppController(props: AppControllerProps) {
           ) : null}
         </div>
       )}
-      {showCreatorHome ? (
-        <div className="creator-home-wrap">
-          {creatorDashboard}
-        </div>
-      ) : (
+      {(
         <div className="composer-wrap" onWheel={handleComposerWheel}>
           <RuntimeConnectionNotice />
           {showConversationEmptyState ? (
@@ -4580,20 +4440,28 @@ export function AppController(props: AppControllerProps) {
               />
             </Suspense>
           ) : null}
-          {agentSetup === 'skipped' ? (
+          {agentSetupNeeded || agentSettingsExpanded ? (
             <div className="startup-agent-banner" role="status">
-              {gatewayAccountState?.source === 'gateway'
+              {agentSetupNeeded ? (gatewayAccountState?.source === 'gateway'
                 ? gatewayAccountState.authState === 'signed_in'
                   ? gatewayAccountState.activationState === 'loading' ? l('已登录，正在连接模型服务…', 'Signed in; connecting to model service…') : l('已登录，模型服务暂不可用。', 'Signed in; model service is unavailable.')
                   : l('请登录 OpenCreator 后继续创作。', 'Sign in to OpenCreator to continue creating.')
-                : l('Agent 尚未配置，暂时无法发送任务。', 'Agent is not configured; you cannot send tasks yet.')}
-              <button type="button" onClick={() => gatewayAccountState?.source === 'gateway' ? openPrimaryView('account') : setAgentSetup('needed')}>
-                {gatewayAccountState?.source === 'gateway' ? l('账户', 'Account') : l('配置 Agent', 'Set up Agent')}
-              </button>
+                : l('Agent 尚未配置，暂时无法发送任务。', 'Agent is not configured; you cannot send tasks yet.')) : null}
+              {gatewayAccountState?.source === 'gateway' ? (
+                <button type="button" onClick={() => openPrimaryView('account')}>{l('账户', 'Account')}</button>
+              ) : (
+                <button type="button" aria-expanded={agentSettingsExpanded} onClick={() => setAgentSettingsExpanded(expanded => !expanded)}>
+                  {agentSettingsExpanded ? l('关闭', 'Close') : l('配置 Agent', 'Set up Agent')}
+                </button>
+              )}
             </div>
           ) : null}
+          {agentSettingsExpanded && gatewayAccountState?.source !== 'gateway' ? (
+            <Suspense fallback={null}>
+              <CodexRuntimeSettingsView connected={runtimeStatus.connected} service={connectionService} onSaved={recheckAgentSetup} />
+            </Suspense>
+          ) : null}
           {conversationComposer}
-          {showConversationEmptyState ? creatorDashboard : null}
         </div>
       )}
     </section>
@@ -4633,41 +4501,77 @@ export function AppController(props: AppControllerProps) {
       />
     </section>
   ) : conversationPage;
-  const accountPageActive = state.activeView === 'account' || state.activeView === 'subscription';
-  const configurationPageActive = accountPageActive || (state.activeView === 'settings' && !agentSetupRequested);
   const main = props.capabilitiesView !== undefined ? (
     <CapabilitiesPage {...props.capabilitiesView} />
   ) : state.activeView === 'projects' ? (
-    <ProjectsPage
-      jobs={creatorJobs}
-      workspaces={projects}
-      loading={creatorJobsLoading}
-      error={creatorJobsError}
-      service={creatorService}
-      onCreateProject={
-        projectService === null
-          ? undefined
-          : projectType => createProject(projectType, 'projects')
-      }
-      createProjectError={createProjectError}
-      onOpenJob={openCreatorJob}
-      onDeleteJob={creatorService === null ? undefined : deleteCreatorJob}
-    />
+    creatorService && (state.currentProjectId || creatorJobs[0]?.projectId || projects[0]?.id) ? (
+      <DashboardPage
+        key="generation-history"
+        onSelectPrompt={startCreatorTool}
+        projectId={state.currentProjectId ?? creatorJobs[0]?.projectId ?? projects[0]?.id ?? ''}
+        creatorService={creatorService}
+        runtimeDependencies={runtimeDependencies}
+        creatorServicesService={creatorServicesService}
+        gatewayState={gatewayAccountState ?? (gatewayAccountService ? null : undefined)}
+        gatewayAccountService={gatewayAccountService}
+        onGatewayStateChange={onGatewayStateChange}
+        openExternal={url => hostBridge.openExternal(url)}
+        videoMetadataService={videoMetadataService}
+        onGenerationModeChange={setActiveGenerationMode}
+        onJobCreated={rememberCreatorJob}
+        onAskIssue={askAgentAboutIssue}
+        historyView={{
+          initialType: projectsHistoryInitialTypeRef.current,
+          onBackCreation: () => openPrimaryView('dashboard'),
+          onTypeChange: type => { projectsHistoryInitialTypeRef.current = type; },
+          onOpenJob: openCreatorJob
+        }}
+        onWorkspaceNavigate={(workspace, jobId, options) => {
+          if (workspace === null) {
+            openPrimaryView('dashboard');
+            return;
+          }
+          dispatch({ type: 'set_active_view', activeView: 'dashboard' });
+          navigateToRoute({ view: 'workbench', tool: workspace, ...(jobId ? { jobId } : {}), returnTo: 'projects' }, options);
+        }}
+      />
+    ) : (
+      <ProjectsPage
+        jobs={creatorJobs}
+        workspaces={projects}
+        loading={creatorJobsLoading}
+        error={creatorJobsError}
+        service={creatorService}
+        onCreateProject={
+          projectService === null
+            ? undefined
+            : projectType => createProject(projectType, 'projects')
+        }
+        createProjectError={createProjectError}
+        onOpenJob={openCreatorJob}
+        onDeleteJob={creatorService === null ? undefined : deleteCreatorJob}
+      />
+    )
   ) : state.activeView === 'dashboard' ? (
     <DashboardPage
+      key="dashboard"
       onSelectPrompt={startCreatorTool}
       onBackToHome={() => startNewConversation({ destination: 'home' })}
       skillLaunch={creatorSkillLaunch}
       onWorkspaceModeChange={handleCreatorWorkspaceModeChange}
+      onGenerationModeChange={setActiveGenerationMode}
       projectId={state.currentProjectId}
       creatorService={creatorService}
       runtimeDependencies={runtimeDependencies}
       creatorServicesService={creatorServicesService}
       gatewayState={gatewayAccountState ?? (gatewayAccountService ? null : undefined)}
       gatewayAccountService={gatewayAccountService}
+      onGatewayStateChange={onGatewayStateChange}
+      openExternal={url => hostBridge.openExternal(url)}
       videoMetadataService={videoMetadataService}
       workspace={props.route.view === 'workbench' ? props.route.tool : undefined}
       jobId={props.route.view === 'workbench' ? props.route.jobId : undefined}
+      returnTo={props.route.view === 'workbench' && props.route.returnTo === 'projects' ? 'projects' : undefined}
       onJobCreated={rememberCreatorJob}
       onAskIssue={askAgentAboutIssue}
       onCreateProject={
@@ -4676,11 +4580,6 @@ export function AppController(props: AppControllerProps) {
           : projectType => createProject(projectType)
       }
       createProjectError={createProjectError}
-      onOpenRuntimeComponents={() => {
-        settingsReturnRouteRef.current = props.route;
-        dispatch({ type: 'open_settings' });
-        navigateToRoute({ view: 'settings', tab: 'local-components' });
-      }}
       onWorkspaceNavigate={(workspace, jobId, options) => {
         if (
           workspace === null
@@ -4696,6 +4595,7 @@ export function AppController(props: AppControllerProps) {
           && props.route.view === 'workbench'
           && props.route.returnTo === 'projects'
         ) {
+          projectsHistoryInitialTypeRef.current ??= props.route.tool === 'video-generation' || props.route.tool === 'video-translation' ? 'video' : 'all';
           dispatch({ type: 'set_active_view', activeView: 'projects' });
           navigateToRoute({ view: 'projects' }, options);
           return;
@@ -4846,8 +4746,8 @@ export function AppController(props: AppControllerProps) {
       onOpenPersonalCenter={() => openPrimaryView('account')}
       openExternal={url => hostBridge.openExternal(url)}
       codexRuntimeService={connectionService}
-      agentSetupNeeded={agentSetup === 'skipped' || agentSetup === 'needed'}
-      onOpenAgentSetup={() => { setAgentSetupRequested(true); setAgentSetup('needed'); }}
+      agentSetupNeeded={agentSetupNeeded}
+      onAgentProviderSaved={recheckAgentSetup}
       memoryService={memoryService}
       memoryProjects={memoryProjectOptions}
       memoryThreads={memoryThreadOptions}
@@ -4857,6 +4757,7 @@ export function AppController(props: AppControllerProps) {
       initialSection={props.route.view === 'settings' ? props.route.section : undefined}
       componentId={props.route.view === 'settings' ? props.route.component : undefined}
       returnToTranslation={props.route.view === 'settings' && props.route.from === 'video-translation'}
+      translationReturnPath={props.route.view === 'settings' ? props.route.returnPath : undefined}
       onBack={() => {
         const returnRoute = props.route.view === 'settings' && props.route.returnPath
           ? parseRoute(props.route.returnPath)
@@ -4907,7 +4808,8 @@ export function AppController(props: AppControllerProps) {
     <RuntimeRecoveryContext.Provider value={runtimeRecovery}><PageIssueRoutingProvider><RuntimeConnectionProvider value={{
       status: connectionState.status,
       waitingForConfig: connectionConfig === null,
-      restarting: runtimeRecovery.phase === 'restarting',
+      phase: runtimeRecovery.phase,
+      attempt: runtimeRecovery.attempt,
       restartError: runtimeRecovery.phase === 'failed' ? runtimeRecovery.message : undefined,
       retry: () => void runtimeRecovery.retry(),
       ...(runtimeRecovery.restart === undefined
@@ -4941,7 +4843,7 @@ export function AppController(props: AppControllerProps) {
         }
         aria-live="polite"
       />
-      {agentSetup === 'needed' && !configurationPageActive ? null : <AppLayout
+      {agentOnboarding.phase !== 'closed' ? null : <AppLayout
       sidebar={
         <OpenCreatorSidebar
           projects={projects}
@@ -4951,6 +4853,8 @@ export function AppController(props: AppControllerProps) {
           currentProjectId={state.currentProjectId}
           selectedConversationId={state.selectedThreadId}
           activeView={state.activeView}
+          activeWorkspace={props.route.view === 'workbench' ? props.route.tool : undefined}
+          activeGenerationMode={activeGenerationMode}
           gatewayAccountState={gatewayAccountState}
           loadAccountAvatar={gatewayAccountService?.getAvatar}
           homeActive={state.activeView === 'conversation' && props.route.view === 'home'}
@@ -4964,6 +4868,20 @@ export function AppController(props: AppControllerProps) {
           onSelectConversation={selectConversation}
           onSelectTask={selectSidebarTask}
           onOpenView={openPrimaryView}
+          onOpenWorkspace={(workspace: CreatorWorkspace, mode) => {
+            closeMobileSidebar();
+            const generationMode = mode ?? (
+              workspace === 'video-translation' ? 'translation'
+                : workspace === 'transcription' ? 'transcription'
+                  : workspace === 'image-generation' ? 'image'
+                    : workspace === 'video-generation' ? 'video'
+                      : workspace === 'video-download' ? 'download'
+                        : workspace === 'smart-dubbing' ? 'speech' : undefined
+            );
+            if (generationMode !== undefined) selectDashboardGenerationMode(generationMode);
+            dispatch({ type: 'set_active_view', activeView: 'dashboard' });
+            navigateToRoute({ view: 'workbench', tool: workspace });
+          }}
           onAddProject={
             projectService === null
               ? undefined
@@ -5017,12 +4935,12 @@ export function AppController(props: AppControllerProps) {
       onOpenMobileSidebar={openMobileSidebar}
       onCloseMobileSidebar={dismissMobileSidebar}
       />}
-      {agentSetup === 'checking' && connectionState.status === 'connected' && !configurationPageActive ? (
+      {agentOnboarding.phase === 'pending' ? (
         <main className="startup-agent-setup" role="status">
           {l('正在检查 Agent 配置…', 'Checking Agent configuration…')}
         </main>
       ) : null}
-      {agentSetup === 'needed' && connectionService !== null && !configurationPageActive ? (
+      {agentOnboarding.phase === 'offered' && connectionService !== null ? (
         <Suspense fallback={<main className="startup-agent-setup" role="status">{l('正在加载 Agent 配置…', 'Loading Agent setup…')}</main>}>
           <StartupAgentSetup
             service={connectionService}
@@ -5030,15 +4948,14 @@ export function AppController(props: AppControllerProps) {
             gatewayState={gatewayAccountState}
             onGatewayStateChange={onGatewayStateChange}
             openExternal={url => hostBridge.openExternal(url)}
-            initialSnapshot={agentSetupSnapshot}
-            onReady={snapshot => {
-              setAgentSetupRequested(false);
-              confirmAgentSetup(snapshot);
-              setAgentSetupSnapshot(snapshot);
+            onReady={() => {
+              agentOnboarding.dismiss();
               setAgentSetup('ready');
-              startNewConversation({ destination: 'home' });
+              startNewConversation({ updateRoute: false });
+              dispatch({ type: 'set_active_view', activeView: 'dashboard' });
+              navigateToRoute({ view: 'workbench' });
             }}
-            onSkip={() => { setAgentSetupRequested(false); setAgentSetup('skipped'); }}
+            onSkip={agentOnboarding.dismiss}
           />
         </Suspense>
       ) : null}
@@ -5151,74 +5068,6 @@ export function AppController(props: AppControllerProps) {
       />
     );
   }
-}
-
-function readOrCreateCreatorPresetCreationKey(scope: string): string {
-  const storageKey = creatorPresetCreationStorageKey(scope);
-  try {
-    const existing = window.sessionStorage.getItem(storageKey);
-    if (existing) return existing;
-  } catch {
-    // Session storage is a recovery aid; in-memory retry still works without it.
-  }
-  const creationKey = `creator_preset_${createCreatorPresetCreationKeySuffix()}`;
-  try {
-    window.sessionStorage.setItem(storageKey, creationKey);
-  } catch {
-    // The caller retains the key in memory when storage is unavailable.
-  }
-  return creationKey;
-}
-
-function clearCreatorPresetCreationKey(scope: string, expectedKey: string): void {
-  try {
-    const storageKey = creatorPresetCreationStorageKey(scope);
-    if (window.sessionStorage.getItem(storageKey) === expectedKey) {
-      window.sessionStorage.removeItem(storageKey);
-    }
-  } catch {
-    // Session storage cleanup must not block a completed creation.
-  }
-}
-
-function creatorPresetCreationStorageKey(scope: string): string {
-  return `${CREATOR_PRESET_CREATION_STORAGE_PREFIX}${encodeURIComponent(scope)}`;
-}
-
-function createCreatorPresetCreationKeySuffix(): string {
-  return globalThis.crypto?.randomUUID?.()
-    ?? `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-}
-
-function withCreatorPresetCreationTimeout<T>(
-  promise: Promise<T>,
-  message: string
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(
-      () => reject(new Error(message)),
-      CREATOR_PRESET_CREATION_TIMEOUT_MS
-    );
-    promise.then(
-      value => {
-        window.clearTimeout(timeout);
-        resolve(value);
-      },
-      error => {
-        window.clearTimeout(timeout);
-        reject(error);
-      }
-    );
-  });
-}
-
-function isTerminalCreatorPresetCreationError(error: unknown): boolean {
-  return error instanceof ApiClientError && [
-    'creator_idempotency_key_reused',
-    'creator_preset_not_found',
-    'creator_preset_incompatible',
-    'creator_preset_invalid'
-  ].includes(error.code);
 }
 
 function mergeTimelineItems(

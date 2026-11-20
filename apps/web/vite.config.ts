@@ -13,6 +13,7 @@ import { request as httpRequest } from 'node:http';
 import { spawn, spawnSync, type ChildProcessByStdio } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import { defineConfig } from 'vite';
 import type { Plugin } from 'vite';
@@ -23,6 +24,7 @@ import {
   parseDevDaemonStartupError,
   type DevDaemonConfig
 } from './src/runtime/dev-proxy-target.js';
+import { resolveDevCreatorRuntimeRoot } from './src/runtime/dev-creator-runtime.js';
 
 type RuntimeConfig = DevDaemonConfig;
 
@@ -44,6 +46,7 @@ const creatorSubtitleFontRoot = join(
 );
 
 export default defineConfig({
+  worker: { format: 'es' },
   plugins: [
     react(),
     opencreatorStaticResourcesPlugin(),
@@ -116,6 +119,16 @@ function opencreatorStaticResourcesPlugin(): Plugin {
         webDir,
         '../../assets/creator-subtitle-fonts/manifest.json'
       ));
+      const fontRoot = resolve(creatorSubtitleFontRoot, '..');
+      const manifest = JSON.parse(readFileSync(join(fontRoot, 'manifest.json'), 'utf8')) as {
+        version: number;
+        fonts: Array<{ webFile: string; webSha256: string }>;
+        fallbackFonts?: Array<{ webFile: string; webSha256: string }>;
+      };
+      if (![1, 2].includes(manifest.version) || manifest.fonts?.length !== 9 || (manifest.version === 2 && !manifest.fallbackFonts?.length)) throw new Error('Invalid Creator subtitle font manifest');
+      for (const font of [...manifest.fonts, ...(manifest.fallbackFonts ?? [])]) {
+        if (!/^web\/[A-Za-z0-9-]+\.woff2$/.test(font.webFile) || createHash('sha256').update(readFileSync(join(fontRoot, font.webFile))).digest('hex') !== font.webSha256) throw new Error(`Creator Web font hash mismatch: ${font.webFile}`);
+      }
     },
     closeBundle() {
       replaceDirectory(presetAssetsRoot, presetBuildRoot);
@@ -285,7 +298,7 @@ function getRuntimeConfig(): Promise<RuntimeConfig> {
 }
 
 function startRuntimeProcess(): RuntimeProcess {
-  const creatorRuntimeRoot = resolveDevCreatorRuntimeRoot();
+  const creatorRuntimeRoot = resolveDevCreatorRuntimeRoot(resolve(webDir, '../..'));
   const codexBin = resolveDevCodexBin();
   const ytDlpPath = resolveDevYtDlpPath();
   const daemonDir = resolve(webDir, '../daemon');
@@ -380,22 +393,6 @@ function resolveDevCodexBin(): string | undefined {
     `../desktop/.pack/codex-runtime/bin/codex${executableSuffix}`
   );
   return existsSync(candidate) ? candidate : undefined;
-}
-
-function resolveDevCreatorRuntimeRoot(): string | undefined {
-  const configured = process.env.OPENCREATOR_CREATOR_RUNTIME_ROOT?.trim();
-  if (configured) return resolve(configured);
-
-  const candidate = resolve(
-    webDir,
-    '../desktop/.pack/creator-runtime/krillinai'
-  );
-  const executableSuffix = process.platform === 'win32' ? '.exe' : '';
-  const requiredAssets = [
-    join(candidate, 'manifest.json'),
-    join(candidate, 'bin', `krillinai-cli${executableSuffix}`)
-  ];
-  return requiredAssets.every(path => existsSync(path)) ? candidate : undefined;
 }
 
 function resolveDevYtDlpPath(): string | undefined {
