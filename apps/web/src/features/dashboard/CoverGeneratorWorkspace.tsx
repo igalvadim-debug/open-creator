@@ -1,12 +1,20 @@
 import {
   creatorPromptMaxLength,
+  gatewayModelIdMatches,
+  gatewayModelReady,
   readCreatorResultSnapshots,
   type CoverStyleId,
   type CoverTextLanguage,
   type CreatorArtifact,
   type CreatorJson,
-  type ImageGenerationQuality
+  type ImageGenerationQuality,
+  type CreatorServicesConfig,
+  type CreatorServicesCredentialField,
+  type GatewayAccountState,
+  type GatewayImageCatalog,
+  type GatewayModel
 } from '@opencreator/protocol';
+import { useGenerationAccess } from './DashboardGenerationAccess.js';
 import {
   Check,
   Download,
@@ -21,13 +29,19 @@ import {
   UploadCloud,
   X
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useAppLanguage } from '../../i18n/LanguageProvider.js';
 import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
+import { formatRoute, parseRoute } from '../../app/routes.js';
 import NativeSelect from '../../components/forms/NativeSelect.js';
+import OfficialModelSelect from '../../components/forms/OfficialModelSelect.js';
+import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
+import type { GatewayAccountSettingsService } from '../../services/gateway-account-service.js';
 import CreatorResultVersionMenu from './CreatorResultVersionMenu.js';
 import CreatorTaskSummary from './CreatorTaskSummary.js';
 import CreatorToolShell from './CreatorToolShell.js';
+import ImageGenerationSettings, { type ImageGenerationSettingSection } from './ImageGenerationSettings.js';
+import { OfficialModelField, OfficialTaskModelFields, useOfficialServices } from './official-services.js';
 import { coverPanelAdapter } from './creator-panel-adapters.js';
 import {
   captureCreatorClientFailure,
@@ -49,19 +63,78 @@ type CoverResultVersion = {
 
 const samplePromptZh = '突出原封面的核心主体，封面文字直接有力，整体适合视频平台缩略图';
 const samplePromptEn = 'Keep the core reference subject, use direct thumbnail copy, and make the result readable at small sizes';
+const localImageModelId = '__local_image__';
 
 export default function CoverGeneratorWorkspace(props: {
   onBack(): void;
   promptHint?: string;
+  embedded?: boolean;
+  embeddedTabs?: ReactNode;
+  forceComposer?: boolean;
+  onGenerated?(): void;
+  creatorServicesService?: CreatorServicesSettingsService | null;
+  gatewayAccountService?: GatewayAccountSettingsService | null;
+  onGatewayStateChange?(state: GatewayAccountState): void;
 }) {
   const l = useLocalizedCopy();
+  const requireGenerationAccess = useGenerationAccess();
   const { language: appLanguage } = useAppLanguage();
   const session = useOptionalCreatorSession();
+  const official = useOfficialServices('image', true, undefined, models => models[0]);
+  const [imageConfig, setImageConfig] = useState<CreatorServicesConfig['image'] | null>(null);
+  const [configuredCredentials, setConfiguredCredentials] = useState<CreatorServicesCredentialField[]>([]);
+  const [codexImageReady, setCodexImageReady] = useState<boolean>();
+  const [publicCatalog, setPublicCatalog] = useState<GatewayImageCatalog | undefined>(() => props.gatewayAccountService?.getCachedImageCatalog?.());
+  const catalogRequest = useRef(0);
+  const catalogWork = useRef<{ service: GatewayAccountSettingsService; promise: Promise<GatewayImageCatalog> }>();
+  const [pendingModelId, setPendingModelId] = useState<string>();
+  const pendingValidation = useRef<string>();
+  const localProvider = imageConfig?.provider;
+  const localCodexImage = !official.official && localProvider === 'codex-native';
+  const localConfigured = imageConfig !== null && (localProvider === 'codex-native' ? codexImageReady === true
+    : localProvider === 'kling' ? configuredCredentials.includes('image.kling.accessKey') && configuredCredentials.includes('image.kling.secretKey') && !!imageConfig.kling.model
+      : configuredCredentials.includes(`image.${localProvider}.apiKey` as CreatorServicesCredentialField) && !!imageConfig[localProvider!].model);
+  const localModel: GatewayModel | undefined = imageConfig ? {
+    id: localImageModelId, name: l('本地生图服务', 'Local image service'), modality: 'image', capabilities: [],
+    vendor: l('本地', 'Local'), status: localConfigured ? 'ready' : 'temporarily_unavailable'
+  } : undefined;
+  const publicModels = publicCatalog?.models ?? [];
+  const catalogModels = [...(localModel ? [localModel] : []), ...publicModels];
+  const selectedCatalogId = pendingModelId ?? (localConfigured ? localImageModelId : '');
+
+  function loadPublicCatalog() {
+    const request = ++catalogRequest.current;
+    const service = props.gatewayAccountService;
+    setPublicCatalog(service?.getCachedImageCatalog?.());
+    if (!service?.getImageCatalog) return;
+    const promise = catalogWork.current?.service === service
+      ? catalogWork.current.promise : service.getImageCatalog();
+    catalogWork.current = { service, promise };
+    void promise.then(catalog => {
+      if (request === catalogRequest.current) setPublicCatalog(catalog);
+    }).catch(() => undefined).finally(() => {
+      if (catalogWork.current?.promise === promise) catalogWork.current = undefined;
+    });
+  }
+
+  function selectCatalogModel(id: string) {
+    if (id === localImageModelId) {
+      setPendingModelId(undefined);
+      pendingValidation.current = undefined;
+      if (localProvider) session?.updateDraft({ provider: localProvider, __creatorUserSelected: true });
+      return;
+    }
+    if (!publicModels.some(model => gatewayModelIdMatches(model.id, id) && gatewayModelReady(model))) return;
+    setPendingModelId(id);
+    session?.updateDraft({ __creatorUserSelected: true }, { semantic: true });
+    pendingValidation.current = undefined;
+    requireGenerationAccess();
+  }
   const restoredResults = session?.job.artifacts.some(artifact => (
     artifact.kind === 'cover_image' && artifact.status === 'completed'
   )) === true;
   const restoredStep = readStep(session?.state.currentStep, restoredResults ? 2 : 0);
-  const [currentStep, setCurrentStep] = useState<CoverStep>(restoredStep);
+  const [currentStep, setCurrentStep] = useState<CoverStep>(props.forceComposer ? 0 : restoredStep);
   const [furthestStep, setFurthestStep] = useState<CoverStep>(() => (
     Math.max(
       restoredStep,
@@ -78,6 +151,7 @@ export default function CoverGeneratorWorkspace(props: {
   const [candidateCount, setCandidateCount] = useState<CoverCandidateCount>(() => (
     readCandidateCount(session?.state.candidateCount)
   ));
+  const availableCandidateCounts: CoverCandidateCount[] = localCodexImage ? [1] : [1, 2, 3, 4];
   const [coverStyle, setCoverStyle] = useState<CoverStyleId>(() => (
     readCoverStyle(session?.state.coverStyle)
   ));
@@ -173,7 +247,7 @@ export default function CoverGeneratorWorkspace(props: {
       : l('未使用', 'Not used');
   const issue = readIssue(session, latestStage, l);
   const canContinue = prompt.trim().length > 0 || isYoutubeUrl(youtubeUrl);
-  const showRunNotice = Boolean(error || (currentStep !== 2 && notice && !issue.message));
+  const showRunNotice = Boolean(!error && currentStep !== 2 && notice && !issue.message);
   const currentReferenceName = referenceFile?.name
     ?? readArtifactString(activeReferenceArtifact, 'fileName');
   const resolvedCoverTextLanguage = coverTextLanguage;
@@ -190,6 +264,63 @@ export default function CoverGeneratorWorkspace(props: {
   });
   const referencePreviewKey = JSON.stringify([session?.job.id, activeReferenceArtifact?.id,
     activeReferenceArtifact?.version, activeReferenceArtifact?.sha256, activeReferenceArtifact?.path]);
+
+  useEffect(() => {
+    if (official.official) return;
+    let active = true;
+    void props.creatorServicesService?.getConfig().then(response => {
+      if (active) {
+        setImageConfig(response.config.image);
+        setConfiguredCredentials(response.configuredCredentials ?? []);
+      }
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [props.creatorServicesService, official.official]);
+
+  useEffect(() => {
+    setCodexImageReady(undefined);
+    if (official.official || imageConfig?.provider !== 'codex-native') return;
+    let active = true;
+    void props.creatorServicesService?.getCodexImageStatus?.().then(status => {
+      if (active) setCodexImageReady(status.ready);
+    }).catch(() => { if (active) setCodexImageReady(false); });
+    return () => { active = false; };
+  }, [imageConfig?.provider, official.official, props.creatorServicesService]);
+
+  useEffect(() => {
+    if (localCodexImage && candidateCount !== 1) setCandidateCount(1);
+  }, [localCodexImage, candidateCount]);
+
+  useEffect(() => () => { catalogRequest.current++; }, [props.gatewayAccountService]);
+
+  useEffect(() => {
+    if (!pendingModelId || official.authState !== 'signed_in' || official.activationState !== 'ready'
+      || pendingValidation.current === pendingModelId || !props.gatewayAccountService) return;
+    pendingValidation.current = pendingModelId;
+    let active = true;
+    void props.gatewayAccountService.getState({ refreshModels: true }).then(state => {
+      if (!active) return;
+      props.onGatewayStateChange?.(state);
+      const ready = state.models.filter(model => model.modality === 'image' && gatewayModelReady(model));
+      const requested = ready.find(model => gatewayModelIdMatches(model.id, pendingModelId));
+      const recommended = ready.find(model => gatewayModelIdMatches(model.id, state.recommendedModels?.image))
+        ?? ready.find(model => model.recommended);
+      const chosen = requested ?? recommended ?? ready[0];
+      if (chosen) session?.updateDraft({ officialModels: { image: chosen.id }, __creatorUserSelected: true });
+      if (!requested) setNotice(chosen
+        ? recommended
+          ? l('所选模型当前账户不可用，已切换为推荐图片模型。', 'That model is unavailable for this account. A recommended image model is selected.')
+          : l('所选模型当前账户不可用，已切换为可用图片模型。', 'That model is unavailable for this account. An available image model is selected.')
+        : l('当前账户暂无可用的图片模型。', 'No image model is available for this account.'));
+      setPendingModelId(undefined);
+    }).catch(() => {
+      if (active) {
+        setPendingModelId(undefined);
+        setNotice(l('账户模型目录刷新失败，请重新选择模型。', 'Could not refresh your account models. Select a model again.'));
+      }
+    });
+    return () => { active = false; };
+  }, [pendingModelId, official.authState, official.activationState, props.gatewayAccountService]);
 
   useEffect(() => {
     if (latestResult !== undefined) {
@@ -310,6 +441,7 @@ export default function CoverGeneratorWorkspace(props: {
   }
 
   function updateCandidateCount(value: CoverCandidateCount) {
+    if (localCodexImage && value !== 1) return;
     setCandidateCount(value);
     session?.updateDraft({ candidateCount: value });
   }
@@ -365,6 +497,11 @@ export default function CoverGeneratorWorkspace(props: {
 
   async function generate() {
     if (submitting || generating) return;
+    if (!requireGenerationAccess(!official.official && !pendingModelId)) return;
+    if (official.official && official.authState !== undefined && !official.ready) {
+      setError(l('官方图片服务暂不可用，请在账户页面检查连接状态', 'Official image service is unavailable. Check the connection in your account.'));
+      return;
+    }
     if (session === null) {
       setError(l(
         '封面生成服务暂不可用，请检查 Runtime 连接',
@@ -386,6 +523,10 @@ export default function CoverGeneratorWorkspace(props: {
       openStep(1);
       return;
     }
+    if (!official.official && !localConfigured) {
+      setError(l('请先在设置中配置可用的本地生图服务。', 'Configure a ready local image service in Settings first.'));
+      return;
+    }
     const resultVersionBeforeRun = latestResultValueRef.current;
     setSubmitting(true);
     setCurrentStep(2);
@@ -405,6 +546,7 @@ export default function CoverGeneratorWorkspace(props: {
         ratio,
         quality,
         candidateCount,
+        ...(official.official ? { ...official.draftPatch, provider: 'openai' } : { provider: localProvider! }),
         coverStyle,
         coverTextLanguage,
         resolvedCoverTextLanguage,
@@ -433,6 +575,7 @@ export default function CoverGeneratorWorkspace(props: {
       });
       openStep(2);
       setResultTab('options');
+      props.onGenerated?.();
       if (latestResultValueRef.current === resultVersionBeforeRun) {
         setNotice(sourceType === 'youtube'
           ? l('正在分析视频内容，完成后会自动生成封面', 'Analyzing the video. Thumbnail generation will start automatically.')
@@ -573,8 +716,8 @@ export default function CoverGeneratorWorkspace(props: {
           : l('确定封面内容', 'Define thumbnail content');
   const panelQuickActions = [
     ...(issue.deepLink ? [{
-      id: 'cover-open-ai-services',
-      label: l('打开 AI 服务设置', 'Open AI service settings'),
+      id: 'cover-open-recovery-settings',
+      label: issue.actionLabel ?? l('打开 AI 服务设置', 'Open AI service settings'),
       kind: 'action' as const,
       onAction: () => { window.location.hash = issue.deepLink; }
     }] : []),
@@ -623,6 +766,118 @@ export default function CoverGeneratorWorkspace(props: {
       )
     }
   ];
+  const imageModelField = official.official
+    ? <OfficialModelField label={l('图片模型', 'Image model')} service={official} disabled={submitting || generating} />
+    : <label className="creator-tool-field image-generation-provider-picker">
+        <OfficialModelSelect
+          label={l('模型', 'Model')}
+          value={selectedCatalogId}
+          disabled={submitting || generating}
+          layout="grouped"
+          loginRequiredModelIds={new Set(publicModels.map(model => model.id))}
+          onOpen={loadPublicCatalog}
+          onChange={selectCatalogModel}
+          models={catalogModels}
+        />
+      </label>;
+
+  if (props.embedded && currentStep !== 2) {
+    const busy = submitting || generating;
+    const qualityLabel = quality === 'high' ? l('高清', 'High') : quality === 'low' ? l('快速', 'Fast') : l('标准', 'Standard');
+    const settingSections: ImageGenerationSettingSection[] = [
+      {
+        id: 'ratio', label: l('封面画幅', 'Thumbnail aspect ratio'), value: ratio, ratio: true,
+        options: ['16:9', '1:1', '9:16'].map(value => ({ value, label: value })),
+        onChange: value => updateRatio(value as CoverRatio)
+      },
+      {
+        id: 'count', label: l('方案数量', 'Number of options'), value: String(candidateCount),
+        options: availableCandidateCounts.map(value => ({ value: String(value), label: l(`${value} 个方案`, `${value} options`) })),
+        onChange: value => updateCandidateCount(Number(value) as CoverCandidateCount)
+      },
+      {
+        id: 'quality', label: l('生成质量', 'Quality'), value: quality,
+        options: ([['low', l('快速', 'Fast')], ['medium', l('标准', 'Standard')], ['high', l('高清', 'High')]] as const).map(([value, label]) => ({ value, label })),
+        onChange: value => updateQuality(value as ImageGenerationQuality)
+      },
+      {
+        id: 'style', label: l('封面风格', 'Thumbnail style'), value: coverStyle,
+        options: (['personal-growth', 'psychology', 'wealth-platinum-red', 'bilibili-red-blue-white', 'custom'] as const)
+          .map(value => ({ value, label: coverStyleLabel(value, l) })),
+        onChange: value => updateCoverStyle(value as CoverStyleId)
+      },
+      {
+        id: 'language', label: l('封面文字语言', 'Cover text language'), value: coverTextLanguage,
+        options: [
+          { value: 'zh-CN', label: '简体中文' }, { value: 'zh-TW', label: '繁體中文' },
+          { value: 'en-US', label: 'English' }, { value: 'ja-JP', label: '日本語' }, { value: 'ko-KR', label: '한국어' }
+        ],
+        onChange: value => updateCoverTextLanguage(value as CoverTextLanguage)
+      }
+    ];
+    return (
+      <div className="creator-tool-embedded">
+        <div className="creator-tool-stack image-generation-studio">
+          <form className="image-generation-composer dashboard-cover-composer" aria-label={l('封面生成', 'Cover Generator')} onSubmit={event => {
+            event.preventDefault();
+            void generate();
+          }}>
+            <fieldset className="image-generation-fields" disabled={busy}>
+              <div className="image-generation-editor">
+                <div className="image-generation-composer-heading">{props.embeddedTabs}</div>
+                <div className="image-generation-reference" data-loaded={Boolean(currentReferenceName)}>
+                  <label className="image-generation-reference-upload" title={currentReferenceName ? l('更换参考图', 'Replace reference') : l('上传封面参考图', 'Upload a thumbnail reference')}>
+                    <input type="file" accept="image/*" aria-label={l('上传封面参考图', 'Upload a thumbnail reference')} onChange={event => {
+                      chooseReference(event.target.files?.[0] ?? null);
+                      event.target.value = '';
+                    }} />
+                    <span className="image-generation-reference-thumbnail">{referencePreview ? <img src={referencePreview} alt={l('封面参考图', 'Thumbnail reference')} /> : <ImagePlus size={24} strokeWidth={1.5} />}</span>
+                    <span className="image-generation-reference-copy"><span><strong>{currentReferenceName || l('参考图', 'Reference')}</strong>{!currentReferenceName ? <small>{l('选填', 'Optional')}</small> : null}</span><small>{currentReferenceName ? l('更换参考图', 'Replace reference') : l('JPG、PNG、WebP', 'JPG, PNG, WebP')}</small></span>
+                    <span className="image-generation-reference-count">{currentReferenceName ? 1 : 0}/1</span>
+                  </label>
+                  {currentReferenceName ? <button className="image-generation-reference-remove" type="button" aria-label={l('清除参考图', 'Clear reference image')} onClick={clearReference}><X size={16} /></button> : null}
+                </div>
+                <div className="creator-tool-field image-generation-prompt-field">
+                  <label className="image-generation-visually-hidden" htmlFor="cover-prompt-input">{l('封面内容要求', 'Thumbnail content requirements')}</label>
+                  <textarea
+                    id="cover-prompt-input"
+                    rows={3}
+                    maxLength={creatorPromptMaxLength}
+                    value={prompt}
+                    onChange={event => updatePrompt(event.target.value)}
+                    placeholder={l('描述封面主体、文案、风格和画面氛围', 'Describe the thumbnail subject, copy, style, and visual mood')}
+                  />
+                </div>
+                <div className="dashboard-additional-source-row dashboard-cover-link-row">
+                  <label className="dashboard-translation-url-input">
+                    <Link2 size={18} strokeWidth={1.8} aria-hidden="true" />
+                    <input type="url" aria-label={l('YouTube 链接', 'YouTube URL')} value={youtubeUrl} onChange={event => updateYoutubeUrl(event.target.value)} placeholder={l('或粘贴 YouTube 链接', 'Or paste a YouTube URL')} />
+                  </label>
+                </div>
+                {error || notice ? <p className={error ? 'dashboard-translation-message is-error' : 'dashboard-translation-message'} role={error ? 'alert' : 'status'}>{error || notice}</p> : null}
+              </div>
+              <div className="image-generation-action-bar">
+                <div className="image-generation-model-row">{imageModelField}</div>
+                <ImageGenerationSettings
+                  label={l('封面设置', 'Cover settings')}
+                  summary={{ aspectRatio: ratio, count: l(`${candidateCount} 个方案`, `${candidateCount} options`), resolution: coverStyleLabel(coverStyle, l), quality: qualityLabel }}
+                  sections={settingSections}
+                  disabled={busy}
+                  hideHeader
+                />
+                <div className="image-generation-submit-row">
+                  <button className="creator-tool-primary" type="submit" disabled={busy}>
+                    {busy ? <LoaderCircle className="smart-dubbing-spinner" size={16} /> : <Sparkles size={16} />}
+                    {busy ? l('正在生成', 'Generating') : l('生成封面', 'Generate Cover')}
+                  </button>
+                </div>
+              </div>
+            </fieldset>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <CreatorToolShell
@@ -642,6 +897,10 @@ export default function CoverGeneratorWorkspace(props: {
       placeholder={props.promptHint ?? l('描述封面画面', 'Describe the thumbnail')}
       stepLabel={panelStepLabel}
       currentIssue={error || issue.message || undefined}
+      workspaceIssue={error || issue.message ? {
+        title: `${l('封面生成', 'Thumbnail Generator')} · ${l('失败', 'Failed')}`,
+        description: error || issue.message
+      } : undefined}
       quickActions={panelQuickActions}
       onCancelTask={cancelTask}
       onResumeTask={resumeTask}
@@ -763,6 +1022,9 @@ export default function CoverGeneratorWorkspace(props: {
                   )}</p>
                 </div>
               </div>
+              {official.official
+                ? <OfficialTaskModelFields modalities={isYoutubeUrl(youtubeUrl) ? ['text', 'image'] : ['image']} disabled={submitting || generating} />
+                : <div className="official-task-models">{imageModelField}</div>}
               <div className="media-generation-control">
                 <span>{l('封面风格', 'Thumbnail style')}</span>
                 <div className="cover-style-grid" role="radiogroup" aria-label={l('封面风格', 'Thumbnail style')}>
@@ -862,7 +1124,7 @@ export default function CoverGeneratorWorkspace(props: {
               <div className="media-generation-control">
                 <span>{l('生成数量', 'Number of options')}</span>
                 <div className="creator-tool-segmented" role="radiogroup" aria-label={l('生成数量', 'Number of options')}>
-                  {([1, 2, 3, 4] as const).map(value => (
+                  {availableCandidateCounts.map(value => (
                     <button
                       type="button"
                       role="radio"
@@ -1142,8 +1404,8 @@ export default function CoverGeneratorWorkspace(props: {
           ) : null}
 
           {showRunNotice ? (
-            <div className={`video-translation-run-notice${error ? ' is-error' : ''}`} role={error ? 'alert' : 'status'}>
-              <span>{error || notice}</span>
+            <div className="video-translation-run-notice" role="status">
+              <span>{notice}</span>
             </div>
           ) : null}
         </div>
@@ -1255,7 +1517,7 @@ function readIssue(
   session: ReturnType<typeof useOptionalCreatorSession>,
   latestStage: ReturnType<NonNullable<ReturnType<typeof useOptionalCreatorSession>>['job']['stages']['at']>,
   l: (zh: string, en: string) => string
-): { message: string; deepLink: string } {
+): { message: string; deepLink: string; actionLabel?: string } {
   const needsInput = session?.state.needsInput;
   if (needsInput !== null && typeof needsInput === 'object' && !Array.isArray(needsInput)) {
     return {
@@ -1266,16 +1528,26 @@ function readIssue(
     };
   }
   if (latestStage?.status === 'failed') {
+    const recovery = latestStage.errorCode === 'network_unavailable' ? 'network'
+      : latestStage.errorCode === 'yt_dlp_update_recommended' ? 'components' : undefined;
+    const currentRoute = parseRoute(window.location.hash);
+    const returnPath = formatRoute(currentRoute.view === 'workbench' && currentRoute.tool === 'cover-generator'
+      && currentRoute.jobId === session?.job.id
+      ? currentRoute : { view: 'workbench', tool: 'cover-generator', jobId: session?.job.id });
     return {
       message: formatCoverError({
         code: latestStage.errorCode,
         message: latestStage.errorMessage
       }, l),
-      deepLink: latestStage.errorCode === 'creator_image_config_missing'
+      deepLink: recovery
+        ? `#/settings?${new URLSearchParams({ ...(recovery === 'components' ? { tab: 'local-components' } : {}), returnPath })}`
+        : latestStage.errorCode === 'creator_image_config_missing'
         ? '#/settings?tab=ai-services&section=image'
         : latestStage.errorCode === 'creator_llm_config_missing'
           ? '#/settings?tab=ai-services&section=text'
-          : ''
+          : '',
+      actionLabel: recovery === 'network' ? l('检查代理设置', 'Check proxy settings')
+        : recovery === 'components' ? l('检查 yt-dlp 更新', 'Check yt-dlp updates') : undefined
     };
   }
   if (session?.error) return { message: formatCoverError(session.error, l), deepLink: '' };
@@ -1311,6 +1583,9 @@ function formatCoverError(error: unknown, l: (zh: string, en: string) => string)
       '无法连接 YouTube，请检查网络或代理设置后重试',
       'Unable to connect to YouTube. Check the network or proxy settings and try again.'
     );
+  }
+  if (code === 'yt_dlp_update_recommended') {
+    return l('视频解析失败，yt-dlp 可能需要更新', 'Video extraction failed; yt-dlp may need an update');
   }
   if (code === 'image_generation_failed') {
     return l('封面生成失败，请检查图像服务和网络后重试', 'Thumbnail generation failed. Check the provider and network, then retry.');

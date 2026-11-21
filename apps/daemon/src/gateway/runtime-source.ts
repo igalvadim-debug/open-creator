@@ -8,7 +8,8 @@ export function createRuntimeSource(manual: AppServerRuntimeManager, readState: 
     const state = readState();
     if (state.source === 'manual') return manual;
     const official = readOfficial();
-    if (state.authState !== 'signed_in' || state.activationState !== 'ready' || !official) throw new GatewayError('services_not_ready');
+    if (state.authState !== 'signed_in') throw new GatewayError('auth_required', 401);
+    if (state.activationState !== 'ready' || !official) throw new GatewayError('services_not_ready');
     return official;
   }
   function turn(input: AppServerRuntimeTurnInput): AppServerRuntimeExecution {
@@ -32,7 +33,7 @@ export function createRuntimeSource(manual: AppServerRuntimeManager, readState: 
       const acquired = manager.acquireScope(scope);
       return { ...acquired, startTurn(input) { return turn({ ...input, scope }); } };
     },
-    closeScope(scope, reason) { return current().closeScope(scope, reason); },
+    async closeScope(scope, reason) { await manual.closeScope(scope, reason); await readOfficial()?.closeScope(scope, reason); },
     async closeScopes(predicate, reason) { await manual.closeScopes(predicate, reason); await readOfficial()?.closeScopes(predicate, reason); },
     invalidate(reason) { return manual.invalidate(reason); },
     isScopeBusy(scope) { return manual.isScopeBusy(scope) || readOfficial()?.isScopeBusy(scope) === true; },

@@ -63,6 +63,39 @@ it('keeps manual service turns free of official probes', () => {
   expect(source.startTurn(f.input)).toBe(f.execution);
 });
 
+it('closes a creator scope when gateway services are unavailable', async () => {
+  const f = fixture();
+  f.state.activationState = 'loading';
+  const closeManual = vi.fn(async () => undefined);
+  const closeOfficial = vi.fn(async () => undefined);
+  f.manual.closeScope = closeManual;
+  f.official.closeScope = closeOfficial;
+  const source = createRuntimeSource(f.manual, () => f.state, () => f.official);
+  const scope = { kind: 'creator-job' as const, id: 'job-to-delete' };
+
+  await expect(source.closeScope(scope, 'creator_scope_closed')).resolves.toBeUndefined();
+  expect(closeManual).toHaveBeenCalledWith(scope, 'creator_scope_closed');
+  expect(closeOfficial).toHaveBeenCalledWith(scope, 'creator_scope_closed');
+});
+
+it.each([
+  ['expired', 'expired', 'inactive', 'auth_required', 401],
+  ['signed_out', 'signed_out', 'inactive', 'auth_required', 401],
+  ['loading', 'signed_in', 'loading', 'services_not_ready', 503],
+  ['blocked', 'signed_in', 'blocked', 'services_not_ready', 503]
+] as const)('reports gateway %s as %s without changing service readiness semantics', (_label, authState, activationState, code, status) => {
+  const f = fixture();
+  f.state.authState = authState;
+  f.state.activationState = activationState;
+  if (authState === 'signed_out') {
+    f.state.account = null;
+    f.state.bindingVersion = null;
+  }
+  const source = createRuntimeSource(f.manual, () => f.state, () => f.official);
+  expect(() => source.startTurn(f.input)).toThrow(expect.objectContaining({ code, status }));
+  expect(f.startTurn).not.toHaveBeenCalled();
+});
+
 it('rejects a missing selected model without silently using another model', () => {
   const f = fixture();
   const source = createRuntimeSource(f.manual, () => f.state, () => f.official);

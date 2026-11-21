@@ -2,6 +2,26 @@ import { describe, expect, it, vi } from 'vitest';
 import { createCreatorService } from './creator-service.js';
 
 describe('creator web service', () => {
+  it('forwards cancellation when loading generation history', async () => {
+    const client = { get: vi.fn(async () => ({ jobs: [] })), post: vi.fn(), delete: vi.fn() };
+    const service = createCreatorService(client);
+    const controller = new AbortController();
+
+    await service.listJobs('project 1', { signal: controller.signal });
+
+    expect(client.get).toHaveBeenCalledWith('/creator/jobs?projectId=project%201', {
+      signal: controller.signal
+    });
+  });
+
+  it('controls a single download through its owner and encoded stage ID', async () => {
+    const client = { get: vi.fn(), post: vi.fn(), delete: vi.fn() };
+    const service = createCreatorService(client);
+    for (const action of ['pause', 'resume', 'cancel'] as const) {
+      await service.controlDownload('job 1', 'stage/2', action);
+      expect(client.post).toHaveBeenLastCalledWith(`/creator/jobs/job%201/downloads/stage%2F2/${action}`);
+    }
+  });
   it('uses the public creator endpoints', async () => {
     const client = {
       get: vi.fn(async () => ({ jobs: [] })),
@@ -86,8 +106,8 @@ describe('creator web service', () => {
     await service.openVisualAssetPreview('stickman.style.paper-pencil', 2);
 
     expect(client.get).toHaveBeenCalledWith('/creator/presets?locale=en-US');
-    expect(client.get).toHaveBeenCalledWith('/creator/jobs?projectId=project%201');
-    expect(client.get).toHaveBeenCalledWith('/creator/jobs');
+    expect(client.get).toHaveBeenCalledWith('/creator/jobs?projectId=project%201', undefined);
+    expect(client.get).toHaveBeenCalledWith('/creator/jobs', undefined);
     expect(client.post).toHaveBeenNthCalledWith(1, '/creator/jobs', {
       projectId: 'project 1',
       templateId: 'video-translation',

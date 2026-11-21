@@ -127,7 +127,8 @@ export const creatorRuntimeWorkspaces = [
   'image-generation',
   'video-generation',
   'cover-generator',
-  'smart-dubbing'
+  'smart-dubbing',
+  'transcription'
 ] as const;
 
 export type CreatorRuntimeWorkspace = typeof creatorRuntimeWorkspaces[number];
@@ -775,4 +776,25 @@ export type CreatorSubtitlePreviewRequest = {
   subtitlePosition: 'top' | 'bottom';
   translationText: string;
   originalText: string;
+};
+
+export type CreatorSubtitleRenderRequest = {
+  width: number;
+  height: number;
+  horizontal: boolean;
+  bilingual: boolean;
+  subtitlePosition: 'top' | 'bottom';
+  subtitleStyle: Record<string, CreatorJson>;
+  majorTitle?: string;
+  minorTitle?: string;
+  cues: Array<{ startMs: number; endMs: number; text: string; sourceText?: string }>;
+};
+
+export type CreatorSubtitleRenderBundle = {
+  schemaVersion: 1;
+  contentHash: string;
+  ass: string;
+  width: number;
+  height: number;
+  fonts: Array<{ id: string; family: string; sha256: string }>;
 };

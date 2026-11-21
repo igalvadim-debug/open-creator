@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type {
+  CreatorJob,
   CreatorJson,
   CreatorProviderRequest,
   CreatorProviderRequestStatus,
@@ -24,6 +25,19 @@ export type CreatorProviderCapabilities = {
     remoteTaskId: string | null;
   }): Promise<CreatorProviderLookupResult>;
 };
+
+export function hasPendingPaidCreatorRequests(jobs: readonly Pick<CreatorJob, 'providerRequests' | 'issues'>[]): boolean {
+  return jobs.some(job => job.providerRequests.some(request => request.billingSideEffect
+    && ['submitting', 'waiting_remote', 'unknown_remote_acceptance'].includes(request.status)
+    && !(request.provider === 'opencreator-gateway-video'
+      && request.status === 'unknown_remote_acceptance' && request.remoteTaskId === null
+      && job.issues?.some(issue => issue.status !== 'resolved'
+        && issue.stageRunId === request.stageRunId
+        && issue.publicFacts?.kind === 'http-rejected'
+        && issue.publicFacts.provider === request.provider
+        && issue.publicFacts.httpStatus === 409
+        && issue.publicFacts.upstreamCode === 'video_price_changed'))));
+}
 
 export class CreatorProviderRequestError extends Error {
   constructor(readonly code: string, message: string) {
@@ -304,6 +318,14 @@ export class CreatorProviderRequestLedger {
     stageId: string;
     scopeKey?: string | null;
   }): CreatorProviderRequest[] {
+    return this.pendingForStage(input).filter(request => request.status === 'unknown_remote_acceptance');
+  }
+
+  pendingForStage(input: {
+    jobId: string;
+    stageId: string;
+    scopeKey?: string | null;
+  }): CreatorProviderRequest[] {
     const stageIds = new Set(this.repository.listStageRuns(input.jobId)
       .filter(stage => (
         stage.stageId === input.stageId
@@ -312,7 +334,7 @@ export class CreatorProviderRequestLedger {
       .map(stage => stage.id));
     return this.repository.listProviderRequests(input.jobId).filter(request => (
       stageIds.has(request.stageRunId)
-      && request.status === 'unknown_remote_acceptance'
+      && isPendingRemote(request.status)
     ));
   }
 

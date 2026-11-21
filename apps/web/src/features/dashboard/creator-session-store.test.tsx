@@ -88,6 +88,116 @@ function PendingHarness() {
 }
 
 describe('CreatorSessionStore', () => {
+  it('merges simultaneous task model choices and flushes the complete selection before starting', async () => {
+    let current = job(0, { officialModels: { video: 'saved-video' } });
+    let session!: ReturnType<typeof useCreatorSession>;
+    const applyAction = vi.fn(async (_id: string, request: { action: string; input: { patch?: object } }) => {
+      current = { ...current, revision: current.revision + 1, state: { ...current.state, ...request.input.patch } };
+      return { job: current };
+    });
+    function Models() { session = useCreatorSession(); return <output>{JSON.stringify(session.state.officialModels)}</output>; }
+    render(<CreatorSessionProvider initialJob={current} service={{ applyAction, runAgentTurn: vi.fn() } as never}><Models /></CreatorSessionProvider>);
+    await act(async () => {
+      session.updateDraft({ officialModels: { text: 'task-text' } });
+      session.updateDraft({ officialModels: { image: 'task-image' } });
+      session.updateDraft({ officialModels: { speech: 'task-speech' } });
+      session.updateDraft({ officialModels: { transcription: 'task-transcription' } });
+      await session.applyAction({ action: 'run-stage', input: { stageId: 'subtitle' } });
+    });
+    expect(current.state.officialModels).toEqual({ video: 'saved-video', text: 'task-text', image: 'task-image', speech: 'task-speech', transcription: 'task-transcription' });
+    expect(applyAction.mock.calls.map(([, request]) => request.action)).toEqual(['update-settings', 'run-stage']);
+    expect(session.state.officialModels).toEqual(current.state.officialModels);
+  });
+
+  it('retains newer download progress when an older control response, snapshot or SSE event arrives', async () => {
+    const stage: CreatorStageRun = {
+      id: 'download_1', jobId: 'job_1', stageId: 'download', executor: 'download', status: 'running',
+      dispatchStatus: 'claimed', claimOwner: null, claimExpiresAt: null, attempt: 1, idempotencyKey: null,
+      scopeKey: null, inputFingerprint: null, progress: { phase: 'downloading', percent: 42, downloadProgressSequence: 3 },
+      errorCode: null, errorMessage: null, startedAt: null, finishedAt: null
+    };
+    const initial = { ...job(2, {}), templateId: 'video-download', status: 'running' as const, stages: [stage] };
+    let session!: ReturnType<typeof useCreatorSession>;
+    let emit!: (event: CreatorEventEnvelope) => void;
+    let resolveControl!: (value: unknown) => void;
+    const controlDownload = vi.fn(() => new Promise(resolve => { resolveControl = resolve; }));
+    function SnapshotHarness() { session = useCreatorSession(); return <Harness />; }
+    render(<CreatorSessionProvider initialJob={initial} service={{ applyAction: vi.fn(), runAgentTurn: vi.fn(),
+      getJob: vi.fn(async () => ({ job: initial })),
+      subscribeJobEvents: vi.fn((_id, onEvent) => { emit = onEvent; return { close: vi.fn() }; }), controlDownload
+    } as never}><SnapshotHarness /></CreatorSessionProvider>);
+    await waitFor(() => expect(emit).toBeDefined());
+    let controlWork!: Promise<void>;
+    await act(async () => { controlWork = session.controlDownload!(stage.id, 'resume'); });
+    const latest = { ...stage, progress: { ...stage.progress, downloadProgressSequence: 6, percent: 48 } };
+    const event = (incoming: CreatorStageRun): CreatorEventEnvelope => ({ id: `download:${incoming.progress.downloadProgressSequence}`,
+      jobId: initial.id, revision: 2, kind: 'stage_progress', payload: { stage: incoming as never }, createdAt: initial.updatedAt });
+    act(() => emit(event(latest)));
+    act(() => emit(event({ ...stage, progress: { ...stage.progress, downloadControl: 'paused', downloadProgressSequence: 4 } })));
+    act(() => session.applyRemoteSnapshot(initial));
+    await act(async () => {
+      resolveControl({ job: { ...initial, stages: [{ ...stage, progress: { ...stage.progress, downloadProgressSequence: 5 } }] }, stage, control: 'resumed' });
+      await controlWork;
+    });
+    expect(session.job.stages[0]).toEqual(latest);
+    expect(session.job.stages[0]!.progress.downloadControl).not.toBe('paused');
+  });
+
+  it('retains a newer stage percent when a later phase reports a smaller value', async () => {
+    const stage: CreatorStageRun = {
+      id: 'subtitle_1', jobId: 'job_1', stageId: 'subtitle', executor: 'krillinai', status: 'running',
+      dispatchStatus: 'claimed', claimOwner: null, claimExpiresAt: null, attempt: 1, idempotencyKey: null,
+      scopeKey: null, inputFingerprint: null, progress: { phase: 'preparing_source', percent: 20 },
+      errorCode: null, errorMessage: null, startedAt: null, finishedAt: null
+    };
+    const initial = { ...job(2, {}), templateId: 'video-translation', status: 'running' as const, stages: [stage] };
+    let session!: ReturnType<typeof useCreatorSession>;
+    let emit!: (event: CreatorEventEnvelope) => void;
+    const subscribeJobEvents = vi.fn((_id, onEvent) => { emit = onEvent; return { close: vi.fn() }; });
+    function SnapshotHarness() { session = useCreatorSession(); return <Harness />; }
+    render(<CreatorSessionProvider initialJob={initial} service={{ applyAction: vi.fn(), runAgentTurn: vi.fn(),
+      getJob: vi.fn(async () => ({ job: initial })), subscribeJobEvents } as never}><SnapshotHarness /></CreatorSessionProvider>);
+    await waitFor(() => expect(emit).toBeDefined());
+    const lower = { ...stage, progress: { phase: 'reading_platform_captions', percent: 5, message: '正在获取平台字幕' } };
+    act(() => session.applyRemoteSnapshot({ ...initial, stages: [lower] }));
+    expect(session.job.stages[0]!.progress).toMatchObject({ phase: 'reading_platform_captions', message: '正在获取平台字幕', percent: 20 });
+    act(() => emit({ id: 'subtitle:lower', jobId: initial.id, revision: 2, kind: 'stage_progress',
+      payload: { stage: lower as never }, createdAt: initial.updatedAt }));
+    expect(session.job.stages[0]!.progress).toMatchObject({ percent: 20 });
+    const unknown = { ...stage, progress: { phase: 'merging_media', percent: null } };
+    act(() => session.applyRemoteSnapshot({ ...initial, stages: [unknown] }));
+    expect(session.job.stages[0]!.progress).toMatchObject({ percent: 20 });
+  });
+
+  it('shows unknown video provider progress after submission until a measured value arrives', async () => {
+    const stage: CreatorStageRun = {
+      id: 'video_1', jobId: 'job_1', stageId: 'generate', executor: 'video', status: 'running',
+      dispatchStatus: 'claimed', claimOwner: null, claimExpiresAt: null, attempt: 1, idempotencyKey: null,
+      scopeKey: null, inputFingerprint: null, progress: { phase: 'submitting', percent: 8 },
+      errorCode: null, errorMessage: null, startedAt: null, finishedAt: null
+    };
+    const initial = { ...job(2, {}), templateId: 'video-generation', status: 'running' as const, stages: [stage] };
+    let session!: ReturnType<typeof useCreatorSession>;
+    let emit!: (event: CreatorEventEnvelope) => void;
+    function SnapshotHarness() { session = useCreatorSession(); return <Harness />; }
+    render(<CreatorSessionProvider initialJob={initial} service={{ applyAction: vi.fn(), runAgentTurn: vi.fn(),
+      getJob: vi.fn(async () => ({ job: initial })),
+      subscribeJobEvents: vi.fn((_id, onEvent) => { emit = onEvent; return { close: vi.fn() }; })
+    } as never}><SnapshotHarness /></CreatorSessionProvider>);
+    await waitFor(() => expect(emit).toBeDefined());
+    const queued = { ...stage, progress: { phase: 'queued', percent: null } };
+    act(() => session.applyRemoteSnapshot({ ...initial, stages: [queued] }));
+    expect(session.job.stages[0]!.progress).toMatchObject({ phase: 'queued', percent: null });
+    const unknown = { ...stage, progress: { phase: 'generating', percent: null } };
+    act(() => emit({ id: 'video:unknown', jobId: initial.id, revision: 3, kind: 'stage_progress',
+      payload: { stage: unknown as never }, createdAt: initial.updatedAt }));
+    expect(session.job.stages[0]!.progress).toMatchObject({ phase: 'generating', percent: null });
+    const generating = { ...stage, progress: { phase: 'generating', percent: 34 } };
+    act(() => emit({ id: 'video:measured', jobId: initial.id, revision: 4, kind: 'stage_progress',
+      payload: { stage: generating as never }, createdAt: initial.updatedAt }));
+    expect(session.job.stages[0]!.progress).toMatchObject({ phase: 'generating', percent: 34 });
+  });
+
   it('does not overwrite a failed job with a delayed successful action response', async () => {
     let resolveAction!: (value: { job: CreatorJob }) => void;
     const applyAction = vi.fn(() => new Promise<{ job: CreatorJob }>(resolve => { resolveAction = resolve; }));
@@ -244,9 +354,29 @@ describe('CreatorSessionStore', () => {
     await act(async () => vi.advanceTimersByTimeAsync(350));
 
     expect(ensureJob).toHaveBeenCalledTimes(1);
-    expect(ensureJob).toHaveBeenCalledWith({ targetLanguage: 'ja', dubbing: false });
+    expect(ensureJob).toHaveBeenCalledWith({ targetLanguage: 'ja', dubbing: false, __creatorUserEdited: true });
     expect(applyAction).not.toHaveBeenCalled();
     vi.useRealTimers();
+  });
+
+  it('persists automatic settings on an existing job without marking user input', async () => {
+    let session!: ReturnType<typeof useCreatorSession>;
+    const applyAction = vi.fn(async (_id: string, request: { input: { patch: Record<string, unknown> } }) => ({
+      job: job(1, { ...request.input.patch })
+    }));
+    function AutoSettings() { session = useCreatorSession(); return null; }
+    render(<CreatorSessionProvider initialJob={job(0, {})} service={{ applyAction } as never}><AutoSettings /></CreatorSessionProvider>);
+
+    await act(async () => {
+      session.updateDraft({ candidateCount: 1 }, { userEdited: false });
+      await session.flush();
+    });
+
+    expect(applyAction).toHaveBeenCalledWith('job_1', expect.objectContaining({
+      action: 'update-settings',
+      input: expect.objectContaining({ patch: { candidateCount: 1 } })
+    }));
+    expect(session.state.__creatorUserEdited).toBeUndefined();
   });
 
   it('creates a pending job before sending the first Agent message', async () => {
@@ -269,7 +399,7 @@ describe('CreatorSessionStore', () => {
     fireEvent.click(screen.getByRole('button', { name: 'pending-agent' }));
     await waitFor(() => expect(startAgentTurn).toHaveBeenCalledTimes(1));
     expect(ensureJob).toHaveBeenCalledTimes(1);
-    expect(ensureJob).toHaveBeenCalledWith({ targetLanguage: 'en', dubbing: false });
+    expect(ensureJob).toHaveBeenCalledWith({ targetLanguage: 'en', dubbing: false, __creatorUserEdited: true });
     expect(startAgentTurn).toHaveBeenCalledWith('job_1', expect.objectContaining({
       message: 'start from agent'
     }));
@@ -476,7 +606,7 @@ describe('CreatorSessionStore', () => {
       expect.objectContaining({
         action: 'update-settings',
         input: expect.objectContaining({
-          patch: { targetLanguage: 'ja' }
+          patch: { targetLanguage: 'ja', __creatorUserEdited: true }
         })
       })
     ));
@@ -1156,12 +1286,13 @@ describe('CreatorSessionStore', () => {
         risk: 'normal'
       }]
     });
-    const initialJob = { ...job(0, {}), issues: [openIssue], stages: stageId === 'prepare-source-video'
-      ? [{ id: 'failed-stage', jobId: 'job_1', stageId, executor: 'download', status: 'failed',
+    const initialJob = { ...job(0, {}), issues: [openIssue], stages:
+      [{ id: 'failed-stage', jobId: 'job_1', stageId, executor: stageId === 'subtitle' ? 'krillin' : 'download', status: 'failed',
         dispatchStatus: 'finished', claimOwner: null, claimExpiresAt: null, attempt: 1,
-        idempotencyKey: null, scopeKey: null, inputFingerprint: null, progress: { inputResultVersion: 1 },
+        idempotencyKey: null, scopeKey: null, inputFingerprint: null,
+        progress: (stageId === 'subtitle' ? {} : { inputResultVersion: 1 }) as CreatorStageRun['progress'],
         errorCode: 'network_unavailable', errorMessage: 'Download failed', startedAt: null, finishedAt: null
-      } satisfies CreatorJob['stages'][number]] : [] };
+      } satisfies CreatorJob['stages'][number]] };
     const applyAction = vi.fn(async () => ({ job: initialJob }));
     const startAgentTurn = vi.fn(async () => ({ turn: undefined as never }));
     render(
@@ -1176,7 +1307,7 @@ describe('CreatorSessionStore', () => {
     await act(async () => session!.repairIssue(openIssue));
     expect(applyAction).toHaveBeenCalledWith('job_1', expect.objectContaining({
       action: 'run-stage',
-      input: { stageId, ...(stageId === 'prepare-source-video' ? { inputResultVersion: 1 } : {}) },
+      input: { stageId, ...(stageId === 'subtitle' ? { resumedFromStageRunId: 'failed-stage' } : { inputResultVersion: 1 }) },
       repairIssueId: openIssue.id
     }));
     expect(session!.issues[0]!.status).toBe('open');

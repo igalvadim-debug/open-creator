@@ -21,6 +21,8 @@ import type {
   CreatorPreflightResponse,
   CreatorStageRun,
   CreatorSubtitlePreviewRequest,
+  CreatorSubtitleRenderRequest,
+  CreatorSubtitleRenderBundle,
   CreatorSourceUploadResponse,
   CreatorTemplateListResponse,
   CreatorVisualAssetCatalogResponse,
@@ -48,6 +50,13 @@ export type CreatorJobControlResponse = {
   control: 'canceling' | 'canceled' | 'resumed';
 };
 
+export type CreatorDownloadControl = 'pause' | 'resume' | 'cancel';
+export type CreatorDownloadControlResponse = {
+  job: CreatorJob;
+  stage: CreatorStageRun;
+  control: 'pausing' | 'paused' | 'canceling' | 'canceled' | 'resumed';
+};
+
 export function createCreatorService(client: ClientLike) {
   const lastEventIdByJob = new Map<string, string>();
   const consumedEventIds = new Map<string, Set<string>>();
@@ -59,6 +68,13 @@ export function createCreatorService(client: ClientLike) {
     openSubtitlePreview(input: CreatorSubtitlePreviewRequest, options?: { signal?: AbortSignal }): Promise<Response> {
       if (client.rawGet === undefined) throw new Error('Subtitle preview transport is unavailable');
       return client.rawGet(`/creator/subtitle-preview?${new URLSearchParams({ options: JSON.stringify(input) })}`, options);
+    },
+    prepareSubtitleRender(input: CreatorSubtitleRenderRequest): Promise<CreatorSubtitleRenderBundle> {
+      return client.post('/creator/subtitle-render/prepare', input) as Promise<CreatorSubtitleRenderBundle>;
+    },
+    openSubtitleFont(id: string): Promise<Response> {
+      if (!client.rawGet) throw new Error('Subtitle font transport is unavailable');
+      return client.rawGet(`/creator/subtitle-render/fonts/${encodeURIComponent(id)}`);
     },
     listTemplates(): Promise<CreatorTemplateListResponse> {
       return client.get('/creator/templates') as Promise<CreatorTemplateListResponse>;
@@ -90,10 +106,10 @@ export function createCreatorService(client: ClientLike) {
     createJob(request: CreateCreatorJobRequest): Promise<{ job: CreatorJob }> {
       return client.post('/creator/jobs', request) as Promise<{ job: CreatorJob }>;
     },
-    listJobs(projectId?: string): Promise<CreatorJobListResponse> {
+    listJobs(projectId?: string, options?: { signal?: AbortSignal }): Promise<CreatorJobListResponse> {
       return client.get(projectId === undefined
         ? '/creator/jobs'
-        : `/creator/jobs?projectId=${encodeURIComponent(projectId)}`) as Promise<CreatorJobListResponse>;
+        : `/creator/jobs?projectId=${encodeURIComponent(projectId)}`, options) as Promise<CreatorJobListResponse>;
     },
     getJob(jobId: string, options?: { signal?: AbortSignal }): Promise<{ job: CreatorJob }> {
       return client.get(`/creator/jobs/${encodeURIComponent(jobId)}`, options) as Promise<{ job: CreatorJob }>;
@@ -227,6 +243,9 @@ export function createCreatorService(client: ClientLike) {
         `/creator/jobs/${encodeURIComponent(jobId)}/issues/report`,
         request
       ) as Promise<{ clientIssueId: string; issue: OpenCreatorIssue }>;
+    },
+    controlDownload(jobId: string, stageRunId: string, action: CreatorDownloadControl): Promise<CreatorDownloadControlResponse> {
+      return client.post(`/creator/jobs/${encodeURIComponent(jobId)}/downloads/${encodeURIComponent(stageRunId)}/${action}`) as Promise<CreatorDownloadControlResponse>;
     },
     cancelJob(jobId: string): Promise<CreatorJobControlResponse> {
       return client.post(
