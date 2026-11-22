@@ -47,7 +47,6 @@ import type {
 
 registerPrivilegedSchemes();
 app.setName('OpenCreator');
-app.commandLine.appendSwitch('lang', 'zh-CN');
 const APP_ENTRY_AT = Date.now();
 const DEVELOPMENT =
   process.env.OPENCREATOR_DESKTOP_DEV === '1' || !app.isPackaged;
@@ -156,6 +155,7 @@ async function launchDesktop(): Promise<void> {
     dataDir,
     codexRuntimeRoot,
     creatorRuntimeRoot,
+    creatorPresetAssetsRoot: development ? undefined : join(webRoot, 'creator-presets'),
     stickmanRuntimeRoot,
     defaultProjectRoot,
     development
@@ -177,8 +177,12 @@ async function launchDesktop(): Promise<void> {
     appVersion: app.getVersion(),
     isOfficialBuild: app.isPackaged && readOfficialBuildMarker(process.resourcesPath),
     isWindowActive: () => windowManager?.isActive() === true,
+    getDaemonConnection: () => daemon.currentConnection,
     fetchImpl: fetchDesktopRequest,
     endpointOverride: process.env.OPENCREATOR_TELEMETRY_URL
+  });
+  daemon.on('connection', connection => {
+    if (connection !== null) void telemetry.setEnabled(settings.read().telemetryEnabled);
   });
   const navigate = (route: string) => {
     if (!workspaceLoaded) {
@@ -453,7 +457,7 @@ function registerIpcHandlers(input: {
         ? {}
         : { telemetryEnabled: value.telemetryEnabled })
     });
-    if (value.telemetryEnabled === true) void input.telemetry.enable();
+    if (value.telemetryEnabled !== undefined) void input.telemetry.setEnabled(value.telemetryEnabled);
     return {
       closeBehavior: updated.closeBehavior,
       telemetryEnabled: updated.telemetryEnabled

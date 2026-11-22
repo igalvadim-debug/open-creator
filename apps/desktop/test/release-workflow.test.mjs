@@ -71,12 +71,20 @@ describe('Desktop release workflow', () => {
     expect(releaseWorkflow).not.toContain('WINDOWS-UNSIGNED.txt');
   });
 
-  it('reuses the successful master CI instead of repeating all tests', () => {
-    expect(releaseWorkflow).toContain('name: 校验同一提交的 CI 已通过');
-    expect(releaseWorkflow).toContain('--workflow ci.yml');
-    expect(releaseWorkflow).toContain('--event push');
-    expect(releaseWorkflow).toContain('--status success');
-    expect(releaseWorkflow).toContain('请等待 CI 通过');
+  it('provides GitHub API authentication to both desktop packaging steps', () => {
+    const macStep = releaseWorkflow.split('name: 生成 macOS 正式签名安装包')[1]
+      .split('name: 生成 Windows 未签名安装包')[0];
+    const windowsStep = releaseWorkflow.split('name: 生成 Windows 未签名安装包')[1]
+      .split('name: 生成 KrillinAI Server 与 CLI 独立发布包')[0];
+    for (const step of [macStep, windowsStep]) {
+      expect(step).toContain('GH_TOKEN: ${{ github.token }}');
+    }
+  });
+
+  it('keeps tests and CI prerequisites out of packaging and publishing', () => {
+    expect(releaseWorkflow).not.toContain('校验同一提交的 CI 已通过');
+    expect(releaseWorkflow).not.toContain('--workflow ci.yml');
+    expect(releaseWorkflow).not.toContain('e2e:package');
     expect(releaseWorkflow).not.toContain('run: pnpm test');
     expect(releaseWorkflow).not.toContain('run: pnpm typecheck');
     expect(releaseWorkflow).not.toContain('run: pnpm build');
@@ -104,8 +112,10 @@ describe('Desktop release workflow', () => {
     );
     expect(releaseWorkflow).toContain("candidate-ready:");
     expect(releaseWorkflow).toContain("inputs.target == 'all'");
-    expect(releaseWorkflow).toContain('e2e:package:smoke');
-    expect(releaseWorkflow).not.toContain("matrix.name == 'macos-arm64'");
+    expect(releaseWorkflow).toContain('name: 确认全部发布附件已上传');
+    expect(releaseWorkflow).toContain('validation: "packaging-only"');
+    expect(releaseWorkflow).toContain('reuse_run_id:');
+    expect(releaseWorkflow).toContain('reused-artifacts:');
     expect(releaseWorkflow).toContain('opencreator-release-candidate-${{ steps.build-input.outputs.digest }}');
   });
 
@@ -127,7 +137,7 @@ describe('Desktop release workflow', () => {
     expect(releaseWorkflow).not.toContain("startsWith(github.ref, 'refs/tags/') || inputs.target == 'all'");
   });
 
-  it('republishes an existing tag only from master with matching inputs and successful CI', () => {
+  it('republishes an existing tag only from master with matching inputs', () => {
     expect(releaseWorkflow).toContain('          - publish');
     expect(releaseWorkflow).toContain('release_tag:');
     expect(releaseWorkflow).toContain('promotion-target "$RELEASE_TAG"');
@@ -135,7 +145,6 @@ describe('Desktop release workflow', () => {
     expect(releaseWorkflow).toContain("inputs.target != 'publish'");
     expect(releaseWorkflow).toContain('TAG: ${{ needs.verify.outputs.release-tag }}');
     expect(releaseWorkflow).toContain('RELEASE_SHA: ${{ needs.verify.outputs.release-sha }}');
-    expect(releaseWorkflow).toContain('"$GITHUB_SHA" "$RELEASE_SHA"');
     expect(releaseWorkflow).toContain('pnpm install --filter @opencreator/daemon --frozen-lockfile --ignore-scripts');
     expect(releaseWorkflow).not.toContain('git tag -f');
     expect(releaseWorkflow).not.toContain('git push --force');
@@ -172,6 +181,11 @@ describe('Desktop release workflow', () => {
       'node scripts/package-krillinai-release.mjs'
     );
     expect(releaseWorkflow).toContain('name: krillinai-release-linux');
+    const linuxJob = releaseWorkflow.split('\n  krillinai-linux-package:')[1].split('\n  candidate-ready:')[0];
+    const install = linuxJob.indexOf('pnpm install --filter @opencreator/daemon --frozen-lockfile --ignore-scripts');
+    expect(linuxJob).toContain('uses: pnpm/action-setup@v4');
+    expect(install).toBeGreaterThan(0);
+    expect(install).toBeLessThan(linuxJob.indexOf('node scripts/package-krillinai-release.mjs'));
   });
 
   it('invalidates the Desktop cache when Creator Runtime releases change', () => {
@@ -205,6 +219,6 @@ describe('Desktop release workflow', () => {
   });
 
   it('uploads compressed release archives without recompressing them', () => {
-    expect(releaseWorkflow.match(/compression-level: 0/g)).toHaveLength(3);
+    expect(releaseWorkflow.match(/compression-level: 0/g)).toHaveLength(4);
   });
 });
