@@ -1,76 +1,83 @@
+import { gatewayModelDisplayName, gatewayModelIdMatches, gatewayModelReady } from '@opencreator/protocol';
 import {
   creatorPromptMaxLength,
   defaultVideoGenerationModels,
   gatewayVideoSizes,
+  googleOmniVideoDurations,
+  googleOmniVideoSizes,
   isPublicErrorFacts,
   readCreatorResultSnapshots,
-  videoGenerationModelIds,
+  sanitizePublicErrorFacts,
   type CreatorArtifact,
   type CreatorJson,
   type CreatorServicesConfig,
+  type CreatorServicesCredentialField,
   type CreatorStageRun,
+  type GatewayAccountState,
+  type GatewayModel,
+  type GatewayVideoCatalog,
+  type PublicErrorFacts,
   type VideoGenerationDuration,
   type VideoGenerationProvider,
   type VideoGenerationSize
 } from '@opencreator/protocol';
+import { useGenerationAccess } from './DashboardGenerationAccess.js';
 import {
-  Check,
   Clapperboard,
   Download,
-  Film,
+  ImagePlus,
   LoaderCircle,
-  Plus,
   RotateCcw,
   Sparkles,
+  Trash2,
   WandSparkles,
   X
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocalizedCopy, type LocalizeCopy } from '../../i18n/useLocalizedCopy.js';
-import { publicErrorReason } from '../issues/issue-catalog.js';
-import NativeSelect from '../../components/forms/NativeSelect.js';
-import { OfficialModelField, useOfficialServices } from './official-services.js';
-import OfficialVideoReferences, { readVideoReferences, videoReferenceIssue } from './OfficialVideoReferences.js';
-import { formatGatewayCreditAmount } from '../account/billing-display.js';
+import { mediaContentSafetyReason, publicErrorReason } from '../issues/issue-catalog.js';
+import OfficialModelSelect, { compareGatewayModelsByName } from '../../components/forms/OfficialModelSelect.js';
+import { useOfficialServices } from './official-services.js';
+import { readVideoReferences, videoReferenceIssue } from './OfficialVideoReferences.js';
 import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
+import type { GatewayAccountSettingsService } from '../../services/gateway-account-service.js';
 import CreatorResultVersionMenu from './CreatorResultVersionMenu.js';
+import ImageGenerationSettings, { type ImageGenerationSettingSection } from './ImageGenerationSettings.js';
 import { CreatorTaskProgressNotice } from './CreatorCollaborationPanel.js';
 import CreatorTaskSummary from './CreatorTaskSummary.js';
 import CreatorToolShell from './CreatorToolShell.js';
+import { IssueNotice } from '../issues/IssuePresenter.js';
 import {
   captureCreatorClientFailure,
   createCreatorArtifactObjectUrl,
   useOptionalCreatorSession
 } from './creator-session-store.js';
+import './video-generation-workspace.css';
 
-type VideoStep = 0 | 1 | 2;
 type VideoResultVersion = {
   value: number;
   description: string;
   artifact: CreatorArtifact;
   state: Record<string, CreatorJson>;
 };
-type VideoModelOption = {
-  value: string;
-  label: string;
-};
-
 const sizes: Array<{ value: VideoGenerationSize; zh: string; en: string; ratio: string }> = [
   { value: '1280x720', zh: '横屏', en: 'Landscape', ratio: '16:9' },
   { value: '720x1280', zh: '竖屏', en: 'Portrait', ratio: '9:16' },
   { value: '1024x1024', zh: '方形', en: 'Square', ratio: '1:1' }
 ];
+const googleOmniSizes = sizes.filter(size => googleOmniVideoSizes.some(value => value === size.value));
 
 const providers: Array<{ value: VideoGenerationProvider; zh: string; en: string }> = [
   { value: 'seedance', zh: 'Seedance', en: 'Seedance' },
   { value: 'kling', zh: '可灵', en: 'Kling' },
-  { value: 'veo', zh: 'Veo', en: 'Veo' }
+  { value: 'veo', zh: 'Gemini Omni Flash', en: 'Gemini Omni Flash' }
 ];
+const localVideoModelId = '__local_video__';
 
-const providerDurations: Record<VideoGenerationProvider, VideoGenerationDuration[]> = {
+const providerDurations: Record<VideoGenerationProvider, readonly VideoGenerationDuration[]> = {
   seedance: [5, 10],
   kling: [5, 10],
-  veo: [4, 6, 8]
+  veo: googleOmniVideoDurations
 };
 const modelLabels: Record<string, string> = {
   'doubao-seedance-2-5-260628': 'Seedance 2.5',
@@ -81,38 +88,36 @@ const modelLabels: Record<string, string> = {
   'doubao-seedance-1-0-pro-fast-251015': 'Seedance 1.0 Pro Fast',
   'doubao-seedance-1-0-pro-250528': 'Seedance 1.0 Pro',
   'kling-v2-1-master': 'Kling 2.1 Master',
-  'veo-3.1-generate-preview': 'Veo 3.1'
+  'veo-3.1-generate-preview': 'Veo 3.1',
+  [defaultVideoGenerationModels.veo]: 'Gemini Omni 1.2 Flash'
 };
 
 const samplePromptZh = '一辆复古红色跑车沿着海岸公路行驶，黄昏金色阳光，低机位跟拍，海风吹动路边植物，电影级真实质感，镜头运动平稳';
 const samplePromptEn = 'A vintage red sports car driving along a coastal road at golden hour, low-angle tracking shot, sea breeze moving roadside plants, cinematic realism, smooth camera motion';
+const samplePromptSv = 'En röd veteranbil kör längs en kustväg i gyllene kvällsljus, låg följande kamera, havsbrisen rör växterna längs vägen, filmisk realism och mjuka kamerarörelser';
 const referenceImageTypes = ['image/jpeg', 'image/png', 'image/webp'] as const;
 const maxReferenceImageBytes = 5 * 1024 * 1024;
 
 export default function VideoGenerationWorkspace(props: {
   onBack(): void;
   promptHint?: string;
+  embedded?: boolean;
+  embeddedTabs?: ReactNode;
+  forceComposer?: boolean;
+  onGenerated?(): void;
   creatorServicesService?: CreatorServicesSettingsService | null;
+  gatewayAccountService?: GatewayAccountSettingsService | null;
+  onGatewayStateChange?(state: GatewayAccountState): void;
 }) {
   const l = useLocalizedCopy();
+  const requireGenerationAccess = useGenerationAccess();
   const session = useOptionalCreatorSession();
-  const official = useOfficialServices('video');
+  const official = useOfficialServices('video', true, models => session?.job.stages.length === 0 && session.job.artifacts.length === 0
+    ? preferredSeedanceVideoModel(models) : undefined);
   const mediaPreviewContextRef = useRef({ session, localize: l });
   mediaPreviewContextRef.current = { session, localize: l };
   const mediaPreviewJobId = session?.job.id;
   const canOpenMediaPreview = session?.openArtifact !== undefined;
-  const restoredResults = session?.job.artifacts.some(artifact => (
-    artifact.kind === 'generated_video' && artifact.status === 'completed'
-  )) === true;
-  const restoredStep = restoredResults ? 2 : readVideoStep(session?.state.currentStep, 0);
-  const [currentStep, setCurrentStep] = useState<VideoStep>(restoredStep);
-  const [furthestStep, setFurthestStep] = useState<VideoStep>(() => (
-    Math.max(
-      restoredStep,
-      readVideoStep(session?.state.furthestStep, restoredStep),
-      restoredResults ? 2 : 0
-    ) as VideoStep
-  ));
   const [prompt, setPrompt] = useState(() => readString(session?.state.prompt));
   const [referenceImageFile, setReferenceImageFile] = useState<File>();
   const [referenceImageUrl, setReferenceImageUrl] = useState('');
@@ -121,54 +126,149 @@ export default function VideoGenerationWorkspace(props: {
   const [modelDefaults, setModelDefaults] = useState<Record<VideoGenerationProvider, string>>(
     () => ({ ...defaultVideoGenerationModels })
   );
+  const [videoConfig, setVideoConfig] = useState<CreatorServicesConfig['video'] | null>(null);
+  const [configuredCredentials, setConfiguredCredentials] = useState<CreatorServicesCredentialField[]>([]);
+  const [publicCatalog, setPublicCatalog] = useState<GatewayVideoCatalog | undefined>(() => props.gatewayAccountService?.getCachedVideoCatalog?.());
+  const catalogRequest = useRef(0);
+  const catalogWork = useRef<{ service: GatewayAccountSettingsService; promise: Promise<GatewayVideoCatalog> }>();
+  const [pendingModelId, setPendingModelId] = useState<string | undefined>(() => readOptionalModel(session?.state.pendingVideoModelId));
+  const pendingValidation = useRef<string>();
   const [provider, setProvider] = useState<VideoGenerationProvider>(() => (
     initialProvider
   ));
+  const [selectedSource, setSelectedSource] = useState<'manual' | 'gateway'>(() => (
+    session?.state.videoServiceSource === 'manual' || session?.state.videoServiceSource === 'gateway'
+      ? session.state.videoServiceSource
+      : session?.state.officialModels || official.hasRememberedModel
+        || (official.ready && official.model?.id === preferredSeedanceVideoModel(official.models)?.id)
+        ? 'gateway' : 'manual'
+  ));
+  const usingOfficial = selectedSource === 'gateway';
+  const localConfigured = videoConfig !== null && localVideoProviderReady(videoConfig, configuredCredentials, provider);
+  const defaultOfficialModel = official.ready ? official.model
+    : [...official.models].filter(gatewayModelReady).sort(compareGatewayModelsByName)[0];
+  const shouldDefaultOfficial = session?.job.stages.length === 0 && session.job.artifacts.length === 0
+    && !session.state.videoServiceSource && !session.state.pendingVideoModelId && official.selectable
+    && (official.hasRememberedModel || official.model?.id === preferredSeedanceVideoModel(official.models)?.id
+      || (videoConfig !== null && !localConfigured && defaultOfficialModel !== undefined));
+  useEffect(() => {
+    if (shouldDefaultOfficial && selectedSource === 'manual') {
+      setSelectedSource('gateway');
+      session?.updateDraft({
+        videoServiceSource: 'gateway',
+        ...(!official.ready && defaultOfficialModel ? { officialModels: { video: defaultOfficialModel.id } } : {})
+      }, {
+        persist: session.job.id.startsWith('pending:') ? false : undefined,
+        userEdited: false
+      });
+    }
+  }, [shouldDefaultOfficial, selectedSource, defaultOfficialModel?.id, official.ready, session?.job.id]);
   const [model, setModel] = useState(() => readModel(session?.state.model, initialProvider));
-  const [size, setSize] = useState<VideoGenerationSize>(() => readSize(session?.state.size, official.official));
+  const [size, setSize] = useState<VideoGenerationSize>(() => readSize(session?.state.size, usingOfficial));
   const [duration, setDuration] = useState<VideoGenerationDuration>(() => (
-    readDuration(session?.state.duration, readProvider(session?.state.provider), official.official)
+    readDuration(session?.state.duration, readProvider(session?.state.provider), usingOfficial)
   ));
   const resultVersion = session?.job.state.resultVersion;
   const [videoUrl, setVideoUrl] = useState('');
   const [previewFailed, setPreviewFailed] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [uploadingVideoReference, setUploadingVideoReference] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const videoReferences = readVideoReferences(session?.state.videoReferences);
   const [taskControlPending, setTaskControlPending] = useState<'canceling' | 'resuming'>();
+  const [recoveryFailureStageId, setRecoveryFailureStageId] = useState<string>();
+  const recoveryInFlight = useRef(false);
   const characterCount = useMemo(() => [...prompt.trim()].length, [prompt]);
-  const selectedProvider = official.official ? { zh: '官方服务', en: 'Official service' } : providers.find(item => item.value === provider) ?? providers[0]!;
-  const modelOptions = useMemo(
-    () => createVideoModelOptions(provider, modelDefaults[provider], model),
-    [model, modelDefaults, provider]
-  );
-  const activeModel = official.official ? official.model?.id ?? '' : model;
-  const selectedModelLabel = videoModelLabel(activeModel);
-  const availableSizes = official.official ? gatewayVideoSizes(official.model).map(videoSizeOption) : sizes;
+  const selectedProvider = usingOfficial ? { zh: '官方服务', en: 'Official service' } : { zh: '本地视频服务', en: 'Local video service' };
+  const localModel: GatewayModel | undefined = videoConfig ? {
+    id: localVideoModelId, name: l('本地视频服务', 'Local video service', 'Lokal videotjänst'),
+    vendor: l('本地', 'Local', 'Lokal'), modality: 'video', capabilities: [],
+    status: localConfigured ? 'ready' : 'temporarily_unavailable', durations: [...providerDurations[provider]]
+  } : undefined;
+  const publicModels = publicCatalog?.models ?? [];
+  const catalogModels = [...(localModel ? [localModel] : []), ...(official.official ? official.models : publicModels)];
+  const loginRequiredModelIds = new Set(official.official ? [] : publicModels.map(item => item.id));
+  const selectedCatalogId = usingOfficial ? official.selected ?? official.model?.id ?? '' : pendingModelId ?? (localConfigured ? localVideoModelId : '');
+  function loadPublicCatalog() {
+    const request = ++catalogRequest.current;
+    const service = props.gatewayAccountService;
+    const cached = service?.getCachedVideoCatalog?.();
+    setPublicCatalog(cached);
+    if (!service?.getVideoCatalog) return;
+    const promise = catalogWork.current?.service === service
+      ? catalogWork.current.promise : service.getVideoCatalog();
+    catalogWork.current = { service, promise };
+    void promise.then(catalog => {
+      if (request === catalogRequest.current) setPublicCatalog(catalog);
+    }).catch(() => undefined).finally(() => {
+      if (catalogWork.current?.promise === promise) catalogWork.current = undefined;
+    });
+  }
+  useEffect(() => {
+    return () => { catalogRequest.current++; };
+  }, [props.gatewayAccountService]);
+  const localOmni = !usingOfficial && provider === 'veo';
+  const unsupportedLocalOmniRatio = localOmni && size === '1024x1024';
+  const activeModel = usingOfficial ? official.model?.id ?? '' : localOmni ? defaultVideoGenerationModels.veo : model;
+  const selectedModelLabel = usingOfficial && official.model ? gatewayModelDisplayName(official.model, l('官方模型', 'Official model')) : videoModelLabel(activeModel);
+  const availableSizes = usingOfficial ? gatewayVideoSizes(official.model).map(videoSizeOption) : localOmni ? googleOmniSizes : sizes;
   const selectedSize = availableSizes.find(item => item.value === size) ?? videoSizeOption(size);
+  const availableRatios = [...new Set(availableSizes.map(item => item.ratio))];
+  const resolutionSizes = availableSizes.filter(item => item.ratio === selectedSize.ratio);
   const referenceDuration = official.model?.videoOptions?.referenceDuration;
   const hasReferenceImage = !!referenceImageFile || (session?.job.artifacts ?? []).some(artifact => artifact.id === session?.state.referenceImageArtifactId && artifact.kind === 'reference_image') || videoReferences.some(ref => ref.role === 'image');
-  const durations = official.official ? (official.model?.durations ?? []).filter(value => !referenceDuration || !hasReferenceImage || value === referenceDuration) : providerDurations[provider];
-  const serviceReady = !uploadingVideoReference && (!official.official || (official.ready && availableSizes.length > 0 && durations.length > 0));
-  const quotedUnitsPerSecond = official.model?.price?.videoUnitsPerSecond?.[size.split('@')[0]!];
-  const quotedCredits = quotedUnitsPerSecond === undefined ? undefined : quotedUnitsPerSecond * duration / 1_000_000;
+  const referenceSupported = !usingOfficial || official.model?.capabilities.includes('image_to_video') === true;
+  const durations = usingOfficial ? (official.model?.durations ?? []).filter(value => !referenceDuration || !hasReferenceImage || value === referenceDuration) : providerDurations[provider];
+  const serviceReady = (usingOfficial
+    ? official.ready && availableSizes.length > 0 && durations.length > 0 : localConfigured);
   const resultVersions = useMemo(
     () => createVideoResultVersions(session?.job.artifacts ?? [], session?.state.resultSnapshots),
     [session?.job.artifacts, session?.state.resultSnapshots]
   );
   const latestVersion = resultVersions.at(-1)?.value;
-  const selectedResult = resultVersions.find(version => version.value === resultVersion)
-    ?? resultVersions.at(-1);
+  const selectedResult = props.forceComposer
+    ? undefined
+    : resultVersions.find(version => version.value === resultVersion) ?? resultVersions.at(-1);
   const selectedResultArtifactId = selectedResult?.artifact.id;
   const latestStage = session?.job.stages.filter(stage => stage.stageId === 'generate').at(-1);
   const latestStageIssue = session?.job.issues?.find(issue => (
     issue.stageRunId === latestStage?.id && issue.status !== 'resolved'
   ));
+  const pendingVideoRequest = session?.job.providerRequests.find(request => (
+    request.provider === 'opencreator-gateway-video'
+    && ['registered', 'submitting', 'waiting_remote', 'unknown_remote_acceptance'].includes(request.status)
+    && latestStage?.status !== 'queued' && latestStage?.status !== 'running'
+    && session.job.stages.some(stage => stage.id === request.stageRunId && stage.stageId === 'generate' && stage.scopeKey === null)
+  ));
+  const priceChangedRequest = latestStage !== undefined && pendingVideoRequest?.status === 'unknown_remote_acceptance'
+    && pendingVideoRequest.remoteTaskId === null
+    && pendingVideoRequest.stageRunId === latestStage.id
+    && session?.job.issues?.some(issue => issue.stageRunId === latestStage.id
+      && issue.publicFacts?.kind === 'http-rejected' && issue.publicFacts.httpStatus === 409
+      && issue.publicFacts.upstreamCode === 'video_price_changed');
+  const previousRequestClosed = session?.job.providerRequests.some(request => (
+    request.stageRunId === latestStage?.id && request.provider === 'opencreator-gateway-video'
+    && (request.status === 'failed' || request.status === 'canceled')
+  ));
+  const recoverableVideoStage = isRecoverableVideoStage(latestStage)
+    || (latestStage?.status === 'failed'
+      && latestStage.errorCode === 'creator_video_generation_failed'
+      && typeof latestStage.progress.videoGenerationResultId === 'string'
+      && session?.job.providerRequests.some(request => request.provider === 'opencreator-gateway-video'
+        && request.status === 'succeeded'
+        && session.job.stages.some(stage => stage.id === request.stageRunId
+          && stage.progress.videoGenerationResultId === latestStage.progress.videoGenerationResultId)) === true);
   const generating = latestStage?.status === 'queued' || latestStage?.status === 'running';
-  const resumable = latestStage?.status === 'canceled'
-    || latestStage?.status === 'interrupted'
-    || isRecoverableVideoStage(latestStage);
+  const busy = generating || submitting;
+  const needsRecovery = !priceChangedRequest && recoveryFailureStageId !== latestStage?.id
+    && (pendingVideoRequest !== undefined || (recoverableVideoStage && !previousRequestClosed
+      && typeof latestStage?.progress.resumedFromStageRunId !== 'string'));
+  const paidResultUnavailable = latestStage?.status === 'failed' && !recoverableVideoStage
+    && session?.job.providerRequests.some(request => request.provider === 'opencreator-gateway-video'
+      && request.status === 'succeeded' && request.stageRunId === latestStage.id) === true;
+  const generationLabel = selectedResult || latestStage
+    ? l('重新生成', 'Regenerate', 'Generera igen')
+    : l('生成', 'Generate', 'Generera');
   const runtimeError = latestStage?.status === 'failed'
     ? formatVideoError(
         { code: latestStage.errorCode, message: latestStage.errorMessage, publicFacts: latestStageIssue?.publicFacts },
@@ -183,7 +283,11 @@ export default function VideoGenerationWorkspace(props: {
     '视频预览加载失败，可以稍后重试或直接下载',
     'The video preview failed to load. Retry later or download the file.'
   ) : '';
-  const visibleError = error || runtimeError || previewError;
+  const visibleError = error || (needsRecovery ? '' : paidResultUnavailable
+    ? l('原视频已生成，但无法读取结果；可以重新生成',
+      'The original video was generated, but its result is unavailable. You can regenerate.',
+      'Originalvideon skapades, men resultatet kan inte läsas. Du kan generera igen.')
+    : runtimeError) || previewError;
   useEffect(() => {
     if (latestStage?.status === 'failed' || latestStage?.status === 'interrupted') setNotice('');
   }, [latestStage?.id, latestStage?.status]);
@@ -193,17 +297,22 @@ export default function VideoGenerationWorkspace(props: {
     session?.state.referenceImageArtifactId,
     'reference_image'
   );
+  const savedVideoImage = referenceImageFile || activeReferenceArtifact
+    ? undefined : videoReferences.find(ref => ref.role === 'image');
+  const selectedVideoReferences = savedVideoImage ? [savedVideoImage] : [];
   const currentReferenceName = referenceImageFile?.name
-    ?? readArtifactString(activeReferenceArtifact, 'fileName');
+    ?? readArtifactString(activeReferenceArtifact, 'fileName')
+    ?? savedVideoImage?.fileName;
   const referencePreviewArtifactId = referenceImageFile === undefined
     ? activeReferenceArtifact?.id
     : undefined;
-  const followsReferenceRatio = !official.official && provider === 'seedance' && Boolean(currentReferenceName);
+  const followsReferenceRatio = !usingOfficial && provider === 'seedance' && Boolean(currentReferenceName);
   const resultSettings = selectedResult?.state;
-  const resultProvider = resultSettings?.officialModels ? { value: 'seedance' as const, zh: '官方服务', en: 'Official service' } : providers.find(item => (
+  const resultOfficial = resultSettings?.videoServiceSource === 'gateway' || (!resultSettings?.videoServiceSource && !!resultSettings?.officialModels);
+  const resultProvider = resultOfficial ? { value: 'seedance' as const, zh: '官方服务', en: 'Official service' } : providers.find(item => (
     item.value === readProvider(resultSettings?.provider)
   )) ?? providers[0]!;
-  const resultSize = readSize(resultSettings?.size, !!resultSettings?.officialModels);
+  const resultSize = readSize(resultSettings?.size, resultOfficial);
   const resultSizeOption = videoSizeOption(resultSize);
   const resultWidth = readArtifactNumber(selectedResult?.artifact, 'width');
   const resultHeight = readArtifactNumber(selectedResult?.artifact, 'height');
@@ -218,38 +327,44 @@ export default function VideoGenerationWorkspace(props: {
     : l(resultSizeOption.zh, resultSizeOption.en);
   const resultArtifactDuration = readVideoDuration(selectedResult?.artifact.metadata.duration);
   const resultDuration = resultArtifactDuration === undefined
-    ? readDuration(resultSettings?.duration, resultProvider.value, !!resultSettings?.officialModels)
+    ? readDuration(resultSettings?.duration, resultProvider.value, resultOfficial)
     : Math.round(resultArtifactDuration * 100) / 100;
   const resultModel = readArtifactString(selectedResult?.artifact, 'model')
     ?? readOptionalModel(resultSettings?.model)
     ?? modelDefaults[resultProvider.value];
-  const resultModelLabel = videoModelLabel(resultModel);
+  const resultModelLabel = gatewayModelDisplayName(official.models.find(candidate => gatewayModelIdMatches(candidate.id, resultModel)) ?? { id: resultModel, name: modelLabels[resultModel] }, l('官方模型', 'Official model'));
+  const shouldLoadDefaultProvider = session !== null && (
+    session.state.provider === undefined || (
+      session.state.providerSource === undefined
+      && session.job.presetOrigin === null
+      && session.job.stages.length === 0
+      && session.job.artifacts.length === 0
+    )
+  );
 
   useEffect(() => {
-    if (official.official) return;
     if (props.creatorServicesService === null || props.creatorServicesService === undefined) {
       return undefined;
     }
     let active = true;
     const revision = settingsRevision.current;
-    void props.creatorServicesService.getConfig()
+    void (props.creatorServicesService.getLocalVideoConfig?.() ?? props.creatorServicesService.getConfig())
       .then(response => {
         if (!active) return;
         const defaults = videoModelDefaults(response.config);
+        setVideoConfig(response.config.video);
+        setConfiguredCredentials(response.configuredCredentials ?? []);
         setModelDefaults(defaults);
         if (settingsRevision.current !== revision) return;
-        const savedProvider = readOptionalProvider(session?.state.provider);
-        const nextProvider = savedProvider ?? response.config.video.provider;
-        const nextModel = readOptionalModel(session?.state.model) ?? defaults[nextProvider];
+        const savedProvider = shouldLoadDefaultProvider ? undefined : readOptionalProvider(session?.state.provider);
+        const candidates = [savedProvider, response.config.video.provider, ...providers.map(item => item.value)];
+        const nextProvider = candidates.find(candidate => candidate && localVideoProviderReady(response.config.video, response.configuredCredentials ?? [], candidate))
+          ?? savedProvider ?? response.config.video.provider;
+        const nextModel = (shouldLoadDefaultProvider ? undefined : readOptionalModel(session?.state.model)) ?? defaults[nextProvider];
         const nextDuration = readDuration(session?.state.duration, nextProvider);
         setProvider(nextProvider);
         setModel(nextModel);
         setDuration(nextDuration);
-        session?.updateDraft({
-          provider: nextProvider,
-          model: nextModel,
-          duration: nextDuration
-        }, { persist: false });
       })
       .catch(cause => {
         if (!active) return;
@@ -263,13 +378,42 @@ export default function VideoGenerationWorkspace(props: {
     return () => {
       active = false;
     };
-  }, [props.creatorServicesService, session?.job.id, official.official]);
+  }, [props.creatorServicesService, session?.job.id]);
 
   useEffect(() => {
-    if (!official.official) return;
-    if (availableSizes.length && !availableSizes.some(item => item.value === size)) setSize(availableSizes[0]!.value);
+    if (!pendingModelId || official.authState !== 'signed_in' || official.activationState !== 'ready'
+      || pendingValidation.current === pendingModelId || !props.gatewayAccountService) return;
+    pendingValidation.current = pendingModelId;
+    let active = true;
+    void props.gatewayAccountService.getState({ refreshModels: true }).then(state => {
+      if (!active) return;
+      props.onGatewayStateChange?.(state);
+      const ready = state.models.filter(item => item.modality === 'video' && gatewayModelReady(item));
+      const requested = ready.find(item => gatewayModelIdMatches(item.id, pendingModelId));
+      const recommended = ready.find(item => gatewayModelIdMatches(item.id, state.recommendedModels?.video))
+        ?? ready.find(item => item.recommended);
+      const chosen = requested ?? recommended ?? ready[0];
+      if (chosen) {
+        setSelectedSource('gateway');
+        session?.updateDraft({ videoServiceSource: 'gateway', pendingVideoModelId: null, officialModels: { video: chosen.id }, __creatorUserSelected: true });
+      }
+      if (!requested) setNotice(chosen
+        ? recommended
+          ? l('所选模型当前账户不可用，已切换为推荐视频模型。', 'That model is unavailable for this account. A recommended video model is selected.', 'Modellen är inte tillgänglig för kontot. En rekommenderad videomodell har valts.')
+          : l('所选模型当前账户不可用，已切换为可用视频模型。', 'That model is unavailable for this account. An available video model is selected.', 'Modellen är inte tillgänglig för kontot. En tillgänglig videomodell har valts.')
+        : l('当前账户暂无可用的视频模型。', 'No video model is available for this account.', 'Inga videomodeller är tillgängliga för kontot.'));
+      if (!chosen) session?.updateDraft({ pendingVideoModelId: null });
+      setPendingModelId(undefined);
+    }).catch(() => {
+      if (active) { session?.updateDraft({ pendingVideoModelId: null }); setPendingModelId(undefined); setNotice(l('账户模型目录刷新失败，请重新选择模型。', 'Could not refresh your account models. Select a model again.', 'Kunde inte uppdatera kontots modeller. Välj en modell igen.')); }
+    });
+    return () => { active = false; };
+  }, [pendingModelId, official.authState, official.activationState, props.gatewayAccountService, props.onGatewayStateChange, session?.job.id]);
+
+  useEffect(() => {
+    if (!unsupportedLocalOmniRatio && availableSizes.length && !availableSizes.some(item => item.value === size)) setSize(availableSizes[0]!.value);
     if (durations.length && !durations.includes(duration)) setDuration(durations[0]!);
-  }, [official.official, activeModel, size, duration, availableSizes.map(item => item.value).join(','), durations.join(',')]);
+  }, [usingOfficial, activeModel, size, duration, unsupportedLocalOmniRatio, availableSizes.map(item => item.value).join(','), durations.join(',')]);
 
   useEffect(() => {
     const { session, localize } = mediaPreviewContextRef.current;
@@ -353,25 +497,6 @@ export default function VideoGenerationWorkspace(props: {
     }
   }, [generating, l, latestVersion]);
 
-  function openStep(step: VideoStep) {
-    const nextFurthestStep = Math.max(furthestStep, step) as VideoStep;
-    setCurrentStep(step);
-    setFurthestStep(nextFurthestStep);
-    session?.updateDraft({
-      currentStep: step,
-      furthestStep: nextFurthestStep
-    });
-  }
-
-  function nextStep() {
-    setError('');
-    if (currentStep === 0 && characterCount === 0) {
-      setError(l('请先描述需要生成的视频', 'Describe the video you want to create'));
-      return;
-    }
-    openStep(Math.min(2, currentStep + 1) as VideoStep);
-  }
-
   function updatePrompt(value: string) {
     setPrompt(value);
     session?.updateDraft({ prompt: value });
@@ -379,7 +504,7 @@ export default function VideoGenerationWorkspace(props: {
   }
 
   function updateProvider(nextProvider: VideoGenerationProvider) {
-    if (official.official) return;
+    if (usingOfficial) return;
     settingsRevision.current += 1;
     const nextDurations = providerDurations[nextProvider];
     const nextDuration = nextDurations.includes(duration) ? duration : nextDurations[0]!;
@@ -395,12 +520,25 @@ export default function VideoGenerationWorkspace(props: {
     setError('');
   }
 
-  function updateModel(nextModel: string) {
-    if (official.official) { official.selectModel(nextModel); return; }
-    settingsRevision.current += 1;
-    setModel(nextModel);
-    session?.updateDraft({ model: nextModel });
-    setError('');
+  function selectCatalogModel(id: string) {
+    if (id === localVideoModelId) {
+      setPendingModelId(undefined);
+      pendingValidation.current = undefined;
+      setSelectedSource('manual');
+      session?.updateDraft({ videoServiceSource: 'manual', pendingVideoModelId: null, __creatorUserSelected: true }, { semantic: true });
+      return;
+    }
+    if (official.official) {
+      official.selectModel(id);
+      setSelectedSource('gateway');
+      session?.updateDraft({ videoServiceSource: 'gateway' }, { semantic: true });
+      return;
+    }
+    if (!publicModels.some(item => gatewayModelIdMatches(item.id, id) && gatewayModelReady(item))) return;
+    setPendingModelId(id);
+    pendingValidation.current = undefined;
+    session?.updateDraft({ pendingVideoModelId: id, __creatorUserSelected: true }, { semantic: true });
+    requireGenerationAccess();
   }
 
   function updateSize(nextSize: VideoGenerationSize) {
@@ -436,14 +574,19 @@ export default function VideoGenerationWorkspace(props: {
   function removeReferenceImage() {
     setReferenceImageFile(undefined);
     setReferenceImageUrl('');
-    session?.updateDraft({ referenceImageArtifactId: null }, { semantic: true });
+    session?.updateDraft({ referenceImageArtifactId: null, videoReferences: [] }, { semantic: true });
     setError('');
     setNotice(l('参考图已移除', 'Reference image removed'));
   }
 
-  async function generate() {
-    if (generating) return;
-    if (!serviceReady) { setError(l('官方视频服务暂不可用，请在账户页面检查连接状态', 'Official video service is unavailable. Check the connection in your account.')); return; }
+  async function generate(recoverLegacyPriceRejection = false) {
+    if (busy || (needsRecovery && !recoverLegacyPriceRejection)) return;
+    if (!requireGenerationAccess(!usingOfficial && !pendingModelId)) return;
+    if (usingOfficial && official.ready && (!availableSizes.length || !durations.length)) {
+      setError(l('当前模型缺少画幅或时长配置，请更换模型', 'The selected model has no available format or duration. Select another model.'));
+      return;
+    }
+    if (usingOfficial && !serviceReady) { setError(l('官方视频服务暂不可用，请在账户页面检查连接状态', 'Official video service is unavailable. Check the connection in your account.')); return; }
     if (session === null) {
       setError(l(
         '视频生成服务暂不可用，请检查 Runtime 连接',
@@ -453,26 +596,48 @@ export default function VideoGenerationWorkspace(props: {
     }
     if (!prompt.trim()) {
       setError(l('请先描述需要生成的视频', 'Describe the video you want to create'));
-      openStep(0);
       return;
     }
-    const referenceIssue = official.official ? videoReferenceIssue(official.model, videoReferences, !!currentReferenceName) : undefined;
+    if (!usingOfficial && !localConfigured) {
+      setError(l('请先在设置中配置可用的本地视频服务。', 'Configure a ready local video service in Settings first.', 'Konfigurera en tillgänglig lokal videotjänst i inställningarna först.'));
+      return;
+    }
+    if (unsupportedLocalOmniRatio) {
+      setError(l('Gemini Omni Flash 不支持方形画幅，请选择横屏或竖屏。',
+        'Gemini Omni Flash does not support square video. Select a landscape or portrait format.',
+        'Gemini Omni Flash stöder inte kvadratisk video. Välj liggande eller stående format.'));
+      return;
+    }
+    if (!usingOfficial && savedVideoImage) {
+      setError(l('请重新上传参考图后使用本地视频服务', 'Upload the reference image again to use a local video service'));
+      return;
+    }
+    if (usingOfficial && hasReferenceImage && !referenceSupported) {
+      setError(l('当前模型不支持参考图', 'The selected model does not support reference images'));
+      return;
+    }
+    const referenceIssue = usingOfficial
+      ? videoReferenceIssue(official.model, selectedVideoReferences, !!(referenceImageFile || activeReferenceArtifact))
+      : undefined;
     if (referenceIssue) {
       setError(referenceIssue === 'frames' ? l('请先添加首帧', 'Add a first frame before a last frame') : referenceIssue === 'mixed' ? l('首尾帧不能与参考素材同时使用', 'First and last frames cannot be combined with reference media') : referenceIssue === 'audio' ? l('参考音频需要搭配参考图片', 'Reference audio requires reference images') : l('参考素材超出当前模型支持范围，请移除多余素材', 'Reference media exceeds the selected model limits. Remove unsupported references.'));
-      openStep(0); return;
+      return;
     }
     setError('');
     setNotice('');
-    session.updateDraft({
-      prompt: prompt.trim(),
-      provider: official.official ? 'seedance' : provider,
-      model: activeModel,
-      size,
-      duration,
-      ...(official.official ? { videoPriceVersion: official.model?.price?.version ?? null, generateAudio: official.model?.videoOptions?.generateAudio ? session.state.generateAudio ?? true : null } : {}),
-      ...(official.official ? official.draftPatch : {})
-    }, { semantic: true });
+    setSubmitting(true);
     try {
+      session.updateDraft({
+        prompt: prompt.trim(),
+        videoServiceSource: selectedSource,
+        provider: usingOfficial ? 'seedance' : provider,
+        model: activeModel,
+        size,
+        duration,
+        videoReferences: usingOfficial ? selectedVideoReferences : [],
+        ...(usingOfficial ? { generateAudio: official.model?.videoOptions?.generateAudio ? session.state.generateAudio ?? true : null } : {}),
+        ...(usingOfficial ? official.draftPatch : {})
+      }, { semantic: true });
       await session.flush();
       if (
         referenceImageFile !== undefined
@@ -481,6 +646,13 @@ export default function VideoGenerationWorkspace(props: {
         setNotice(l('正在上传参考图...', 'Uploading the reference image...'));
         await session.uploadReferenceImage(referenceImageFile);
         setReferenceImageFile(undefined);
+      }
+      if (recoverLegacyPriceRejection && pendingVideoRequest) {
+        await session.applyAction({
+          actor: 'user',
+          action: 'resolve-provider-request',
+          input: { ledgerId: pendingVideoRequest.id, decision: 'cancel-scope' }
+        });
       }
       const next = await session.applyAction({
         actor: 'user',
@@ -492,7 +664,12 @@ export default function VideoGenerationWorkspace(props: {
         '视频生成任务已提交，可以离开当前页面，完成后会保留在项目中',
         'Video generation started. You can leave this page and return to the saved result later.'
       ));
-    } catch {}
+      if (submittedStage?.status !== 'failed' && submittedStage?.status !== 'interrupted') props.onGenerated?.();
+    } catch (caught) {
+      setError(formatVideoError(caught, l, selectedModelLabel, provider));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function download() {
@@ -532,73 +709,134 @@ export default function VideoGenerationWorkspace(props: {
     try {
       await session.cancelJob();
       setNotice(l('已停止跟踪当前视频生成任务', 'Stopped tracking the current video generation task'));
-    } catch {} finally {
+    } catch {
+      setError(l('无法停止当前任务，请稍后重试', 'Could not stop the task. Try again later.', 'Det gick inte att stoppa uppgiften. Försök igen senare.'));
+    } finally {
       setTaskControlPending(undefined);
     }
   }
 
   async function resumeTask() {
-    if (session === null || !resumable || taskControlPending !== undefined) return;
+    if (session === null || !needsRecovery || taskControlPending !== undefined) return;
     setTaskControlPending('resuming');
     setError('');
+    let restoringResult = false;
     try {
-      if (isRecoverableVideoStage(latestStage)) {
+      if (pendingVideoRequest) {
+        const updated = await session.applyAction({
+          actor: 'user',
+          action: 'resolve-provider-request',
+          input: { ledgerId: pendingVideoRequest.id, decision: 'query' }
+        });
+        const status = updated.providerRequests.find(request => request.id === pendingVideoRequest.id)?.status;
+        if (status === 'failed') return;
+        if (status !== 'succeeded') {
+          return;
+        }
+        const originalStage = updated.stages.find(stage => stage.id === pendingVideoRequest.stageRunId);
+        if (typeof originalStage?.progress.videoGenerationResultId !== 'string'
+          || originalStage.progress.videoGenerationResultId.length === 0) {
+          setError(l('原视频已生成，但无法读取结果；可以重新生成',
+            'The original video was generated, but its result is unavailable. You can regenerate.',
+            'Originalvideon skapades, men resultatet kan inte läsas. Du kan generera igen.'));
+          return;
+        }
+        restoringResult = true;
         await session.applyAction({
           actor: 'user',
           action: 'run-stage',
-          input: { stageId: 'generate' }
+          input: { stageId: 'generate', resumedFromStageRunId: originalStage.id }
         });
-      } else {
-        await session.resumeJob();
+      } else if (recoverableVideoStage && latestStage) {
+        restoringResult = true;
+        await session.applyAction({
+          actor: 'user',
+          action: 'run-stage',
+          input: { stageId: 'generate', resumedFromStageRunId: latestStage.id }
+        });
       }
-      setNotice(l('正在继续查询原视频生成任务', 'Resuming the existing video generation task'));
-    } catch {} finally {
+    } catch (caught) {
+      if (restoringResult) setRecoveryFailureStageId(latestStage?.id);
+      setError(formatVideoError(caught, l, selectedModelLabel, provider));
+    } finally {
       setTaskControlPending(undefined);
     }
   }
 
+  useEffect(() => {
+    if (!needsRecovery || session === null) return;
+    let active = true;
+    const recover = () => {
+      if (!active || recoveryInFlight.current) return;
+      recoveryInFlight.current = true;
+      void resumeTask().finally(() => { recoveryInFlight.current = false; });
+    };
+    recover();
+    const timer = pendingVideoRequest ? window.setInterval(recover, 15_000) : undefined;
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [session?.job.id, pendingVideoRequest?.id, pendingVideoRequest?.status,
+    latestStage?.id, latestStage?.status, needsRecovery]);
+
   function selectVersion(version: number) {
-    openStep(2);
-    setNotice(l(`正在查看 V${version}`, `Viewing V${version}`));
+    setNotice(l(`正在查看 V${version}`, `Viewing V${version}`, `Visar V${version}`));
   }
 
   function handleCommand(command: string) {
     if (/示例|sample/i.test(command)) {
-      updatePrompt(l(samplePromptZh, samplePromptEn));
-      openStep(0);
+      updatePrompt(l(samplePromptZh, samplePromptEn, samplePromptSv));
       return l('示例提示词已填入，可以继续设置画幅和时长。', 'The sample prompt is ready. Continue with format and duration.');
     }
     if (/横屏|横版|landscape|16:9/i.test(command)) {
       updateSize('1280x720');
-      openStep(1);
       return l('视频画幅已改为横屏 16:9。', 'Video format changed to landscape 16:9.');
     }
     if (/竖屏|竖版|portrait|9:16/i.test(command)) {
       updateSize('720x1280');
-      openStep(1);
       return l('视频画幅已改为竖屏 9:16。', 'Video format changed to portrait 9:16.');
-    }
-    const normalized = command.toLowerCase();
-    const providerMatch = providers.find(item => (
-      normalized.includes(item.value)
-      || command.includes(item.zh)
-      || normalized.includes(item.en.toLowerCase())
-    ));
-    if (providerMatch) {
-      updateProvider(providerMatch.value);
-      openStep(1);
-      return l(
-        `视频服务已改为${providerMatch.zh}。`,
-        `Video provider changed to ${providerMatch.en}.`
-      );
     }
     if (command.trim().length > 8) {
       updatePrompt(command.trim());
-      openStep(0);
       return l('视频描述已同步，可以继续设置生成参数。', 'The video description is synchronized. Continue with generation settings.');
     }
     return l('请描述主体动作、场景、镜头运动、光线和视觉风格。', 'Describe the action, scene, camera movement, lighting, and visual style.');
   }
+
+  const videoSettingSections: ImageGenerationSettingSection[] = [{
+    id: 'format',
+    label: l('画幅', 'Format'),
+    value: selectedSize.ratio,
+    options: availableRatios.map(ratio => ({ value: ratio, label: ratio })),
+    ratio: true,
+    disabled: followsReferenceRatio,
+    onChange: ratio => {
+      const sameResolution = availableSizes.find(item => item.ratio === ratio && videoResolutionLabel(item.value) === videoResolutionLabel(size));
+      const next = sameResolution ?? availableSizes.find(item => item.ratio === ratio);
+      if (next) updateSize(next.value);
+    }
+  }, {
+    id: 'resolution',
+    label: l('清晰度', 'Resolution'),
+    value: size,
+    options: resolutionSizes.map(item => ({ value: item.value, label: videoResolutionLabel(item.value) })),
+    disabled: followsReferenceRatio,
+    onChange: value => updateSize(value as VideoGenerationSize)
+  }, {
+    id: 'duration',
+    label: l('视频时长', 'Video duration'),
+    value: String(duration),
+    options: durations.map(value => ({ value: String(value), label: l(`${value} 秒`, `${value}s`, `${value} sekunder`) })),
+    slider: true,
+    onChange: value => updateDuration(Number(value) as VideoGenerationDuration)
+  }];
+  const videoSettingsSummary = {
+    aspectRatio: followsReferenceRatio ? l('原图', 'Source') : selectedSize.ratio,
+    count: l(`${duration} 秒`, `${duration}s`, `${duration} sekunder`),
+    resolution: followsReferenceRatio ? l('原图', 'Source') : videoResolutionLabel(size),
+    quality: 'MP4'
+  };
 
   return (
     <CreatorToolShell
@@ -611,15 +849,42 @@ export default function VideoGenerationWorkspace(props: {
         : selectedResult
         ? l(
             `V${selectedResult.value} · ${resultModelLabel} · ${resultRatio} · ${resultDuration} 秒`,
-            `V${selectedResult.value} · ${resultModelLabel} · ${resultRatio} · ${resultDuration} seconds`
+            `V${selectedResult.value} · ${resultModelLabel} · ${resultRatio} · ${resultDuration} seconds`,
+            `V${selectedResult.value} · ${resultModelLabel} · ${resultRatio} · ${resultDuration} sekunder`
           )
-          : currentStep === 0
-            ? l('正在编辑视频描述', 'Editing video description')
-            : currentStep === 1
-              ? `${selectedModelLabel} · ${followsReferenceRatio
-                ? l('跟随参考图', 'Match reference image')
-                : l(selectedSize.zh, selectedSize.en)} · ${duration}s`
-              : l('等待生成', 'Ready to generate')}
+          : `${selectedModelLabel} · ${followsReferenceRatio
+            ? l('跟随参考图', 'Match reference image')
+            : selectedSize.ratio} · ${duration}s`}
+      taskSummary={<CreatorTaskSummary
+        sourceIcon={Clapperboard}
+        sourceLabel={l('视频描述', 'Prompt')}
+        sourceValue={(selectedResult ? readString(resultSettings?.prompt) : prompt.trim()) || l('待添加', 'Not added', 'Inte tillagt')}
+        compactSummary={selectedResult
+          ? `${resultModelLabel} · ${resultRatio} · ${resultDuration}s · V${selectedResult.value}`
+          : `${selectedModelLabel} · ${followsReferenceRatio ? l('跟随参考图', 'Match reference image') : selectedSize.ratio} · ${duration}s`}
+        items={selectedResult ? [
+          { label: l('视频服务', 'Provider'), value: l(resultProvider.zh, resultProvider.en) },
+          { label: l('模型版本', 'Model version'), value: resultModelLabel },
+          { label: l('画幅', 'Format'), value: `${resultFormatLabel} · ${resultRatio}` },
+          { label: l('分辨率', 'Resolution'), value: resultResolution },
+          { label: l('时长', 'Duration'), value: l(`${resultDuration} 秒`, `${resultDuration} seconds`, `${resultDuration} sekunder`) },
+          { label: l('当前版本', 'Version'), value: `V${selectedResult.value}` }
+        ] : [
+          ...(currentReferenceName
+            ? [{ label: l('参考图', 'Reference image'), value: currentReferenceName }]
+            : []),
+          { label: l('视频服务', 'Provider'), value: l(selectedProvider.zh, selectedProvider.en) },
+          { label: l('模型版本', 'Model version'), value: selectedModelLabel },
+          { label: l('画幅', 'Format'), value: followsReferenceRatio
+            ? l('跟随参考图', 'Match reference image')
+            : `${l(selectedSize.zh, selectedSize.en)} · ${selectedSize.ratio}` },
+          { label: l('分辨率', 'Resolution'), value: followsReferenceRatio
+            ? l('由模型根据参考图决定', 'Determined from the reference image')
+            : videoSizeDisplay(size) },
+          { label: l('时长', 'Duration'), value: l(`${duration} 秒`, `${duration} seconds`, `${duration} sekunder`) },
+          { label: l('输出格式', 'Output format'), value: 'MP4' }
+        ]}
+      />}
       initialMessage={l(
         '描述你想生成的视频，包括主体动作、镜头和画面风格。',
         'Describe the video, including subject movement, camera direction, and visual style.'
@@ -631,324 +896,206 @@ export default function VideoGenerationWorkspace(props: {
       pageClassName="video-generation-workspace-page"
       contentClassName="media-generation-workspace-content"
       currentIssue={visibleError || undefined}
+      workspaceIssue={!error && visibleError && visibleError !== previewError ? {
+        title: `${l('视频生成', 'Video generation')} · ${l('失败', 'Failed')}`,
+        description: visibleError
+      } : undefined}
       onCancelTask={generating ? () => void cancelTask() : undefined}
-      onResumeTask={resumable ? () => void resumeTask() : undefined}
       taskControlPending={taskControlPending}
+      embedded={props.embedded && !selectedResult}
     >
-      <div className="creator-tool-stack media-generation-stack">
-        <nav className="video-translation-steps creator-tool-steps" aria-label={l('视频生成流程', 'Video generation workflow')}>
-          <ol>
-            {[l('视频描述', 'Prompt'), l('生成设置', 'Settings'), l('生成视频', 'Generate')].map((label, index) => {
-              const active = currentStep === index;
-              const completed = index < currentStep;
-              return (
-                <li key={label} data-active={active} data-completed={completed}>
-                  <button
-                    type="button"
-                    disabled={index > furthestStep}
-                    aria-current={active ? 'step' : undefined}
-                    onClick={() => openStep(index as VideoStep)}
-                  >
-                    <span>{completed ? <Check size={13} strokeWidth={2.2} /> : index + 1}</span>
-                    <strong>{label}</strong>
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-        </nav>
-
-        <div className="media-generation-step-scroll">
-          {currentStep === 0 ? (
-            <section className="creator-tool-panel media-generation-prompt-panel" aria-labelledby="video-prompt-title">
-              <div className="creator-tool-panel-heading">
-                <div>
-                  <h2 id="video-prompt-title">{l('视频描述', 'Video prompt')}</h2>
-                  <p>{l(
-                    `写清主体动作、环境、镜头运动、光线和风格，最多 ${creatorPromptMaxLength} 字`,
-                    `Describe action, setting, camera movement, lighting, and style, up to ${creatorPromptMaxLength.toLocaleString('en-US')} characters`
-                  )}</p>
-                </div>
+      <div className="creator-tool-stack video-generation-studio">
+        {!props.embedded ? <section className="video-generation-intro" aria-label={l('视频生成功能说明', 'Video generation overview')}>
+          <p>{l(
+            '描述主体动作、镜头和光线，选择模型、画幅与时长，生成可下载的视频片段。',
+            'Describe the action, camera, and lighting, then choose a model, aspect ratio, and duration to generate a downloadable video clip.'
+          )}</p>
+          <div aria-label={l('功能特点', 'Features')}>
+            <span>{l('文字或参考图', 'Text or Reference')}</span>
+            <span>{l('多模型', 'Multi-Model')}</span>
+            <span>{l('自定义画幅', 'Custom Ratios')}</span>
+            <span>{l('MP4 输出', 'MP4 Output')}</span>
+          </div>
+        </section> : null}
+        <form className="video-generation-composer" aria-label={l('视频生成', 'Video Generation')} onSubmit={event => {
+          event.preventDefault();
+          void generate(priceChangedRequest);
+        }}>
+          <fieldset className="video-generation-fields" disabled={busy}>
+            <div className="video-generation-editor">
+              <div className="video-generation-composer-heading">
+                {props.embeddedTabs ?? <h2 id="video-prompt-title"><Clapperboard size={18} strokeWidth={1.7} aria-hidden="true" />{l('视频', 'Video')}</h2>}
+                {!props.embedded ? <span>{l('文字或参考图生成视频', 'Text or image to video')}</span> : null}
+              </div>
+              <div className="video-generation-reference" data-loaded={Boolean(currentReferenceName)}>
+                  <label className="video-generation-reference-upload" title={!referenceSupported ? l('当前模型不支持参考图', 'The selected model does not support reference images') : currentReferenceName ? l('更换参考图', 'Replace reference') : l('添加参考图', 'Add reference image')}>
+                    <input
+                      type="file"
+                      disabled={busy || !referenceSupported}
+                      accept="image/jpeg,image/png,image/webp"
+                      aria-label={l('上传视频参考图', 'Upload video reference image')}
+                      onChange={event => {
+                        updateReferenceImage(event.target.files?.[0] ?? null);
+                        event.target.value = '';
+                      }}
+                    />
+                    <span className="video-generation-reference-thumbnail">
+                      {referenceImageUrl
+                        ? <img src={referenceImageUrl} alt={l('视频参考图预览', 'Video reference preview')} />
+                        : <ImagePlus size={24} strokeWidth={1.5} />}
+                    </span>
+                    {!currentReferenceName ? <span className="video-generation-reference-copy">
+                      <span><strong>{l('参考图', 'Reference', 'Referens')}</strong>
+                        <small>{l('选填', 'Optional')}</small></span>
+                      <small>{l('支持 JPG、PNG、WebP，最大 5MB', 'JPG, PNG, or WebP, up to 5 MB')}</small>
+                    </span> : null}
+                    <span className="video-generation-reference-count">{currentReferenceName ? 1 : 0}/1</span>
+                  </label>
+                  {currentReferenceName ? (
+                    <button
+                      className="video-generation-reference-remove"
+                      type="button"
+                      disabled={busy}
+                      onClick={removeReferenceImage}
+                      aria-label={l('移除参考图', 'Remove reference image')}
+                      title={l('移除参考图', 'Remove reference image')}
+                    >
+                      <X size={15} strokeWidth={1.8} />
+                    </button>
+                  ) : null}
+              </div>
+              <label className="creator-tool-field video-generation-prompt-field">
+                <span className="video-generation-visually-hidden">{l('提示词', 'Prompt')}</span>
+                <textarea
+                  id="video-prompt-input"
+                  rows={5}
+                  disabled={busy}
+                  maxLength={creatorPromptMaxLength}
+                  value={prompt}
+                  onChange={event => updatePrompt(event.target.value)}
+                  placeholder={l(
+                    '例如：低机位跟随一辆红色跑车驶过海岸公路，黄昏金色光线，镜头平稳',
+                    'For example: A low-angle tracking shot following a red sports car along a coastal road at golden hour, smooth camera motion'
+                  )}
+                />
+              </label>
+              <div className="video-generation-prompt-tools">
+                <button type="button" disabled={busy} title={l('填入示例提示词', 'Use sample prompt')} aria-label={l('填入示例提示词', 'Use sample prompt')} onClick={() => updatePrompt(l(samplePromptZh, samplePromptEn, samplePromptSv))}>
+                  <WandSparkles size={16} strokeWidth={1.8} />
+                </button>
+                <button type="button" disabled={busy || !prompt} title={l('清空提示词', 'Clear prompt', 'Rensa prompt')} aria-label={l('清空提示词', 'Clear prompt', 'Rensa prompt')} onClick={() => updatePrompt('')}>
+                  <Trash2 size={16} strokeWidth={1.8} />
+                </button>
                 <small>{characterCount} / {creatorPromptMaxLength}</small>
               </div>
-              <div className={`video-generation-prompt-inputs${official.model?.videoOptions && !currentReferenceName ? ' has-official-references' : ''}`}>
-                {!official.model?.videoOptions || currentReferenceName ? <div className="video-reference-field">
-                  <span className="video-reference-label">{l('参考图', 'Reference')}</span>
-                  <div className="video-reference-upload-wrap">
-                    <label className="video-reference-upload" title={l('上传 JPG、PNG 或 WebP 图片，最大 5MB', 'Upload a JPG, PNG, or WebP image up to 5 MB')}>
-                      <input
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        aria-label={l('上传视频参考图', 'Upload video reference image')}
-                        onChange={event => updateReferenceImage(event.target.files?.[0] ?? null)}
-                      />
-                      <span className="video-reference-thumbnail" data-loaded={currentReferenceName ? 'true' : 'false'}>
-                        {referenceImageUrl
-                          ? <img src={referenceImageUrl} alt={l('视频参考图预览', 'Video reference preview')} />
-                          : (
-                            <>
-                              <Plus size={22} strokeWidth={1.6} />
-                              <small>{l('添加图片', 'Add image')}</small>
-                            </>
-                          )}
-                      </span>
-                    </label>
-                    {currentReferenceName ? (
-                      <button
-                        className="video-reference-remove"
-                        type="button"
-                        onClick={removeReferenceImage}
-                        aria-label={l('移除参考图', 'Remove reference image')}
-                        title={l('移除参考图', 'Remove reference image')}
-                      >
-                        <X size={15} strokeWidth={1.8} />
-                      </button>
-                    ) : null}
-                  </div>
-                  <small className="video-reference-meta" title={currentReferenceName ?? l('支持 JPG、PNG、WebP，最大 5MB', 'JPG, PNG, or WebP, up to 5 MB')}>
-                    {currentReferenceName ?? l('选填', 'Optional')}
-                  </small>
-                </div> : null}
-                <label className="creator-tool-field">
-                  <span>{l('提示词', 'Prompt')}</span>
-                  <textarea
-                    rows={12}
-                    maxLength={creatorPromptMaxLength}
-                    value={prompt}
-                    onChange={event => updatePrompt(event.target.value)}
-                    placeholder={l(
-                      '例如：低机位跟随一辆红色跑车驶过海岸公路，黄昏金色光线，镜头平稳',
-                      'For example: A low-angle tracking shot following a red sports car along a coastal road at golden hour, smooth camera motion'
-                    )}
-                  />
-                </label>
-              </div>
-              {official.official && official.model?.videoOptions ? <OfficialVideoReferences model={official.model} references={videoReferences} disabled={generating} onBusyChange={setUploadingVideoReference} onError={setError} /> : null}
-              <button className="smart-dubbing-sample" type="button" onClick={() => updatePrompt(l(samplePromptZh, samplePromptEn))}>
-                <WandSparkles size={14} strokeWidth={1.8} />
-                {l('填入示例提示词', 'Use sample prompt')}
-              </button>
-            </section>
-          ) : null}
-
-          {currentStep === 1 ? (
-            <section className="creator-tool-panel" aria-labelledby="video-settings-title">
-              <div className="creator-tool-panel-heading">
-                <div>
-                  <h2 id="video-settings-title">{l('生成设置', 'Generation settings')}</h2>
-                  <p>{l('设置视频服务、模型版本、画幅、分辨率和时长', 'Set the video provider, model version, format, resolution, and duration')}</p>
-                </div>
-              </div>
-              <div className={`video-generation-settings-grid${official.official ? ' is-official' : ''}`}>
-                {official.official ? <OfficialModelField label={l('视频模型', 'Video model')} service={official} disabled={generating || uploadingVideoReference} /> : <>
-                <label className="creator-tool-field">
-                  <span>{l('视频服务', 'Video provider')}</span>
-                  <NativeSelect value={provider} onChange={event => updateProvider(event.target.value as VideoGenerationProvider)}>
-                    {providers.map(item => <option key={item.value} value={item.value}>{l(item.zh, item.en)}</option>)}
-                  </NativeSelect>
-                </label>
-                <label className="creator-tool-field">
-                  <span>{l('模型版本', 'Model version')}</span>
-                  <NativeSelect value={model} onChange={event => updateModel(event.target.value)}>
-                    {modelOptions.map(item => (
-                      <option key={item.value} value={item.value}>{item.label}</option>
-                    ))}
-                  </NativeSelect>
-                </label>
-                </>}
-                <label className="creator-tool-field">
-                  <span>{l('画幅', 'Format')}</span>
-                  <NativeSelect
-                    value={size}
-                    disabled={followsReferenceRatio || !serviceReady}
-                    title={followsReferenceRatio
-                      ? l('Seedance 参考图模式会跟随参考图画幅', 'Seedance matches the reference image aspect ratio')
-                      : undefined}
-                    onChange={event => updateSize(event.target.value as VideoGenerationSize)}
-                  >
-                    {followsReferenceRatio ? (
-                      <option value={size}>{l('跟随参考图', 'Match reference image')}</option>
-                    ) : availableSizes.length ? availableSizes.map(item => <option key={item.value} value={item.value}>{item.value.includes('@') ? videoSizeDisplay(item.value) : `${l(item.zh, item.en)} · ${item.ratio} · ${item.value}`}</option>) : <option value="">{l('暂不可用', 'Unavailable')}</option>}
-                  </NativeSelect>
-                </label>
-                <label className="creator-tool-field">
-                  <span>{l('视频时长', 'Video duration')}</span>
-                  <NativeSelect value={duration} disabled={!serviceReady} onChange={event => updateDuration(Number(event.target.value) as VideoGenerationDuration)}>
-                    {durations.length ? durations.map(value => <option key={value} value={value}>{value} {l('秒', 'seconds')}</option>) : <option value="">{l('暂不可用', 'Unavailable')}</option>}
-                  </NativeSelect>
-                </label>
-              </div>
-              {official.official && official.model?.videoOptions?.generateAudio ? <label className="official-video-audio"><input type="checkbox" checked={session?.state.generateAudio !== false} disabled={generating} onChange={event => session?.updateDraft({ generateAudio: event.target.checked }, { semantic: true })} />{l('生成音频', 'Generate audio')}</label> : null}
-              {quotedCredits !== undefined ? <output className="official-video-quote" aria-label={l('积分报价', 'Credit quote')}>{l(`本次消耗 ${formatGatewayCreditAmount(quotedCredits)} 积分`, `This generation costs ${formatGatewayCreditAmount(quotedCredits)} credits`)}</output> : null}
-              <div className="media-generation-setting-note">
-                <Film size={17} strokeWidth={1.7} />
-                <span>
-                  <strong>{l('后台生成', 'Background generation')}</strong>
-                  <small>{l(
-                    '任务提交后可以离开当前页面，生成状态和结果会保留在项目中',
-                    'You can leave after submission. Progress and results remain available in the project.'
-                  )}</small>
-                </span>
-              </div>
-            </section>
-          ) : null}
-
-          {currentStep === 2 ? (
-            <div className="creator-task-final-grid media-generation-final-grid">
-              <section className="creator-tool-panel media-generation-output-panel" aria-labelledby="video-output-title">
-                <div className="creator-tool-panel-heading">
-                  <div>
-                    <h2 id="video-output-title">{selectedResult ? l('生成结果', 'Generated video') : l('生成视频', 'Generate video')}</h2>
-                    <p>{generating
-                      ? selectedResult
-                        ? l('新版本正在后台生成，可以继续预览和下载当前版本', 'A new version is generating in the background. You can still preview and download the current version.', 'En ny version genereras i bakgrunden. Du kan fortfarande förhandsgranska och ladda ner den nuvarande versionen.')
-                        : l('任务正在后台生成，完成后会自动显示', 'The task is running in the background and will appear automatically')
-                      : selectedResult
-                        ? l('预览历史版本并下载需要的成片', 'Preview previous versions and download the video you need')
-                        : l('确认设置后提交视频生成任务', 'Review the settings, then submit the generation job')}</p>
-                  </div>
-                  {selectedResult ? (
-                    <CreatorResultVersionMenu
-                      version={selectedResult.value}
-                      versions={resultVersions.map((version, index) => ({
-                        value: version.value,
-                        description: index === 0
-                          ? l('初次生成', 'Initial generation')
-                          : l(`第 ${index + 1} 次生成`, `Generation ${index + 1}`)
-                      }))}
-                      onVersionChange={selectVersion}
+            </div>
+            <div className="video-generation-action-bar">
+              <div className="video-generation-model-row">
+                  <label className="creator-tool-field">
+                    <OfficialModelSelect
+                      label={l('模型', 'Model')}
+                      value={selectedCatalogId}
+                      disabled={busy}
+                      layout="grouped"
+                      compactOptions
+                      loginRequiredModelIds={loginRequiredModelIds}
+                      configureModel={localModel && !localConfigured ? {
+                        id: localVideoModelId,
+                        title: l('配置本地视频服务', 'Configure local video service', 'Konfigurera lokal videotjänst'),
+                        onConfigure: () => { window.location.hash = '#/settings?tab=ai-services&section=video'; }
+                      } : undefined}
+                      onOpen={!official.official ? loadPublicCatalog : undefined}
+                      onChange={selectCatalogModel}
+                      models={catalogModels}
                     />
-                  ) : null}
-                </div>
-                {generating ? <CreatorTaskProgressNotice stageId="generate" /> : null}
-                {selectedResult ? (
-                  <div className="video-generation-result" data-ratio={resultRatio}>
-                    {videoUrl ? (
-                      <GeneratedVideoPreview src={videoUrl} duration={resultArtifactDuration} />
-                    ) : (
-                      <div className="video-result-player-status" role="status">
-                        {previewFailed ? previewError : (
-                          <>
-                            <LoaderCircle className="smart-dubbing-spinner" size={18} />
-                            {l('正在加载视频预览', 'Loading video preview')}
-                          </>
-                        )}
-                      </div>
-                    )}
-                    <div>
-                      <span>
-                        <strong>{artifactFileName(selectedResult.artifact, selectedResult.value)}</strong>
-                        <small>
-                          {formatBytes(readArtifactBytes(selectedResult.artifact))}
-                          {' · '}{resultModelLabel}
-                        </small>
-                      </span>
-                      <div>
-                        <button type="button" onClick={() => void generate()} disabled={generating || !serviceReady}>
-                          {generating
-                            ? <LoaderCircle className="smart-dubbing-spinner" size={15} />
-                            : <RotateCcw size={15} />}
-                          {generating ? l('正在生成', 'Generating') : l('重新生成', 'Regenerate')}
-                        </button>
-                        <button className="creator-tool-primary" type="button" onClick={() => void download()}>
-                          <Download size={15} />
-                          {l('下载视频', 'Download video')}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ) : generating ? (
-                  <p className="video-generation-background-note">{l(
-                      '任务已保存在项目中，可以离开当前页面',
-                      'The task is saved in the project, so you can leave this page'
-                    )}</p>
+                  </label>
+              </div>
+              <ImageGenerationSettings
+                label={l('视频设置', 'Video settings', 'Videoinställningar')}
+                summary={videoSettingsSummary}
+                sections={videoSettingSections}
+                countIcon="clock"
+                disabled={busy || !serviceReady}
+                hideHeader={props.embedded}
+              />
+              <div className="video-generation-submit-row">
+                {!needsRecovery ? <button className="creator-tool-primary" type="submit" disabled={busy || taskControlPending !== undefined}>
+                  {busy ? <LoaderCircle className="smart-dubbing-spinner" size={16} /> : selectedResult || latestStage ? <RotateCcw size={16} /> : <Sparkles size={16} />}
+                  {generationLabel}
+                </button> : null}
+              </div>
+            </div>
+          </fieldset>
+        </form>
+
+        {needsRecovery ? <p className="video-generation-recovery" role="status">
+          <LoaderCircle className="smart-dubbing-spinner" size={16} />
+          {l('正在确认视频结果', 'Checking the video result', 'Kontrollerar videoresultatet')}
+        </p> : null}
+
+        {!props.embedded && (selectedResult || generating) ? (
+          <section className="video-generation-output" aria-labelledby="video-output-title">
+            <div className="creator-tool-panel-heading">
+              <div>
+                <h2 id="video-output-title">{selectedResult ? l('生成结果', 'Generated video') : l('生成视频', 'Generate video')}</h2>
+                <p>{generating
+                  ? selectedResult
+                    ? l('新版本正在后台生成，可以继续预览和下载当前版本', 'A new version is generating in the background. You can still preview and download the current version.', 'En ny version genereras i bakgrunden. Du kan fortfarande förhandsgranska och ladda ner den nuvarande versionen.')
+                    : l('任务正在后台生成，完成后会自动显示', 'The task is running in the background and will appear automatically')
+                  : l('预览历史版本并下载需要的成片', 'Preview previous versions and download the video you need')}</p>
+              </div>
+              {selectedResult ? (
+                <CreatorResultVersionMenu
+                  version={selectedResult.value}
+                  versions={resultVersions.map((version, index) => ({
+                    value: version.value,
+                    description: index === 0
+                      ? l('初次生成', 'Initial generation')
+                      : l(`第 ${index + 1} 次生成`, `Generation ${index + 1}`, `Generering ${index + 1}`)
+                  }))}
+                  onVersionChange={selectVersion}
+                />
+              ) : null}
+            </div>
+            {generating ? <CreatorTaskProgressNotice stageId="generate" /> : null}
+            {selectedResult ? (
+              <div className="video-generation-result" data-ratio={resultRatio}>
+                {videoUrl ? (
+                  <GeneratedVideoPreview src={videoUrl} duration={resultArtifactDuration} />
                 ) : (
-                  <div className="smart-dubbing-ready">
-                    <span><Clapperboard size={24} strokeWidth={1.6} /></span>
-                    <strong>{resumable ? l('视频生成已暂停', 'Video generation paused') : l('准备生成视频', 'Ready to generate video')}</strong>
-                    <p>{l(
-                      `${l(selectedProvider.zh, selectedProvider.en)} · ${selectedModelLabel} · ${followsReferenceRatio
-                        ? l('跟随参考图', 'Match reference image')
-                        : selectedSize.ratio} · ${duration} 秒${followsReferenceRatio ? '' : ` · ${videoSizeDisplay(size)}`}`,
-                      `${selectedProvider.en} · ${selectedModelLabel} · ${followsReferenceRatio
-                        ? 'Match reference image'
-                        : selectedSize.ratio} · ${duration} seconds${followsReferenceRatio ? '' : ` · ${videoSizeDisplay(size)}`}`
-                    )}</p>
-                    {resumable ? (
-                      <button className="creator-tool-primary" type="button" onClick={() => void resumeTask()} disabled={taskControlPending !== undefined}>
-                        {taskControlPending === 'resuming'
-                          ? <LoaderCircle className="smart-dubbing-spinner" size={16} />
-                          : <Sparkles size={16} />}
-                        {l('继续任务', 'Resume task')}
-                      </button>
-                    ) : null}
+                  <div className="video-result-player-status" role="status">
+                    {previewFailed ? previewError : (
+                      <>
+                        <LoaderCircle className="smart-dubbing-spinner" size={18} />
+                        {l('正在加载视频预览', 'Loading video preview')}
+                      </>
+                    )}
                   </div>
                 )}
-              </section>
-              <CreatorTaskSummary
-                sourceIcon={Clapperboard}
-                sourceLabel={l('视频描述', 'Prompt')}
-                sourceValue={selectedResult ? readString(resultSettings?.prompt) : prompt.trim()}
-                items={selectedResult ? [
-                  { label: l('视频服务', 'Provider'), value: l(resultProvider.zh, resultProvider.en) },
-                  { label: l('模型版本', 'Model version'), value: resultModelLabel },
-                  { label: l('画幅', 'Format'), value: `${resultFormatLabel} · ${resultRatio}` },
-                  { label: l('分辨率', 'Resolution'), value: resultResolution },
-                  { label: l('时长', 'Duration'), value: l(`${resultDuration} 秒`, `${resultDuration} seconds`) },
-                  { label: l('当前版本', 'Version'), value: `V${selectedResult.value}` }
-                ] : [
-                  ...(currentReferenceName
-                    ? [{ label: l('参考图', 'Reference image'), value: currentReferenceName }]
-                    : []),
-                  { label: l('视频服务', 'Provider'), value: l(selectedProvider.zh, selectedProvider.en) },
-                  { label: l('模型版本', 'Model version'), value: selectedModelLabel },
-                  { label: l('画幅', 'Format'), value: followsReferenceRatio
-                    ? l('跟随参考图', 'Match reference image')
-                    : `${l(selectedSize.zh, selectedSize.en)} · ${selectedSize.ratio}` },
-                  { label: l('分辨率', 'Resolution'), value: followsReferenceRatio
-                    ? l('由模型根据参考图决定', 'Determined from the reference image')
-                    : size },
-                  { label: l('时长', 'Duration'), value: l(`${duration} 秒`, `${duration} seconds`) },
-                  { label: l('输出格式', 'Output format'), value: 'MP4' }
-                ]}
-              />
-            </div>
-          ) : null}
-          {error ? (
-            <p className="creator-tool-error" role="alert">
-              {error}
-              {settingsDeepLink ? (
-                <>
-                  {' '}
-                  <a href={settingsDeepLink}>{l('打开 AI 服务设置', 'Open AI service settings')}</a>
-                </>
-              ) : null}
-            </p>
-          ) : null}
-          {notice ? <p className="creator-tool-notice" role="status">{notice}</p> : null}
-        </div>
-
-        <footer className="video-translation-wizard-actions media-generation-actions" aria-label={l('视频生成操作', 'Video generation actions')}>
-          {currentStep === 2 && quotedCredits !== undefined && !generating ? <output className="official-video-quote">{l(`${formatGatewayCreditAmount(quotedCredits)} 积分`, `${formatGatewayCreditAmount(quotedCredits)} credits`)}</output> : null}
-          <button
-            className="video-translation-secondary-action"
-            type="button"
-            onClick={() => currentStep === 0 ? props.onBack() : openStep((currentStep - 1) as VideoStep)}
-          >
-            {currentStep === 0 ? l('返回', 'Back') : l('上一步', 'Back')}
-          </button>
-          {currentStep < 2 ? (
-            <button className="video-translation-primary-action" type="button" disabled={currentStep === 1 && !serviceReady} onClick={nextStep}>
-              {l('继续', 'Continue')}
-            </button>
-          ) : null}
-          {currentStep === 2 && selectedResult === undefined && !generating && !resumable ? (
-            <button className="video-translation-primary-action" type="button" disabled={!serviceReady} onClick={() => void generate()}>
-              <Sparkles size={16} />
-              {l('开始生成', 'Generate')}
-            </button>
-          ) : null}
-        </footer>
+                <div>
+                  <span>
+                    <strong>{artifactFileName(selectedResult.artifact, selectedResult.value)}</strong>
+                    <small>
+                      {formatBytes(readArtifactBytes(selectedResult.artifact))}
+                      {' · '}{resultModelLabel}
+                    </small>
+                  </span>
+                  <div>
+                    <button className="creator-tool-primary" type="button" onClick={() => void download()}>
+                      <Download size={15} />
+                      {l('下载视频', 'Download video')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+        {error ? <IssueNotice title={`${l('视频生成', 'Video generation')} · ${l('失败', 'Failed')}`}
+          description={error}
+          settingsLink={settingsDeepLink ? { href: settingsDeepLink, label: l('打开 AI 服务设置', 'Open AI service settings') } : undefined}
+        /> : null}
+        {notice ? <p className="creator-tool-notice" role="status">{notice}</p> : null}
       </div>
     </CreatorToolShell>
   );
@@ -1045,10 +1192,6 @@ function createVideoResultVersions(
     .sort((left, right) => left.value - right.value);
 }
 
-function readVideoStep(value: CreatorJson | undefined, fallback: VideoStep): VideoStep {
-  return value === 0 || value === 1 || value === 2 ? value : fallback;
-}
-
 function readString(value: CreatorJson | undefined): string {
   return typeof value === 'string' ? value : '';
 }
@@ -1080,30 +1223,33 @@ function videoModelDefaults(
   config: CreatorServicesConfig
 ): Record<VideoGenerationProvider, string> {
   return {
-    seedance: config.video.seedance.model.trim() || defaultVideoGenerationModels.seedance,
+    seedance: config.video.seedance.model.trim() === 'doubao-seedance-1-0-pro-250528'
+      ? defaultVideoGenerationModels.seedance
+      : config.video.seedance.model.trim() || defaultVideoGenerationModels.seedance,
     kling: config.video.kling.model.trim() || defaultVideoGenerationModels.kling,
-    veo: config.video.veo.model.trim() || defaultVideoGenerationModels.veo
+    veo: defaultVideoGenerationModels.veo
   };
 }
 
-function createVideoModelOptions(
-  provider: VideoGenerationProvider,
-  configuredDefault: string,
-  current: string
-): VideoModelOption[] {
-  const ids = [
-    configuredDefault,
-    ...videoGenerationModelIds[provider],
-    current
-  ].filter((value, index, values) => value && values.indexOf(value) === index);
-  return ids.map(value => ({
-    value,
-    label: videoModelLabel(value)
-  }));
+function localVideoProviderReady(
+  config: CreatorServicesConfig['video'],
+  credentials: CreatorServicesCredentialField[],
+  provider: VideoGenerationProvider
+): boolean {
+  if (provider !== 'veo' && !config[provider].model.trim()) return false;
+  return provider === 'kling'
+    ? credentials.includes('video.kling.accessKey') && credentials.includes('video.kling.secretKey')
+    : credentials.includes(`video.${provider}.apiKey` as CreatorServicesCredentialField);
+}
+
+function preferredSeedanceVideoModel(models: readonly GatewayModel[]): GatewayModel | undefined {
+  const ready = models.filter(gatewayModelReady);
+  return ready.find(model => /^seedance[ .-]*2[.-]5$/i.test(model.name?.trim() ?? ''))
+    ?? ready.find(model => /seedance[ .-]*2[.-]5/i.test(`${model.name ?? ''} ${model.id}`));
 }
 
 function videoModelLabel(model: string): string {
-  return modelLabels[model] ?? model;
+  return modelLabels[model] ?? gatewayModelDisplayName({ id: model }, 'OpenCreator');
 }
 
 function videoSizeOption(value: string): typeof sizes[number] {
@@ -1118,6 +1264,8 @@ function videoSizeOption(value: string): typeof sizes[number] {
 }
 
 function videoSizeDisplay(value: string): string { return value.replace('@', ' · '); }
+
+function videoResolutionLabel(value: string): string { return value.split('@')[0] ?? value; }
 
 function readSize(value: CreatorJson | undefined, official = false): VideoGenerationSize {
   if (official && typeof value === 'string' && /^(?:\d+x\d+|[A-Za-z0-9._-]+@\d+:\d+)$/.test(value)) return value as VideoGenerationSize;
@@ -1273,9 +1421,39 @@ function formatVideoError(
       `${selected} is not enabled for this account. Switch models or enable it in ${consoleName}.`
     );
   }
-  if (typeof error === 'object' && error !== null && 'publicFacts' in error && isPublicErrorFacts(error.publicFacts)
-    && error.publicFacts.kind !== 'unknown') {
-    return publicErrorReason(error.publicFacts, l);
+  const suppliedFacts = typeof error === 'object' && error !== null && 'publicFacts' in error
+    && typeof error.publicFacts === 'object' && error.publicFacts !== null
+    ? sanitizePublicErrorFacts(error.publicFacts as PublicErrorFacts) : undefined;
+  if (suppliedFacts?.provider === 'veo' && suppliedFacts.upstreamCode === 'model_retired') {
+    return l('此任务使用了已停用的 Veo 直连模型，请使用 Gemini Omni Flash 重新生成。',
+      'This task used a retired direct Veo model. Generate again with Gemini Omni Flash.',
+      'Uppgiften använde en utfasad direktansluten Veo-modell. Generera igen med Gemini Omni Flash.');
+  }
+  if (suppliedFacts && isPublicErrorFacts(suppliedFacts) && suppliedFacts.kind !== 'unknown') {
+    if (suppliedFacts.provider === 'opencreator-gateway-video') {
+      const contentReason = mediaContentSafetyReason(suppliedFacts, l);
+      if (contentReason) return contentReason;
+      if (suppliedFacts.upstreamCode === 'video_price_changed') return l(
+        '视频生成未完成，请重试', 'Video generation did not complete. Try again.', 'Videogenereringen slutfördes inte. Försök igen.'
+      );
+      if (suppliedFacts.upstreamCode === 'credits_insufficient') return l(
+        '积分不足，请充值后重试', 'Insufficient credits. Add credits and try again.', 'Krediterna räcker inte. Fyll på och försök igen.'
+      );
+      if (suppliedFacts.kind === 'rate-limited') return l(
+        '请求过于频繁，请稍后重试', 'Too many requests. Try again later.', 'För många förfrågningar. Försök igen senare.'
+      );
+      if (suppliedFacts.kind === 'unauthorized') return l(
+        '官方服务连接已失效，请重新登录', 'The official service connection expired. Sign in again.', 'Anslutningen till den officiella tjänsten har gått ut. Logga in igen.'
+      );
+      if (suppliedFacts.kind === 'timeout') return l(
+        '请求超时，请稍后重试', 'The request timed out. Try again later.', 'Förfrågan tog för lång tid. Försök igen senare.'
+      );
+      if (suppliedFacts.upstreamCode === 'invalid_parameters' || suppliedFacts.upstreamCode === 'invalid_parameter') return l(
+        '当前模型不支持这些参数，请调整设置后重试', 'This model does not support these settings. Adjust them and try again.', 'Modellen stöder inte dessa inställningar. Ändra dem och försök igen.'
+      );
+      return publicErrorReason({ ...suppliedFacts, upstreamMessage: undefined }, l);
+    }
+    return publicErrorReason(suppliedFacts, l);
   }
   if (code === 'creator_video_upstream_error' || code === 'VIDEO_GENERATION_UPSTREAM_ERROR') {
     return l(

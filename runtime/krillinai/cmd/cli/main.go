@@ -34,6 +34,10 @@ func main() {
 		writeAndExit(output, cli.Execute(context.Background(), nil, cmd))
 		return
 	}
+	if cmd.Name == "compile-subtitles" {
+		writeAndExit(output, cli.Execute(context.Background(), nil, cmd))
+		return
+	}
 	if cmd.DryRun {
 		writeAndExit(output, cli.Execute(context.Background(), nil, cmd))
 		return
@@ -87,10 +91,12 @@ func main() {
 }
 
 type progressFrame struct {
-	Type    string `json:"type"`
-	Phase   string `json:"phase"`
-	Percent int    `json:"percent"`
-	Message string `json:"message,omitempty"`
+	Type      string `json:"type"`
+	Phase     string `json:"phase"`
+	Percent   int    `json:"percent"`
+	Message   string `json:"message,omitempty"`
+	Completed *int   `json:"completed,omitempty"`
+	Total     *int   `json:"total,omitempty"`
 }
 
 type jsonLineWriter struct {
@@ -113,22 +119,24 @@ func configureOpenCreatorProgress(cmd *cli.Command, output *jsonLineWriter) {
 	if os.Getenv("OPENCREATOR_KRILLINAI_CLI") != "1" {
 		return
 	}
-	writeProgress := func(previous func(string, int, string)) func(string, int, string) {
-		return func(phase string, percent int, message string) {
+	writeProgress := func(previous pipeline.ProgressReporter) pipeline.ProgressReporter {
+		return func(phase string, percent int, message string, counts ...pipeline.ProgressCounts) {
 			if previous != nil {
-				previous(phase, percent, message)
+				previous(phase, percent, message, counts...)
 			}
-			_ = output.Write(progressFrame{
-				Type:    "progress",
-				Phase:   phase,
-				Percent: percent,
-				Message: message,
-			})
+			frame := progressFrame{Type: "progress", Phase: phase, Percent: percent, Message: message}
+			if len(counts) > 0 {
+				frame.Completed, frame.Total = &counts[0].Completed, &counts[0].Total
+			}
+			_ = output.Write(frame)
 		}
 	}
+
 	switch cmd.Name {
 	case "subtitle":
 		cmd.Subtitle.ReportProgress = writeProgress(cmd.Subtitle.ReportProgress)
+	case "clip":
+		cmd.Clip.ReportProgress = writeProgress(cmd.Clip.ReportProgress)
 	case "tts":
 		cmd.TTS.ReportProgress = writeProgress(cmd.TTS.ReportProgress)
 	case "render-horizontal", "render-vertical":
@@ -137,6 +145,9 @@ func configureOpenCreatorProgress(cmd *cli.Command, output *jsonLineWriter) {
 }
 
 func requiresTranscriptionAtStart(cmd cli.Command) bool {
+	if cmd.Name == "clip" {
+		return cmd.Clip.InputSRT == "" && (cmd.Clip.CaptionSource == pipeline.CaptionSourceWhisper || !pipeline.IsYouTubeInput(cmd.Clip.Input))
+	}
 	if cmd.Name != "subtitle" || cmd.Subtitle.InputSRT != "" {
 		return false
 	}

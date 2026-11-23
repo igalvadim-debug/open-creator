@@ -12,6 +12,7 @@ const (
 	StageRenderHorizontal Stage = "render-horizontal"
 	StageRenderVertical   Stage = "render-vertical"
 	StageCover            Stage = "cover"
+	StageClip             Stage = "clip"
 	StagePipeline         Stage = "pipeline"
 	StageVoices           Stage = "voices"
 )
@@ -44,10 +45,19 @@ const (
 )
 
 type Error struct {
-	Kind      ErrorKind `json:"kind"`
-	Code      string    `json:"code"`
-	Message   string    `json:"message"`
-	Retryable bool      `json:"retryable"`
+	Kind          ErrorKind              `json:"kind"`
+	Code          string                 `json:"code"`
+	Message       string                 `json:"message"`
+	Retryable     bool                   `json:"retryable"`
+	HTTPStatus    int                    `json:"http_status,omitempty"`
+	UpstreamCode  string                 `json:"upstream_code,omitempty"`
+	RequestID     string                 `json:"request_id,omitempty"`
+	Transcription *transcriptionPosition `json:"transcription,omitempty"`
+}
+
+type transcriptionPosition struct {
+	SegmentNumber int `json:"segment_number"`
+	AttemptNumber int `json:"attempt_number"`
 }
 
 func (e *Error) Error() string {
@@ -91,6 +101,7 @@ type Outputs struct {
 	FinalCoverPrompt    string `json:"cover_prompt,omitempty"`
 	OriginText          string `json:"origin_text,omitempty"`
 	TargetText          string `json:"target_text,omitempty"`
+	ClipIndex           string `json:"clip_index,omitempty"`
 }
 
 type Voice struct {

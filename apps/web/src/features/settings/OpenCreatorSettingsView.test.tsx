@@ -1,9 +1,11 @@
+import { selectListbox } from '../../test/select-option.js';
+import { changeControl } from '../../test/select-option.js';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ConfirmDialogProvider } from '../../components/dialogs/ConfirmDialogProvider.js';
 import { LanguageProvider } from '../../i18n/LanguageProvider.js';
-import { languagePreferenceStorageKey } from '../../i18n/language.js';
+import { appLanguageOptions, languagePreferenceStorageKey } from '../../i18n/language.js';
 import { OpenCreatorSettingsView } from './OpenCreatorSettingsView.js';
 import type { GatewayAccountState } from '@opencreator/protocol';
 import type { GatewayAccountSettingsService } from '../../services/gateway-account-service.js';
@@ -22,6 +24,24 @@ const runtimeStatus = {
 };
 
 describe('OpenCreatorSettingsView', () => {
+  it.each([
+    { language: 'en-US', heading: 'AI Services', setup: 'Set up Agent' },
+    { language: 'zh-CN', heading: 'AI 服务', setup: '配置 Agent' }
+  ] as const)('omits the Agent setup row when Agent is configured ($language)', async ({ language, heading, setup }) => {
+    const codexRuntimeService = {
+      getCodexProvider: vi.fn(async () => ({ baseUrl: '', model: 'local-model', apiKeyConfigured: false, authentication: 'chatgpt' as const })),
+      updateCodexProvider: vi.fn()
+    };
+    const { container } = render(<LanguageProvider initialPreference={language}>
+      <OpenCreatorSettingsView runtimeStatus={runtimeStatus} initialTab="ai-services"
+        codexRuntimeService={codexRuntimeService} agentSetupNeeded={false} onBack={vi.fn()} />
+    </LanguageProvider>);
+
+    expect(await screen.findByRole('heading', { name: heading })).toBeVisible();
+    expect(screen.queryByRole('button', { name: setup })).not.toBeInTheDocument();
+    expect(container.querySelector('.settings-inline-warning')).not.toBeInTheDocument();
+  });
+
   it('shows connection diagnostics and reconnects official services without a model probe', async () => {
     const blocked: GatewayAccountState = { source: 'gateway', authState: 'signed_in', activationState: 'blocked', account: { id: 'a', email: 'a@test', verified: true }, bindingVersion: null,
       models: [{ id: 'vendor/text', modality: 'text', capabilities: ['responses'] }], activationError: { code: 'gateway_unavailable', message: 'Unavailable', stage: 'usage', request: { path: '/api/v1/client/usage', reason: 'http', httpStatus: 503 } } };
@@ -158,7 +178,9 @@ describe('OpenCreatorSettingsView', () => {
     expect(screen.queryByRole('button', { name: '订阅与积分' })).not.toBeInTheDocument();
   });
   it('renders default navigation and general settings without old work mode copy', () => {
-    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />);
+    render(<LanguageProvider initialPreference="system">
+      <OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />
+    </LanguageProvider>);
 
     expect(screen.getByRole('button', { name: '返回应用' })).toBeInTheDocument();
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
@@ -179,11 +201,12 @@ describe('OpenCreatorSettingsView', () => {
     expect(screen.getByText('默认权限')).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: '默认权限' })).toHaveValue('follow-project');
     expect(screen.getByText('默认文件打开方式')).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: '显示语言' })).toHaveValue('system');
+    expect(screen.getByRole('combobox', { name: '显示语言' })).toHaveAttribute('data-value', 'system');
+    fireEvent.focus(screen.getByRole('combobox', { name: '显示语言' }));
     expect(screen.getByRole('option', { name: '跟随系统（简体中文）' })).toBeInTheDocument();
     expect(screen.getByText('菜单栏显示')).toBeInTheDocument();
     expect(screen.queryByRole('switch', { name: '动态背景' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('switch', { name: /发送匿名使用数据/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: /发送数据帮助我们改进/ })).not.toBeInTheDocument();
     expect(screen.queryByText('工作模式')).not.toBeInTheDocument();
     expect(screen.queryByText('适用于编程')).not.toBeInTheDocument();
   });
@@ -195,12 +218,11 @@ describe('OpenCreatorSettingsView', () => {
       </LanguageProvider>
     );
 
-    fireEvent.change(screen.getByRole('combobox', { name: '显示语言' }), {
-      target: { value: 'en-US' }
-    });
+    fireEvent.focus(screen.getByRole('combobox', { name: '显示语言' }));
+    fireEvent.click(screen.getByRole('option', { name: 'English' }));
 
     expect(screen.getByRole('heading', { name: 'General' })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: 'Display language' })).toHaveValue('en-US');
+    expect(screen.getByRole('combobox', { name: 'Display language' })).toHaveAttribute('data-value', 'en-US');
     expect(screen.getByRole('button', { name: 'Back to app' })).toBeInTheDocument();
     expect(window.localStorage.getItem(languagePreferenceStorageKey)).toBe('en-US');
     expect(document.documentElement).toHaveAttribute('lang', 'en-US');
@@ -208,16 +230,39 @@ describe('OpenCreatorSettingsView', () => {
     window.localStorage.removeItem(languagePreferenceStorageKey);
   });
 
+  it('shows the actual system language while another display language is selected', () => {
+    render(<LanguageProvider initialPreference="en-US"><OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} /></LanguageProvider>);
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Display language' }));
+    fireEvent.click(screen.getByRole('option', { name: 'System (简体中文)' }));
+    expect(screen.getByRole('heading', { name: '常规' })).toBeInTheDocument();
+    expect(document.documentElement).toHaveAttribute('lang', 'zh-CN');
+    expect(window.localStorage.getItem(languagePreferenceStorageKey)).toBe('system');
+    window.localStorage.removeItem(languagePreferenceStorageKey);
+  });
+
   it.each([
     ['ja-JP', '一般'], ['ko-KR', '일반'], ['es-ES', 'General'],
-    ['fr-FR', 'Général'], ['de-DE', 'Allgemein'], ['pt-BR', 'Geral']
+    ['fr-FR', 'Général'], ['de-DE', 'Allgemein'], ['pt-BR', 'Geral'],
+    ['zh-TW', '一般'], ['it-IT', 'Generale'], ['ru-RU', 'Общие'],
+    ['tr-TR', 'Genel'], ['id-ID', 'Umum'], ['vi-VN', 'Chung'],
+    ['th-TH', 'ทั่วไป'], ['fil-PH', 'Pangkalahatan'], ['hi-IN', 'सामान्य'],
+    ['bn-BD', 'সাধারণ'], ['pl-PL', 'Ogólne'], ['uk-UA', 'Загальні'], ['nl-NL', 'Algemeen'],
+    ['ms-MY', 'Umum'], ['da-DK', 'Generelt'], ['nb-NO', 'Generelt'], ['fi-FI', 'Yleiset'],
+    ['cs-CZ', 'Obecné'], ['ro-RO', 'General'], ['hu-HU', 'Általános'], ['el-GR', 'Γενικά'],
+    ['ta-IN', 'பொது'], ['te-IN', 'సాధారణం'], ['bg-BG', 'Общи'],
+    ['sk-SK', 'Všeobecné'], ['hr-HR', 'Općenito'], ['sr-RS', 'Опште'],
+    ['ar-SA', 'عام'], ['fa-IR', 'عمومی'], ['ur-PK', 'عمومی'], ['he-IL', 'כללי'],
+    ['mr-IN', 'सामान्य'], ['gu-IN', 'સામાન્ય'], ['pa-IN', 'ਆਮ']
   ] as const)('offers and immediately switches to %s', (language, heading) => {
     render(<LanguageProvider initialPreference="en-US"><OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} /></LanguageProvider>);
     const select = screen.getByRole('combobox', { name: 'Display language' });
-    expect(select.querySelectorAll('option')).toHaveLength(10);
-    fireEvent.change(select, { target: { value: language } });
+    // The system option plus every supported display language.
+    fireEvent.focus(select);
+    const options = screen.getAllByRole('option').filter(option => option.hasAttribute('data-value'));
+    expect(options).toHaveLength(appLanguageOptions.length + 1);
+    fireEvent.click(options.find(option => option.dataset.value === language)!);
     expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument();
-    expect(select).toHaveValue(language);
+    expect(select).toHaveAttribute('data-value', language);
     expect(window.localStorage.getItem(languagePreferenceStorageKey)).toBe(language);
     expect(document.documentElement.lang).toBe(language);
     window.localStorage.removeItem(languagePreferenceStorageKey);
@@ -269,7 +314,7 @@ describe('OpenCreatorSettingsView', () => {
     const permission = screen.getByRole('combobox', { name: '默认权限' });
     expect(permission).toHaveValue('workspace-write');
 
-    fireEvent.change(permission, { target: { value: 'danger-full-access' } });
+    changeControl(permission, { target: { value: 'danger-full-access' } });
     await user.click(await screen.findByRole('button', { name: '开启' }));
 
     await waitFor(() => {
@@ -292,10 +337,10 @@ describe('OpenCreatorSettingsView', () => {
     );
 
     const permission = screen.getByRole('combobox', { name: '默认权限' });
-    expect(within(permission).getAllByRole('option').map(option => option.textContent))
+    expect(within(selectListbox(permission)).getAllByRole('option').map(option => option.textContent))
       .toEqual(['跟随项目设置', '请求批准', '完全访问权限']);
 
-    fireEvent.change(permission, { target: { value: 'danger-full-access' } });
+    changeControl(permission, { target: { value: 'danger-full-access' } });
     await user.click(await screen.findByRole('button', { name: '取消' }));
 
     expect(onDefaultPermissionChange).not.toHaveBeenCalled();
@@ -326,7 +371,7 @@ describe('OpenCreatorSettingsView', () => {
     expect(onColorModeChange).toHaveBeenCalledWith('light');
   });
 
-  it('renders seven accent color swatches and notifies when the selection changes', () => {
+  it('renders the OpenCreator yellow swatch first and notifies when the selection changes', () => {
     const onAccentColorChange = vi.fn();
     render(
       <OpenCreatorSettingsView
@@ -338,8 +383,11 @@ describe('OpenCreatorSettingsView', () => {
     );
 
     const accentControl = screen.getByRole('radiogroup', { name: '重点色' });
-    expect(within(accentControl).getAllByRole('radio')).toHaveLength(7);
-    expect(within(accentControl).getByRole('radio', { name: '默认灰' }))
+    const swatches = within(accentControl).getAllByRole('radio');
+    expect(swatches).toHaveLength(8);
+    expect(swatches[0]).toHaveAccessibleName('OpenCreator');
+    expect(swatches[0]).toHaveStyle({ '--settings-accent-swatch': '#f4d914' });
+    expect(within(accentControl).getByRole('radio', { name: '中性灰' }))
       .toHaveAttribute('aria-checked', 'true');
     const customAccent = within(accentControl).getByRole('radio', { name: '自定义' });
     expect(customAccent).toHaveTextContent('自定义');
@@ -353,6 +401,13 @@ describe('OpenCreatorSettingsView', () => {
 
     fireEvent.click(within(accentControl).getByRole('radio', { name: '橙色' }));
     expect(onAccentColorChange).toHaveBeenCalledWith('orange');
+  });
+
+  it('selects the OpenCreator accent when no preference is supplied', () => {
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />);
+
+    const accentControl = screen.getByRole('radiogroup', { name: '重点色' });
+    expect(within(accentControl).getAllByRole('radio')[0]).toHaveAttribute('aria-checked', 'true');
   });
 
   it('validates and applies a custom accent color without blocking draft input', () => {
@@ -398,7 +453,7 @@ describe('OpenCreatorSettingsView', () => {
 
     const behavior = screen.getByRole('combobox', { name: '关闭窗口时' });
     expect(behavior).toHaveValue('hide');
-    fireEvent.change(behavior, { target: { value: 'quit' } });
+    changeControl(behavior, { target: { value: 'quit' } });
     expect(onDesktopCloseBehaviorChange).toHaveBeenCalledWith('quit');
   });
 
@@ -479,7 +534,7 @@ describe('OpenCreatorSettingsView', () => {
     expect(screen.queryByRole('button', { name: 'Select 完成产物位置' })).not.toBeInTheDocument();
   });
 
-  it('shows the anonymous telemetry scope and allows Desktop users to disable it', () => {
+  it('shows the telemetry scope and allows Desktop users to disable it', () => {
     const onDesktopTelemetryEnabledChange = vi.fn();
     render(
       <OpenCreatorSettingsView
@@ -491,11 +546,11 @@ describe('OpenCreatorSettingsView', () => {
       />
     );
 
-    const telemetry = screen.getByRole('switch', { name: /发送匿名使用数据/ });
+    const telemetry = screen.getByRole('switch', { name: /发送数据帮助我们改进/ });
     expect(telemetry).toBeChecked();
     fireEvent.click(telemetry);
     expect(onDesktopTelemetryEnabledChange).toHaveBeenCalledWith(false);
-    expect(screen.getByText(/不包含项目、文件或对话内容/)).toBeInTheDocument();
+    expect(screen.getByText(/发送基本使用情况、错误信息及账号 ID/)).toBeInTheDocument();
   });
 
   it('does not show Codex CLI version on the initial general tab', () => {

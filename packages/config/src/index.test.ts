@@ -6,6 +6,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { openCreatorLanguages } from '@opencreator/protocol';
 import {
   readOpenCreatorConfig,
   resolveDesktopConfig,
@@ -26,7 +27,7 @@ afterEach(() => {
 });
 
 describe('OpenCreator config', () => {
-  it.each(['ja-JP', 'ko-KR', 'es-ES', 'fr-FR', 'de-DE', 'pt-BR'] as const)('preserves %s across config writes and reads', language => {
+  it.each(openCreatorLanguages)('preserves %s across config writes and reads', language => {
     const root = mkdtempSync(join(tmpdir(), 'opencreator-config-'));
     tempDirs.push(root);
     const path = join(root, 'config.toml');
@@ -70,12 +71,21 @@ describe('OpenCreator config', () => {
     tempDirs.push(root);
     const path = join(root, 'config.toml');
 
-    expect(resolveUiSettings(readOpenCreatorConfig(path)).accentColor).toBe('red');
+    expect(resolveUiSettings(readOpenCreatorConfig(path))).toMatchObject({ accentColor: 'brand', language: 'en-US' });
 
     updateOpenCreatorUiSettings(path, { colorMode: 'light', language: 'sv-SE' });
 
     expect(resolveUiSettings(readOpenCreatorConfig(path)).colorMode).toBe('light');
     expect(resolveUiSettings(readOpenCreatorConfig(path)).language).toBe('sv-SE');
+  });
+
+  it('preserves an explicitly selected red accent after the default changes', () => {
+    const root = mkdtempSync(join(tmpdir(), 'opencreator-config-'));
+    tempDirs.push(root);
+    const path = join(root, 'config.toml');
+
+    updateOpenCreatorUiSettings(path, { accentColor: 'red' });
+    expect(resolveUiSettings(readOpenCreatorConfig(path)).accentColor).toBe('red');
   });
 
   it('persists anonymous telemetry preferences and the install identifier', () => {

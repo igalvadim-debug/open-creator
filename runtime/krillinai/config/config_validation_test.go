@@ -22,6 +22,22 @@ func TestBaseConfigDoesNotRequireTranscriptionCredentials(t *testing.T) {
 	}
 }
 
+func TestProxyForBaseURLBypassesLoopback(t *testing.T) {
+	proxy := "http://127.0.0.1:7897"
+	for _, baseURL := range []string{
+		"http://127.0.0.1:19861/v1",
+		"http://localhost:19861/v1",
+		"http://[::1]:19861/v1",
+	} {
+		if got := ProxyForBaseURL(baseURL, proxy); got != "" {
+			t.Errorf("ProxyForBaseURL(%q) = %q, want direct connection", baseURL, got)
+		}
+	}
+	if got := ProxyForBaseURL("https://api.example.com/v1", proxy); got != proxy {
+		t.Errorf("ProxyForBaseURL(remote) = %q, want %q", got, proxy)
+	}
+}
+
 func TestValidateTranscriptionConfigAcceptsTinyWhisperCpp(t *testing.T) {
 	previous := Conf
 	t.Cleanup(func() { Conf = previous })
