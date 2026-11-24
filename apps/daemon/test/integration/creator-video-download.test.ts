@@ -1,11 +1,15 @@
-import type { CreatorExecutor } from '../../src/creator/executor.js';
-import type { CreatorJson } from '@opencreator/protocol';
+import { CreatorExecutorError, type CreatorExecutor } from '../../src/creator/executor.js';
+import type { CreatorJson, CreatorStageRun } from '@opencreator/protocol';
 import type { FastifyInstance } from 'fastify';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../../src/api/server.js';
+import { spawnCreatorProcess } from '../../src/creator/process-tree.js';
+import { creatorStageEventId } from '../../src/creator/events.js';
+import { createGatewayConfigStore } from '../../src/gateway/config-store.js';
 
 let server: FastifyInstance | undefined;
 let tempDir = '';
@@ -18,6 +22,204 @@ afterEach(async () => {
 });
 
 describe('creator video download', () => {
+  it('persists a rejected translation start without running it, and still accepts local download tasks when official services are blocked', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'creator-download-blocked-gateway-'));
+    const gateway = createServer((_request, response) => {
+      response.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { code: 'gateway_unavailable' } }));
+    });
+    await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = gateway.address();
+      if (address === null || typeof address === 'string') throw new Error('Missing fixture gateway address');
+      const origin = `http://127.0.0.1:${address.port}`;
+      await createGatewayConfigStore(tempDir).writeCredentials({
+        schemaVersion: 1, account: { id: 'test', email: 'fixture@example.test', verified: true },
+        accessToken: 'fixture-access', refreshToken: 'fixture-refresh', expiresIn: 900,
+        accessExpiresAt: new Date(Date.now() + 900_000).toISOString(), modelKey: 'fixture-key',
+        keyVersion: '1', bindingVersion: 'test:1', baseUrl: `${origin}/v1`,
+        models: [{ id: 'fixture-model', modality: 'text', capabilities: ['responses'] }], defaults: { text: 'fixture-model' }
+      });
+      server = await buildServer({ token: 'secret', appHome: tempDir, dataDir: tempDir, codexHome: join(tempDir, 'codex'),
+        gatewayOrigin: origin, creatorExecutors: [{ id: 'download', async run() {
+          throw new CreatorExecutorError('network_unavailable', 'Fixture video platform unreachable', {}, {
+            kind: 'connection-refused', provider: 'yt-dlp'
+          });
+        } }] });
+      await server.listen({ host: '127.0.0.1', port: 0 });
+      await expect.poll(async () => (await request('GET', '/gateway/account')).json()).toMatchObject({
+        source: 'gateway', authState: 'signed_in', activationState: 'blocked'
+      });
+      const input = { projectId: 'project_download', state: { sourceUrl: 'https://www.youtube.com/watch?v=download-demo' } };
+      const translation = await request('POST', '/creator/jobs', { ...input, templateId: 'video-translation' });
+      expect(translation.statusCode).toBe(201);
+      const translationJob = translation.json().job;
+      const translationPath = `/creator/jobs/${translationJob.id}`;
+      const start = await request('POST', `${translationPath}/actions`, {
+        action: 'run-stage', expectedRevision: translationJob.revision, input: { stageId: 'subtitle', workflow: true }
+      });
+      expect(start.statusCode).toBe(503);
+      expect(start.json()).toMatchObject({ error: { code: 'GATEWAY_SERVICES_NOT_READY', issue: {
+        source: 'preflight', stageId: 'subtitle', scope: { kind: 'creator-job', jobId: translationJob.id }
+      } } });
+      expect((await request('GET', translationPath)).json().job).toMatchObject({
+        status: 'draft', stages: [], providerRequests: [], issues: [expect.objectContaining({
+          code: 'GATEWAY_SERVICES_NOT_READY', id: start.json().error.issue.id
+        })]
+      });
+      await expect.poll(async () => (await request('GET', '/telemetry/task-events')).json().events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ task_id: translationJob.id, event_type: 'task_started' }),
+        expect.objectContaining({ task_id: translationJob.id, event_type: 'preflight_rejected', stage_id: 'subtitle',
+          outcome: 'needs_input', code: 'GATEWAY_SERVICES_NOT_READY', failure: { diagnostic: expect.objectContaining({
+            steps: [expect.objectContaining({ code: 'gateway_unavailable', result: 'failed' })]
+          }) } })
+      ]));
+      const created = await request('POST', '/creator/jobs', { ...input, templateId: 'video-download' });
+      expect(created.statusCode).toBe(201);
+      const { job } = created.json();
+      const jobPath = `/creator/jobs/${job.id}`;
+      expect((await request('GET', `${jobPath}/preflight?stageId=probe`)).json()).toMatchObject({ canStart: true });
+      expect((await request('GET', '/telemetry/task-events')).json().events).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ task_id: job.id })
+      ]));
+      const preflight = await request('GET', `${jobPath}/preflight?stageId=download&launch=1`);
+      expect(preflight.json()).toMatchObject({ canStart: false, blocked: expect.arrayContaining([expect.objectContaining({ id: 'input-artifact:download_probe' })]) });
+      await expect.poll(async () => (await request('GET', '/telemetry/task-events')).json().events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ task_id: job.id, feature: 'video-download', event_type: 'task_started' }),
+        expect.objectContaining({ task_id: job.id, event_type: 'preflight_rejected', stage_id: 'download', execution_mode: 'local',
+          failure: { diagnostic: expect.objectContaining({ steps: [expect.objectContaining({ code: 'input-artifact:download_probe' })] }) } })
+      ]));
+      expect((await request('POST', `${jobPath}/actions`, {
+        action: 'run-stage', expectedRevision: job.revision, input: { stageId: 'probe' }
+      })).statusCode).toBe(200);
+      await expect.poll(async () => (await request('GET', jobPath)).json().job).toMatchObject({
+        status: 'failed',
+        stages: [{ stageId: 'probe', status: 'failed', errorCode: 'network_unavailable', errorMessage: 'Fixture video platform unreachable' }],
+        issues: [expect.objectContaining({ code: 'network_unavailable', fallbackMessage: 'Fixture video platform unreachable',
+          publicFacts: expect.objectContaining({ kind: 'connection-refused', provider: 'yt-dlp',
+            upstreamMessage: 'Fixture video platform unreachable' }) })]
+      });
+      await expect.poll(async () => (await request('GET', '/telemetry/task-events')).json().events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ task_id: job.id, feature: 'video-download', event_type: 'stage_started', stage_id: 'probe' }),
+        expect.objectContaining({ task_id: job.id, event_type: 'stage_finished', stage_id: 'probe', execution_mode: 'local', outcome: 'failed', code: 'network_unavailable' }),
+        expect.objectContaining({ task_id: job.id, event_type: 'task_state', outcome: 'failed' })
+      ]));
+    } finally {
+      await server?.close();
+      server = undefined;
+      gateway.closeAllConnections();
+      await new Promise<void>(resolve => gateway.close(() => resolve()));
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('resumes the same live process and stage without preparation or another dispatch', async () => {
+    const fixture = await controlledDownloadFixture(true);
+    const first = await fixture.queue('video-1080-1');
+    await fixture.wait(first.id, 'running');
+    await expect.poll(fixture.ticks).toBeGreaterThan(2);
+    const pid = fixture.pids[0];
+    const eventIds: string[] = [];
+    for (let toggle = 0; toggle < 3; toggle++) {
+      const paused = await fixture.control(first.id, 'pause');
+      expect(paused.statusCode).toBe(200);
+      eventIds.push(creatorStageEventId(paused.json().stage));
+      expect(paused.json()).toMatchObject({ control: 'paused', stage: {
+        id: first.id, status: 'running', progress: { phase: 'downloading', percent: 42, downloadControl: 'paused', bytesPerSecond: null }
+      } });
+      await new Promise(resolve => setTimeout(resolve, 80));
+      const savedTicks = await fixture.ticks();
+      const savedChildTicks = await fixture.childTicks();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(await fixture.ticks()).toBe(savedTicks);
+      expect(await fixture.childTicks()).toBe(savedChildTicks);
+      const resumed = await fixture.control(first.id, 'resume');
+      expect(resumed.statusCode).toBe(200);
+      eventIds.push(creatorStageEventId(resumed.json().stage));
+      expect(resumed.json()).toMatchObject({ control: 'resumed', stage: {
+        id: first.id, attempt: 1, progress: { phase: 'downloading', percent: 42, downloadControl: null }
+      } });
+      await expect.poll(fixture.ticks).toBeGreaterThan(savedTicks);
+      await expect.poll(fixture.childTicks).toBeGreaterThan(savedChildTicks);
+      expect(fixture.pids).toEqual([pid]);
+    }
+    expect(fixture.attempts).toHaveLength(1);
+    expect(new Set(eventIds).size).toBe(eventIds.length);
+    await fixture.finish();
+    await fixture.wait(first.id, 'succeeded');
+    const job = (await request('GET', `/creator/jobs/${fixture.jobId}`)).json().job;
+    expect(job.stages.filter((stage: CreatorStageRun) => stage.stageId === 'download')).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === 'win32')('cancels a suspended download and closes the daemon without leaving suspended processes', async () => {
+    const fixture = await controlledDownloadFixture(true);
+    const first = await fixture.queue('video-1080-1');
+    await fixture.wait(first.id, 'running');
+    await expect.poll(fixture.ticks).toBeGreaterThan(0);
+    await fixture.control(first.id, 'pause');
+    expect((await fixture.control(first.id, 'cancel')).statusCode).toBe(202);
+    await fixture.wait(first.id, 'canceled');
+    expect(() => process.kill(fixture.pids[0]!, 0)).toThrow();
+    expect((await fixture.control(first.id, 'resume')).statusCode).toBe(409);
+
+    const second = await fixture.queue('video-720-2');
+    await fixture.wait(second.id, 'running');
+    await expect.poll(() => fixture.pids.length).toBe(2);
+    await fixture.control(second.id, 'pause');
+    await server!.close();
+    server = undefined;
+    expect(() => process.kill(fixture.pids[1]!, 0)).toThrow();
+  });
+
+  it('pauses individual downloads, preserves partial files across repeated resumes, and cancels only the selected queued item', async () => {
+    const fixture = await controlledDownloadFixture();
+    const first = await fixture.queue('video-1080-1');
+    await fixture.wait(first.id, 'running');
+    const sibling = await fixture.queue('video-720-2');
+    expect((await fixture.control(sibling.id, 'cancel')).statusCode).toBe(200);
+    await fixture.wait(sibling.id, 'canceled');
+    expect((await fixture.control(sibling.id, 'resume')).statusCode).toBe(409);
+    await fixture.wait(first.id, 'running');
+
+    expect((await fixture.control(first.id, 'pause')).statusCode).toBe(202);
+    const paused = await fixture.wait(first.id, 'interrupted');
+    expect(paused.progress).toMatchObject({ percent: 42, downloadControl: 'paused' });
+    const resumedResponse = await fixture.control(first.id, 'resume');
+    expect(resumedResponse.statusCode).toBe(202);
+    const resumed = resumedResponse.json().stage;
+    await fixture.wait(resumed.id, 'running');
+    expect((await fixture.control(first.id, 'resume')).json().stage.id).toBe(resumed.id);
+    expect((await fixture.control(first.id, 'cancel')).statusCode).toBe(409);
+    expect((await fixture.control(resumed.id, 'pause')).statusCode).toBe(202);
+    await fixture.wait(resumed.id, 'interrupted');
+    await fixture.finish();
+    const finalResponse = await fixture.control(resumed.id, 'resume');
+    expect(finalResponse.statusCode).toBe(202);
+    await fixture.wait(finalResponse.json().stage.id, 'succeeded');
+    expect(fixture.attempts).toHaveLength(3);
+    expect(fixture.attempts.map(attempt => attempt.workdir)).toEqual(Array(3).fill(fixture.attempts[0]!.workdir));
+    expect(fixture.attempts.map(attempt => attempt.partial)).toEqual([null, 'downloaded-first-part', 'downloaded-first-part']);
+    expect((await fixture.control(sibling.id, 'pause')).statusCode).toBe(409);
+  });
+
+  it('reuses partial downloads when continuing after Agent termination and rejects resume after explicit cancellation', async () => {
+    const fixture = await controlledDownloadFixture();
+    const first = await fixture.queue('video-1080-1');
+    await fixture.wait(first.id, 'running');
+    expect((await request('POST', `/creator/jobs/${fixture.jobId}/cancel`)).statusCode).toBe(202);
+    await fixture.wait(first.id, 'canceled');
+    const resumed = await request('POST', `/creator/jobs/${fixture.jobId}/resume`);
+    expect(resumed.statusCode).toBe(202);
+    const stage = resumed.json().stage;
+    await fixture.wait(stage.id, 'running');
+    expect(fixture.attempts[1]).toMatchObject({ workdir: fixture.attempts[0]!.workdir, partial: 'downloaded-first-part' });
+    await fixture.control(stage.id, 'pause');
+    await fixture.wait(stage.id, 'interrupted');
+    expect((await fixture.control(stage.id, 'cancel')).statusCode).toBe(200);
+    expect((await fixture.control(stage.id, 'resume')).statusCode).toBe(409);
+    expect((await request('POST', `/creator/jobs/${fixture.jobId}/resume`)).statusCode).toBe(409);
+    const other = (await request('POST', '/creator/jobs', { projectId: 'project_download', templateId: 'video-download' })).json().job;
+    expect((await request('POST', `/creator/jobs/${other.id}/downloads/${stage.id}/resume`)).statusCode).toBe(404);
+  });
+
   it('queues a probed subtitle option and serves its SRT artifact', async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'creator-subtitle-download-api-'));
     server = await buildServer({ token: 'secret', dataDir: tempDir, codexHome: join(tempDir, 'codex-home'), creatorExecutors: [fakeDownloadExecutor(true)] });
@@ -64,6 +266,17 @@ describe('creator video download', () => {
     });
     const initial = created.json().job;
     expect(initial.templateVersion).toBe(2);
+    const preflightPath = `/creator/jobs/${initial.id}/preflight?stageId=download`;
+    expect((await request('GET', preflightPath)).json()).toMatchObject({ canStart: false });
+    expect((await request('GET', '/telemetry/task-events')).json().events).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ task_id: initial.id })
+    ]));
+    expect((await request('GET', `${preflightPath}&launch=1`)).json()).toMatchObject({ canStart: false });
+    await expect.poll(async () => (await request('GET', '/telemetry/task-events')).json().events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ task_id: initial.id, feature: 'video-download', event_type: 'task_started' }),
+      expect.objectContaining({ task_id: initial.id, event_type: 'preflight_rejected', stage_id: 'download', execution_mode: 'local',
+        failure: { diagnostic: expect.objectContaining({ steps: [expect.objectContaining({ code: 'input-artifact:download_probe' })] }) } })
+    ]));
     const configured = await request(
       'POST',
       `/creator/jobs/${initial.id}/actions`,
@@ -183,6 +396,93 @@ describe('creator video download', () => {
     });
   });
 });
+
+async function controlledDownloadFixture(liveProcess = false) {
+  tempDir = await mkdtemp(join(tmpdir(), 'creator-download-controls-'));
+  let complete = false;
+  const attempts: Array<{ workdir: string; partial: string | null }> = [];
+  const pids: number[] = [];
+  const base = fakeDownloadExecutor();
+  const executor: CreatorExecutor = {
+    id: 'download',
+    supportsProcessPause: liveProcess,
+    async run(stage) {
+      if (stage.stageRun.stageId === 'probe') {
+        const result = await base.run(stage);
+        const output = result.outputs[0]!;
+        output.metadata!.options = [...output.metadata!.options as CreatorJson[], {
+          id: 'video-720-2', mediaType: 'video', container: 'mp4', height: 720, videoFormatId: '22'
+        }];
+        await writeFile(output.path!, JSON.stringify(output.metadata));
+        return result;
+      }
+      const path = join(stage.workdir, 'source.mp4.part');
+      const partial = await readFile(path, 'utf8').catch(() => null);
+      attempts.push({ workdir: stage.workdir, partial });
+      if (partial === null) await writeFile(path, 'downloaded-first-part');
+      stage.reportProgress({ phase: 'downloading', percent: 42, bytesPerSecond: 4096 });
+      if (liveProcess) await new Promise<void>((resolve, reject) => {
+        const child = spawnCreatorProcess(process.execPath, ['-e', `
+          const fs = require('node:fs');
+          const { spawn } = require('node:child_process');
+          const child = spawn(process.execPath, ['-e', \`
+            const fs = require('node:fs');
+            let ticks = 0;
+            setInterval(() => fs.writeFileSync('child-ticks', String(++ticks)), 20);
+          \`], { stdio: 'ignore' });
+          fs.writeFileSync('child.pid', String(child.pid));
+          let ticks = 0;
+          setInterval(() => {
+            fs.writeFileSync('ticks', String(++ticks));
+            if (fs.existsSync('finish')) { child.kill(); process.exit(0); }
+          }, 20);
+        `], { cwd: stage.workdir, stdio: 'ignore' }, stage.signal, stage.processControl);
+        pids.push(child.pid!);
+        child.once('error', reject);
+        child.once('close', code => code === 0 ? resolve() : reject(new Error('Download stopped')));
+      });
+      else if (!complete) await new Promise<void>((_resolve, reject) => {
+        const abort = () => reject(new Error('Download stopped'));
+        if (stage.signal.aborted) abort();
+        else stage.signal.addEventListener('abort', abort, { once: true });
+      });
+      return base.run(stage);
+    }
+  };
+  server = await buildServer({ token: 'secret', dataDir: tempDir, codexHome: join(tempDir, 'codex-home'), creatorExecutors: [executor] });
+  const job = (await request('POST', '/creator/jobs', { projectId: 'project_download', templateId: 'video-download',
+    state: { sourceUrl: 'https://www.youtube.com/watch?v=download-demo' } })).json().job;
+  await request('POST', `/creator/jobs/${job.id}/actions`, { action: 'run-stage', expectedRevision: job.revision, input: { stageId: 'probe' } });
+  await waitForStage(job.id, 'probe');
+  return {
+    jobId: job.id as string,
+    attempts,
+    pids,
+    ticks: async () => Number(await readFile(join(attempts.at(-1)!.workdir, 'ticks'), 'utf8').catch(() => '0')),
+    childTicks: async () => Number(await readFile(join(attempts.at(-1)!.workdir, 'child-ticks'), 'utf8').catch(() => '0')),
+    async finish() {
+      complete = true;
+      if (liveProcess) await writeFile(join(attempts.at(-1)!.workdir, 'finish'), 'finish');
+    },
+    control: (stageId: string, action: 'pause' | 'resume' | 'cancel') => request('POST', `/creator/jobs/${job.id}/downloads/${stageId}/${action}`),
+    async queue(optionId: string): Promise<CreatorStageRun> {
+      const current = (await request('GET', `/creator/jobs/${job.id}`)).json().job;
+      const response = await request('POST', `/creator/jobs/${job.id}/actions`, { action: 'run-stage', expectedRevision: current.revision,
+        input: { stageId: 'download', optionId, mediaType: 'video' } });
+      expect(response.statusCode).toBe(200);
+      return response.json().job.stages.at(-1);
+    },
+    async wait(stageId: string, status: string): Promise<CreatorStageRun> {
+      let found: CreatorStageRun | undefined;
+      await expect.poll(async () => {
+        const current = (await request('GET', `/creator/jobs/${job.id}`)).json().job;
+        found = current.stages.find((stage: CreatorStageRun) => stage.id === stageId);
+        return found?.status === 'running' && found.progress.percent !== 42 ? 'starting' : found?.status;
+      }, { timeout: 5000, interval: 10 }).toBe(status);
+      return found!;
+    }
+  };
+}
 
 function fakeDownloadExecutor(subtitles = false): CreatorExecutor {
   return {

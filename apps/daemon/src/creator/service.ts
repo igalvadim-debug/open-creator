@@ -26,6 +26,8 @@ import {
 import type { CreatorTemplateRegistry } from './templates/types.js';
 import { videoTranslationArtifactRefsPatch } from './templates/video-translation-results.js';
 import { formatSrtTimestamp, parseSrt } from './validators/srt.js';
+import { normalizeSubtitleRenderCues } from '@opencreator/protocol';
+import { detectSubtitleLanguage } from './subtitle-language.js';
 import {
   createBlankCreationFingerprint,
   createPresetCreationFingerprint
@@ -34,6 +36,7 @@ import { getCreatorPresetModuleDefinition } from './presets/module-schemas.js';
 import { mergeCreatorPresetState } from './presets/requirements.js';
 import type { CreatorPresetRegistry } from './presets/types.js';
 import type { CreatorServicesConfigStore } from '../creator-services/config-store.js';
+import type { CreatorTelemetrySink } from '../telemetry/creator.js';
 
 export type CreatorService = ReturnType<typeof createCreatorService>;
 
@@ -55,6 +58,7 @@ export function createCreatorService(input: {
   jobsRoot?: string;
   presets?: CreatorPresetRegistry;
   creatorServicesConfig?: Pick<CreatorServicesConfigStore, 'read'>;
+  telemetry?: CreatorTelemetrySink;
 }) {
   const { repository, templates } = input;
   const providerRequestLedger = input.providerRequestLedger
@@ -314,11 +318,12 @@ export function createCreatorService(input: {
           && artifact.status === 'completed'
           && artifact.metadata.sha256 === input.sha256
         ));
-        if (duplicate !== undefined) {
+        if (duplicate !== undefined && current.state.sourceType === 'file'
+          && current.state.sourceArtifactId === duplicate.id) {
           return { job: current, artifact: duplicate, deduplicated: true };
         }
 
-        const artifact = repository.insertArtifact({
+        const artifact = duplicate ?? repository.insertArtifact({
           jobId,
           kind: 'source_video',
           status: 'completed',
@@ -362,7 +367,7 @@ export function createCreatorService(input: {
           revision,
           actor: 'user',
           action: 'register-source-video',
-          summary: 'Uploaded local video',
+          summary: duplicate === undefined ? 'Uploaded local video' : 'Selected local video',
           details: {
             objectId: input.fileName,
             affectedArtifactIds: [artifact.id]
@@ -371,7 +376,7 @@ export function createCreatorService(input: {
         return {
           job: repository.getJob(jobId)!,
           artifact,
-          deduplicated: false
+          deduplicated: duplicate !== undefined
         };
       });
     },
@@ -835,6 +840,13 @@ export function createCreatorService(input: {
           throw new CreatorServiceError('creator_action_not_allowed', 'Creator action is not allowed');
         }
         const parsedInput = action.inputSchema.parse(request.input) as Record<string, CreatorJson>;
+        if (current.templateId === 'video-translation'
+          && (request.action === 'run-stage' || request.action === 'retry-stage')
+          && parsedInput.stageId === 'subtitle'
+          && typeof current.state.importedSourceSubtitleId === 'string'
+          && current.state.sourceLanguage === 'auto') {
+          throw new CreatorServiceError('creator_action_invalid', 'Select the source subtitle language before translating');
+        }
         const actor = request.actor ?? 'user';
         const newRevision = current.revision + 1;
         let nextState = { ...current.state };
@@ -893,10 +905,11 @@ export function createCreatorService(input: {
           }
           const fileName = basename(readString(parsedInput.fileName, 'fileName').replaceAll('\\', '/'));
           const encoded = readString(parsedInput.contentBase64, 'contentBase64');
-          const language = readString(parsedInput.language, 'language');
+          const requestedLanguage = readString(parsedInput.language, 'language');
           const kind = parsedInput.kind;
-          if (!/\.srt$/i.test(fileName) || !/^[a-zA-Z][a-zA-Z0-9_-]{0,34}$/.test(language)
+          if (!/\.srt$/i.test(fileName) || !/^[a-zA-Z][a-zA-Z0-9_-]{0,34}$/.test(requestedLanguage)
             || (kind !== 'source_subtitle' && kind !== 'target_subtitle')
+            || (requestedLanguage === 'auto' && kind !== 'source_subtitle')
             || encoded.length > 700_000) {
             throw new CreatorServiceError('creator_action_invalid', 'Import requires an SRT file (maximum 512 KiB), subtitle type and language');
           }
@@ -912,6 +925,9 @@ export function createCreatorService(input: {
           } catch (error) {
             throw new CreatorServiceError('creator_action_invalid', `Invalid UTF-8 SRT: ${error instanceof Error ? error.message : String(error)}`);
           }
+          const language = requestedLanguage === 'auto'
+            ? detectSubtitleLanguage(cues) ?? 'auto'
+            : requestedLanguage;
           const resultVersion = nextCreatorResultVersion(current);
           const directory = join(input.jobsRoot, current.id, 'subtitles');
           mkdirSync(directory, { recursive: true });
@@ -935,7 +951,9 @@ export function createCreatorService(input: {
           }
           const artifact = repository.insertArtifact({
             jobId, kind, status: 'completed', path, sourceArtifactIds: [],
-            metadata: { fileName, source: 'local-upload', language, cueCount: cues.length, size: bytes.length, resultVersion,
+            metadata: { fileName, source: 'local-upload', language,
+              languageDetection: requestedLanguage !== 'auto' ? 'manual' : language === 'auto' ? 'uncertain' : 'detected',
+              cueCount: cues.length, size: bytes.length, resultVersion,
               cues: cues.map(cue => ({ id: cue.index, start: formatSrtTimestamp(cue.startMs), end: formatSrtTimestamp(cue.endMs), text: cue.text })) }
           });
           const artifactRefsPatch = Object.fromEntries([...downstreamKinds].map(value => [value, [] as string[]]));
@@ -964,7 +982,8 @@ export function createCreatorService(input: {
           const source = current.artifacts.find(artifact => artifact.id === artifactId);
           if (
             source === undefined
-            || (source.kind !== 'target_subtitle' && source.kind !== 'vertical_subtitle')
+            || (source.kind !== 'target_subtitle' && source.kind !== 'vertical_subtitle'
+              && !(current.templateId === 'transcription' && source.kind === 'source_subtitle'))
             || source.path === null
           ) {
             throw new CreatorServiceError(
@@ -1025,6 +1044,18 @@ export function createCreatorService(input: {
             resultVersion,
             cues
           );
+          let renderCues = cues;
+          if (source.kind === 'vertical_subtitle' && !Array.isArray(source.metadata.renderCues)) {
+            const target = artifactFromSnapshot(current.artifacts, baseSnapshot?.artifactRefs.target_subtitle, 'target_subtitle');
+            const values = target?.metadata.cues;
+            const targetCues = Array.isArray(values) ? values.flatMap(value => value && typeof value === 'object' && !Array.isArray(value)
+              && typeof value.start === 'string' && typeof value.end === 'string' && typeof value.text === 'string'
+              ? [{ start: value.start, end: value.end, text: value.text }] : []) : [];
+            const snapshot = source.metadata.settingsSnapshot;
+            renderCues = normalizeSubtitleRenderCues({ cues, targetCues, legacyMixed: true,
+              targetPosition: snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) && snapshot.subtitlePosition === 'bottom' ? 'bottom' : 'top' })
+              .map((cue, index) => ({ id: index + 1, start: formatSrtTimestamp(cue.startMs), end: formatSrtTimestamp(cue.endMs), text: cue.text, sourceText: cue.sourceText }));
+          }
           const nextSubtitle = repository.insertArtifact({
             jobId,
             kind: source.kind,
@@ -1035,6 +1066,7 @@ export function createCreatorService(input: {
               ...source.metadata,
               fileName: basename(nextSubtitlePath),
               cues: subtitleMetadataCues(cues),
+              renderCues: renderCues as unknown as CreatorJson,
               editedFromArtifactId: source.id,
               resultVersion
             }
@@ -1097,9 +1129,9 @@ export function createCreatorService(input: {
           }
           nextState = {
             ...nextState,
-            ...(source.kind === 'target_subtitle'
-              ? { subtitleArtifactId: nextSubtitle.id }
-              : { verticalSubtitleArtifactId: nextSubtitle.id }),
+            ...(source.kind === 'vertical_subtitle'
+              ? { verticalSubtitleArtifactId: nextSubtitle.id }
+              : { subtitleArtifactId: nextSubtitle.id }),
             ...appendCreatorResultSnapshot({
               job: current,
               version: resultVersion,
@@ -1116,7 +1148,9 @@ export function createCreatorService(input: {
               action: request.action,
               description: source.kind === 'target_subtitle'
                 ? 'Saved horizontal subtitle changes'
-                : 'Saved vertical subtitle changes',
+                : source.kind === 'source_subtitle'
+                  ? 'Saved source subtitle changes'
+                  : 'Saved vertical subtitle changes',
               state: nextState
             })
           };
@@ -1157,9 +1191,18 @@ export function createCreatorService(input: {
           if (stage.resultVersionPolicy === 'attach' && parsedInput.inputResultVersion === undefined) {
             throw new CreatorServiceError('creator_action_input_invalid', 'A result version is required to prepare preview media');
           }
-          if ((stage.resultVersionPolicy === 'attach' || stage.id === 'preview-source-video'
-            || current.stages.some(run => run.stageId === 'preview-source-video' && (run.status === 'queued' || run.status === 'running')))
-            && current.stages.some(run => run.status === 'queued' || run.status === 'running')) {
+          const activeRuns = current.stages.filter(run => run.status === 'queued' || run.status === 'running');
+          const backgroundSource = current.templateId === 'video-translation' && stage.id === 'preview-source-video'
+            && parsedInput.backgroundSourceDownload === true && actor === 'system';
+          if (parsedInput.backgroundSourceDownload === true && !backgroundSource) {
+            throw new CreatorServiceError('creator_action_input_invalid', 'Only the translation workflow can start a background source download');
+          }
+          if (backgroundSource && activeRuns.some(run => run.stageId !== 'subtitle')) {
+            throw new CreatorServiceError('creator_stage_already_running', 'A source download is already running');
+          }
+          if (!backgroundSource && (stage.resultVersionPolicy === 'attach' || stage.id === 'preview-source-video'
+            || activeRuns.some(run => run.stageId === 'preview-source-video'))
+            && activeRuns.some(run => !(stage.id === 'subtitle' && run.progress.backgroundSourceDownload === true))) {
             throw new CreatorServiceError('creator_stage_already_running', 'Wait for the current stage to finish before preparing preview media');
           }
           nextState = { ...nextState, currentStage: stageId };
@@ -1213,6 +1256,10 @@ export function createCreatorService(input: {
                 errorCode: 'creator_provider_scope_canceled',
                 errorMessage: 'Provider request scope was canceled by the user'
               });
+              const canceled = repository.getStageRun(stage.id);
+              if (canceled !== undefined) {
+                input.telemetry?.stageFinished(current, canceled, template.id, 'canceled');
+              }
             }
           } else if (decision === 'query') {
             nextStatus = ledger.status === 'failed' ? 'failed' : 'needs_input';
@@ -1334,6 +1381,7 @@ function writeActivity(input: {
 }
 
 const creatorUiOnlyStateFields = new Set([
+  '__creatorUserEdited',
   'currentStep',
   'furthestStep',
   'workspacePhase',
@@ -1447,23 +1495,34 @@ function writeEditedSubtitleFile(
   cues: EditableSubtitleCue[]
 ): string {
   const extension = extname(sourcePath) || '.srt';
-  const stem = basename(sourcePath, extname(sourcePath));
+  const stem = basename(sourcePath, extname(sourcePath))
+    .replace(/(?:\.opencreator-(?:source|horizontal|vertical|bilingual)-v\d+(?:-edit\d+)?)+$/, '');
   const label = kind === 'target_subtitle'
     ? 'horizontal'
     : kind === 'vertical_subtitle'
       ? 'vertical'
-      : 'bilingual';
-  const outputPath = join(
-    dirname(sourcePath),
-    `${stem}.opencreator-${label}-v${resultVersion}${extension}`
-  );
+      : kind === 'source_subtitle'
+        ? 'source'
+        : 'bilingual';
   const content = cues.map((cue, index) => [
     String(index + 1),
     `${cue.start} --> ${cue.end}`,
     cue.text
   ].join('\n')).join('\n\n');
-  writeFileSync(outputPath, `${content}\n`, { encoding: 'utf8', mode: 0o600 });
-  return outputPath;
+  // Repeated saves within one result version must keep earlier artifact files intact.
+  for (let edit = 1; ; edit += 1) {
+    const editSuffix = edit === 1 ? '' : `-edit${edit}`;
+    const outputPath = join(
+      dirname(sourcePath),
+      `${stem}.opencreator-${label}-v${resultVersion}${editSuffix}${extension}`
+    );
+    try {
+      writeFileSync(outputPath, `${content}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      return outputPath;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+  }
 }
 
 function validSrtTimestamp(value: string): boolean {

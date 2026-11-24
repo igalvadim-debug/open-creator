@@ -1,4 +1,9 @@
-import { createDefaultCreatorServicesConfig } from '@opencreator/protocol';
+import {
+  createDefaultCreatorServicesConfig,
+  defaultVolcengineTtsCluster,
+  defaultVolcengineTtsVoiceId,
+  gatewayPublicModelId
+} from '@opencreator/protocol';
 import { parse } from '@iarna/toml';
 import {
   chmodSync,
@@ -21,6 +26,8 @@ import {
   runKrillinCli
 } from '../../src/creator/krillin/cli-runner.js';
 import { KrillinCliError } from '../../src/creator/krillin/cli-runner.js';
+import { failureDiagnosticFromError } from '../../src/telemetry/diagnostic.js';
+import { createGatewayCreatorSource } from '../../src/gateway/creator-service-source.js';
 import type { KrillinRuntimeManifest } from '../../src/creator/krillin/manifest.js';
 
 let tempDir = '';
@@ -31,6 +38,129 @@ afterEach(() => {
 });
 
 describe('KrillinAI CLI runner', () => {
+  it.skipIf(process.platform === 'win32')('preserves only valid failed transcription positions from a CLI response', async () => {
+    tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'creator-krillin-transcription-')));
+    const resourceRoot = join(tempDir, 'runtime');
+    const jobsRoot = join(tempDir, 'jobs');
+    const dependencyRoot = join(tempDir, 'dependencies');
+    const workdir = join(jobsRoot, 'job', 'subtitle');
+    const cli = join(resourceRoot, 'bin', 'krillinai-cli');
+    mkdirSync(dirname(cli), { recursive: true });
+    mkdirSync(workdir, { recursive: true });
+    const manifest: KrillinRuntimeManifest = { version: 1, platform: process.platform, arch: process.arch,
+      resources: [{ path: 'bin/krillinai-cli', sha256: 'a'.repeat(64), kind: 'executable' }] };
+    const stage = {
+      stageRun: { id: 'subtitle', stageId: 'subtitle', progress: {} },
+      job: { id: 'job', templateId: 'video-translation', templateVersion: 2, state: {} },
+      workdir, signal: new AbortController().signal, reportProgress() {}
+    } as unknown as CreatorExecutorInput;
+    for (const [transcription, expected] of [
+      [{ segment_number: 2, attempt_number: 3, file: '/private/audio.mp3' }, { segment_number: 2, attempt_number: 3 }],
+      [{ segment_number: 2, attempt_number: -1 }, undefined],
+      [undefined, undefined]
+    ] as const) {
+      const response = JSON.stringify({ ok: false, stage: 'subtitle', error: {
+        code: 'audio_transcription_pending', kind: 'retryable', message: 'fixture pending', retryable: true, transcription
+      } });
+      writeFileSync(cli, `#!${process.execPath}\nconsole.log(${JSON.stringify(response)}); process.exitCode = 1;`, { mode: 0o755 });
+      const error = await runKrillinCli({ resourceRoot, jobsRoot, dependencyRoot, manifest, stage,
+        config: createDefaultCreatorServicesConfig(), artifacts: [], options: { sourceType: 'url', originLanguage: 'en', targetLanguage: 'zh_cn' },
+        source: 'https://example.test/fixture' }).then(() => undefined, failure => failure);
+      expect(error).toMatchObject({ code: 'audio_transcription_pending', retryable: true });
+      const diagnostic = failureDiagnosticFromError(error, 'krillinai.subtitle');
+      expect(diagnostic).toMatchObject({ operation: 'krillinai.subtitle', process: { exit_code: 1 } });
+      expect(diagnostic).not.toHaveProperty('file');
+      expect(Reflect.get(diagnostic!, 'transcription')).toEqual(expected);
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('shares dubbing checkpoints only across compatible unsuccessful attempts', async () => {
+    tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'creator-krillin-dubbing-')));
+    const resourceRoot = join(tempDir, 'runtime');
+    const jobsRoot = join(tempDir, 'jobs');
+    const dependencyRoot = join(tempDir, 'dependencies');
+    const cli = join(resourceRoot, 'bin', 'krillinai-cli');
+    const subtitle = join(tempDir, 'target.srt');
+    mkdirSync(dirname(cli), { recursive: true });
+    writeFileSync(cli, `#!${process.execPath}\n${FAKE_CLI}`);
+    chmodSync(cli, 0o755);
+    writeFileSync(subtitle, '1\n00:00:00,000 --> 00:00:01,000\nHello\n');
+    const manifest: KrillinRuntimeManifest = { version: 1, platform: process.platform, arch: process.arch,
+      resources: [{ path: 'bin/krillinai-cli', sha256: 'a'.repeat(64), kind: 'executable' }] };
+    const config = createDefaultCreatorServicesConfig();
+    const stages: CreatorExecutorInput['job']['stages'] = [];
+    const attempt = async (id: string, { voiceCode = 'voice-a', ttsModel = 'model-a', subtitleId = 'target', ttsProvider = 'openai', fail = true } = {}) => {
+      const workdir = join(jobsRoot, 'job', id);
+      mkdirSync(workdir, { recursive: true });
+      if (fail) writeFileSync(join(workdir, 'fail-dubbing'), '');
+      const stage = {
+        stageRun: { id, stageId: 'tts', status: 'running', progress: {} },
+        job: { id: 'job', templateId: 'video-translation', templateVersion: 1, state: {}, stages: [...stages] },
+        inputArtifacts: [], workdir, signal: new AbortController().signal,
+        reportProgress(progress: Record<string, unknown>) { Object.assign(stage.stageRun.progress, progress); }
+      } as unknown as CreatorExecutorInput;
+      const output = runKrillinCli({ resourceRoot, jobsRoot, dependencyRoot, manifest, config, stage,
+        artifacts: [{ id: subtitleId, kind: 'target_subtitle', path: subtitle }],
+        options: { audioOnly: true, targetLanguage: 'en', voiceCode, ttsProvider, ttsModel } });
+      if (fail) {
+        await expect(output).rejects.toMatchObject({ code: 'generate_speech_failed' });
+        stage.stageRun.status = 'failed';
+      } else {
+        expect(await output).toContainEqual(expect.objectContaining({ kind: 'dubbed_audio', relativePath: `job/${id}/dubbed_audio.wav` }));
+        stage.stageRun.status = 'succeeded';
+      }
+      stages.push(stage.stageRun);
+      return readFileSync(join(workdir, 'observed-dubbing-cache.txt'), 'utf8');
+    };
+
+    const original = await attempt('first');
+    expect(original).toContain(join(jobsRoot, 'job', 'first'));
+    expect(await attempt('retry')).toBe(original);
+    expect(await attempt('new-model', { ttsModel: 'model-b' })).not.toBe(original);
+    expect(await attempt('new-subtitle', { subtitleId: 'edited' })).not.toBe(original);
+    expect(await attempt('new-provider', { ttsProvider: 'minimax' })).not.toBe(original);
+    expect(await attempt('new-voice', { voiceCode: 'voice-b' })).not.toBe(original);
+    expect(await attempt('success', { fail: false })).toBe(original);
+    expect(await attempt('regenerate', { fail: false })).not.toBe(original);
+  });
+
+  it.skipIf(process.platform === 'win32')('registers every clip listed by the KrillinAI result index', async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'creator-krillin-clips-'));
+    const resourceRoot = join(tempDir, 'runtime');
+    const jobsRoot = join(tempDir, 'jobs');
+    const dependencyRoot = join(tempDir, 'dependencies');
+    const workdir = join(jobsRoot, 'job-1', 'clip-stage');
+    const cli = join(resourceRoot, 'bin', 'krillinai-cli');
+    mkdirSync(dirname(cli), { recursive: true });
+    mkdirSync(workdir, { recursive: true });
+    writeFileSync(cli, `#!${process.execPath}\n${FAKE_CLI}`);
+    chmodSync(cli, 0o755);
+    const manifest: KrillinRuntimeManifest = {
+      version: 1, platform: process.platform, arch: process.arch,
+      resources: [{ path: 'bin/krillinai-cli', sha256: 'a'.repeat(64), kind: 'executable' }]
+    };
+    const config = createDefaultCreatorServicesConfig();
+    config.llm.apiKey = 'fixture-llm-key';
+    const stage = {
+      stageRun: { id: 'clip-stage', stageId: 'clip', progress: {} },
+      job: { id: 'job-1', templateId: 'auto-clip', templateVersion: 3, state: {} },
+      inputArtifacts: [], workdir, signal: new AbortController().signal,
+      reportProgress() {}
+    } as unknown as CreatorExecutorInput;
+
+    const artifacts = await runKrillinCli({
+      resourceRoot, jobsRoot, dependencyRoot, manifest, stage, config, artifacts: [],
+      options: { sourceType: 'url', sourceUrl: 'https://www.youtube.com/watch?v=fixture', clipCount: 2, duration: '30-60', reasonLocale: 'fr-FR' }
+    });
+
+    expect(artifacts.map(artifact => artifact.kind)).toEqual(['clip_index', 'auto_clip_video', 'auto_clip_video']);
+    const clips = artifacts.filter(artifact => artifact.kind === 'auto_clip_video');
+    expect(clips.map(artifact => artifact.metadata))
+      .toEqual([expect.objectContaining({ candidateId: 'clip-01', start: 0, end: 30, score: 0.8,
+        selectionReason: { text: 'Un exemple illustre le propos.', offsetMs: 12000, locale: 'fr-FR' } }),
+        expect.objectContaining({ candidateId: 'clip-02', start: 30, end: 60 })]);
+    expect(clips[1]?.metadata).not.toHaveProperty('selectionReason');
+  });
   it.runIf(process.platform === 'win32')('mounts packaged executable files without requiring symlink privileges', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'creator-krillin-windows-file-overlay-'));
     const resourceRoot = join(tempDir, 'runtime');
@@ -160,10 +290,18 @@ describe('KrillinAI CLI runner', () => {
       volcengine: {
         app_id: 'tts-app',
         access_token: 'tts-token',
-        cluster: 'volcano_tts',
-        default_voice_id: 'BV001_streaming'
+        // Assert the bridge copies whatever cluster/voice the service config
+        // holds, instead of pinning a literal that goes stale on every TTS
+        // catalogue migration (this pair was `volcano_tts`/`BV001_streaming`
+        // before the Doubao 2.0 move).
+        cluster: config.tts.volcengine.model,
+        default_voice_id: config.tts.volcengine.defaultVoiceId
       }
     });
+    // And the shipped defaults really are the Doubao 2.0 pair from the protocol,
+    // so a drift between the two is caught here rather than in production.
+    expect(config.tts.volcengine.model).toBe(defaultVolcengineTtsCluster);
+    expect(config.tts.volcengine.defaultVoiceId).toBe(defaultVolcengineTtsVoiceId);
   });
 
   it('recovers only the known Windows ASS drive-letter failure with the auto-video relative-path command', async () => {
@@ -249,7 +387,8 @@ describe('KrillinAI CLI runner', () => {
     expect(runProcess).not.toHaveBeenCalled();
   });
 
-  it.skipIf(process.platform === 'win32')('writes private config, invokes the official CLI shape, maps outputs, and removes secrets', async () => {
+  it.skipIf(process.platform === 'win32').each(['manual', 'official-flash', 'official-other'])('writes private config, invokes the CLI, and enables Flash failover only for another official model (%s)', async mode => {
+    const official = mode !== 'manual';
     tempDir = mkdtempSync(join(tmpdir(), 'creator-krillin-cli-'));
     const resourceRoot = join(tempDir, 'runtime');
     const jobsRoot = join(tempDir, 'jobs');
@@ -291,7 +430,24 @@ describe('KrillinAI CLI runner', () => {
         kind: 'executable'
       }]
     };
-    const config = createDefaultCreatorServicesConfig();
+    const manual = createDefaultCreatorServicesConfig();
+    const flashName = 'deepseek-v4.1-flash';
+    const flashId = gatewayPublicModelId(`88api/${flashName}`);
+    const modelName = mode === 'official-other' ? 'gpt-6-luna' : flashName;
+    const textModel = `88api/${modelName}`;
+    const officialSource = createGatewayCreatorSource({
+      account: {
+        peekState: () => ({ source: 'gateway', authState: 'signed_in', activationState: 'ready', activationError: null, models: [],
+          account: { id: 'test-user', email: 'test@example.test', verified: true }, bindingVersion: 'test-binding' }),
+        modelCredentials: async () => ({ accountId: 'test-user', transport: 'gateway', modelKey: 'test-token', keyVersion: '1', bindingVersion: 'test-binding',
+          baseUrl: 'https://gateway.example/v1', defaults: { text: textModel, transcription: 'test-asr' },
+          models: [{ id: gatewayPublicModelId(textModel), name: modelName, modality: 'text', capabilities: ['chat'], textOptions: { maxOutputTokens: 4096 } },
+            ...(mode === 'official-other' ? [{ id: flashId, name: flashName, modality: 'text' as const, capabilities: ['chat'] }] : [])] })
+      },
+      manual: { read: async () => manual, write: async value => value, reset: async () => manual },
+      getLocalOrigin: () => 'http://127.0.0.1:39999'
+    });
+    const config = official ? await officialSource.store.read() : manual;
     config.llm.apiKey = 'llm-test-secret';
     config.transcription.provider = 'whisperkit';
     config.transcription.openai.apiKey = 'transcription-test-secret';
@@ -304,6 +460,7 @@ describe('KrillinAI CLI runner', () => {
       },
       job: {
         id: 'job-1',
+        templateId: 'video-translation',
         state: {}
       },
       inputArtifacts: [],
@@ -344,6 +501,10 @@ describe('KrillinAI CLI runner', () => {
       'bilingual_subtitle',
       'vertical_subtitle'
     ]);
+    expect(artifacts.find(artifact => artifact.kind === 'target_subtitle')?.metadata).toMatchObject({
+      translationStatus: 'complete', translationFailedCount: 0, translationFailures: []
+    });
+    expect(artifacts.find(artifact => artifact.kind === 'source_subtitle')?.metadata).toBeUndefined();
     expect(JSON.parse(readFileSync(join(workdir, 'observed-args.json'), 'utf8'))).toEqual(expect.arrayContaining([
       'subtitle',
       '--prepare-video',
@@ -355,6 +516,15 @@ describe('KrillinAI CLI runner', () => {
       '--bilingual-top=false'
     ]));
     expect(readFileSync(join(workdir, 'observed-config.toml'), 'utf8')).toContain('transcription-test-secret');
+    const observed = parse(readFileSync(join(workdir, 'observed-config.toml'), 'utf8')) as { llm: Record<string, unknown> };
+    expect(observed.llm).not.toHaveProperty('max_output_tokens');
+    if (official) expect(observed.llm).toMatchObject({ model: textModel, model_name: modelName });
+    else expect(observed.llm).not.toHaveProperty('model_name');
+    if (mode === 'official-other') expect(observed).toMatchObject({ llm_fallback: {
+      model: flashId, model_name: flashName, api_key: expect.stringMatching(/^oclocal_/),
+      base_url: 'http://127.0.0.1:39999/internal/krillin-llm/gateway/v1'
+    } });
+    else expect(observed).not.toHaveProperty('llm_fallback');
     expect(JSON.parse(readFileSync(join(workdir, 'observed-dependencies.json'), 'utf8'))).toEqual({
       resourceRoot: join(workdir, '.krillin-cli'),
       offline: '1',
@@ -375,11 +545,21 @@ describe('KrillinAI CLI runner', () => {
       providerStatus: 'running',
       message: 'Platform captions could not be processed. Switching to audio transcription.'
     }));
+    const runningPercents = progress
+      .filter(value => value.providerStatus === 'running' && typeof value.percent === 'number')
+      .map(value => value.percent as number);
+    expect(runningPercents).toEqual([...runningPercents].sort((left, right) => left - right));
     expect(progress.at(-1)).toMatchObject({
       krillinMode: 'cli',
       providerStatus: 'succeeded',
       percent: 100
     });
+    for (const completed of [0, 3]) {
+      expect(progress).toContainEqual(expect.objectContaining({
+        phase: 'translating_subtitles', completed, total: 6,
+        krillinEventPayload: expect.objectContaining({ completed, total: 6 })
+      }));
+    }
   });
 
   it.skipIf(process.platform === 'win32')('overrides the configured TTS provider and model from the job snapshot', async () => {
@@ -389,11 +569,13 @@ describe('KrillinAI CLI runner', () => {
     const dependencyRoot = join(tempDir, 'dependencies');
     const workdir = join(jobsRoot, 'job-tts', 'stage-run-tts');
     const subtitle = join(jobsRoot, 'job-tts', 'artifacts', 'target.srt');
+    const sourceSubtitle = join(jobsRoot, 'job-tts', 'artifacts', 'source.srt');
     const cli = join(resourceRoot, 'bin', 'krillinai-cli');
     mkdirSync(dirname(cli), { recursive: true });
     mkdirSync(dirname(subtitle), { recursive: true });
     mkdirSync(workdir, { recursive: true });
     writeFileSync(subtitle, '1\n00:00:00,000 --> 00:00:01,000\n你好\n');
+    writeFileSync(sourceSubtitle, '1\n00:00:00,000 --> 00:00:01,000\nHello\n');
     writeFileSync(cli, `#!${process.execPath}\n${FAKE_CLI}`);
     chmodSync(cli, 0o755);
 
@@ -437,7 +619,10 @@ describe('KrillinAI CLI runner', () => {
       manifest,
       stage,
       config,
-      artifacts: [{ id: 'subtitle-1', kind: 'target_subtitle', path: subtitle }],
+      artifacts: [
+        { id: 'subtitle-1', kind: 'target_subtitle', path: subtitle },
+        { id: 'source-1', kind: 'source_subtitle', path: sourceSubtitle }
+      ],
       options: {
         ttsProvider: 'aliyun',
         ttsModel: 'qwen3-tts-instruct-flash',
@@ -445,7 +630,15 @@ describe('KrillinAI CLI runner', () => {
       }
     });
 
-    expect(artifacts.map(artifact => artifact.kind)).toEqual(['dubbed_audio']);
+    expect(artifacts.map(artifact => artifact.kind)).toEqual([
+      'source_subtitle', 'target_subtitle', 'bilingual_subtitle', 'dubbed_audio'
+    ]);
+    expect(readFileSync(sourceSubtitle, 'utf8')).toContain('Hello');
+    expect(readFileSync(subtitle, 'utf8')).toContain('你好');
+    expect(readFileSync(join(workdir, 'origin_language_srt.srt'), 'utf8')).toContain('Hello');
+    expect(readFileSync(join(workdir, 'target_language_srt.srt'), 'utf8')).toContain('配音文案');
+    expect(readFileSync(join(workdir, 'bilingual_srt.srt'), 'utf8')).toContain('配音文案\nHello');
+    expect(progress).toContainEqual(expect.objectContaining({ phase: 'generating_voice', percent: 48, completed: 4, total: 10, message: '已生成配音 4/10 段' }));
     expect(JSON.parse(readFileSync(join(workdir, 'observed-args.json'), 'utf8'))).toEqual([
       'tts',
       '--workdir',
@@ -453,7 +646,7 @@ describe('KrillinAI CLI runner', () => {
       '--task-id',
       'stage-run-tts',
       '--input-srt',
-      subtitle,
+      join(workdir, 'target_language_srt.srt'),
       '--line-mode',
       'target-only',
       '--voice',
@@ -476,7 +669,7 @@ describe('KrillinAI CLI runner', () => {
     });
 
     progress.length = 0;
-    await expect(runKrillinCli({
+    const failure = await runKrillinCli({
       resourceRoot,
       jobsRoot,
       dependencyRoot,
@@ -489,9 +682,13 @@ describe('KrillinAI CLI runner', () => {
         ttsModel: 'qwen3-tts-instruct-flash',
         voiceCode: 'FAIL'
       }
-    })).rejects.toMatchObject({
+    }).then(() => undefined, error => error);
+    expect(failure).toMatchObject({
       code: 'generate_speech_failed',
       message: 'fixture TTS failed'
+    });
+    expect(failureDiagnosticFromError(failure, 'krillinai.tts')).toMatchObject({
+      operation: 'krillinai.tts', process: { tool: 'krillinai', exit_code: 1 }
     });
     expect(progress).toEqual([
       {
@@ -523,7 +720,7 @@ describe('KrillinAI CLI runner', () => {
     ]);
   });
 
-  it.skipIf(process.platform === 'win32')('selects the short vertical subtitle without changing horizontal subtitle selection', async () => {
+  it.skipIf(process.platform === 'win32').each(['top', 'bottom'])('preserves bilingual document text and subtitle selection with translation on %s', async subtitlePosition => {
     tempDir = mkdtempSync(join(tmpdir(), 'creator-krillin-cli-render-'));
     const resourceRoot = join(tempDir, 'runtime');
     const jobsRoot = join(tempDir, 'jobs');
@@ -531,6 +728,7 @@ describe('KrillinAI CLI runner', () => {
     const cli = join(resourceRoot, 'bin', 'krillinai-cli');
     const source = join(jobsRoot, 'job-render', 'artifacts', 'source.mp4');
     const target = join(jobsRoot, 'job-render', 'artifacts', 'target.srt');
+    const original = join(jobsRoot, 'job-render', 'artifacts', 'original.srt');
     const bilingual = join(jobsRoot, 'job-render', 'artifacts', 'bilingual.srt');
     const vertical = join(jobsRoot, 'job-render', 'artifacts', 'vertical.srt');
     mkdirSync(dirname(cli), { recursive: true });
@@ -538,6 +736,7 @@ describe('KrillinAI CLI runner', () => {
     writeFileSync(cli, `#!${process.execPath}\n${FAKE_CLI}`);
     writeFileSync(source, 'fixture-video');
     writeFileSync(target, '1\n00:00:00,000 --> 00:00:01,000\n目标字幕\n');
+    writeFileSync(original, '1\n00:00:00,000 --> 00:00:01,000\nSource subtitle\n');
     writeFileSync(bilingual, '1\n00:00:00,000 --> 00:00:01,000\n目标字幕\nSource subtitle\n');
     writeFileSync(vertical, '1\n00:00:00,000 --> 00:00:01,000\n竖屏短字幕\n');
     chmodSync(cli, 0o755);
@@ -555,6 +754,7 @@ describe('KrillinAI CLI runner', () => {
     const config = createDefaultCreatorServicesConfig();
     const artifacts = [
       { id: 'source-1', kind: 'source_video', path: source },
+      { id: 'original-1', kind: 'source_subtitle', path: original },
       { id: 'vertical-1', kind: 'vertical_subtitle', path: vertical },
       { id: 'target-1', kind: 'target_subtitle', path: target },
       { id: 'bilingual-1', kind: 'bilingual_subtitle', path: bilingual }
@@ -562,7 +762,8 @@ describe('KrillinAI CLI runner', () => {
     const run = async (
       stageId: 'render-horizontal' | 'render-vertical',
       stageRunId: string,
-      inputs = artifacts
+      inputs = artifacts,
+      dubbed = false
     ) => {
       const workdir = join(jobsRoot, 'job-render', stageRunId);
       mkdirSync(workdir, { recursive: true });
@@ -576,7 +777,12 @@ describe('KrillinAI CLI runner', () => {
           id: 'job-render',
           state: {}
         },
-        inputArtifacts: [],
+        inputArtifacts: inputs.map(artifact => ({ ...artifact, metadata: {
+          cues: artifact.kind === 'target_subtitle' || artifact.kind === 'source_subtitle' || artifact.kind === 'vertical_subtitle'
+            ? [{ start: '00:00:00,000', end: '00:00:01,000', text: artifact.kind === 'target_subtitle'
+              ? '目标字幕' : artifact.kind === 'source_subtitle' ? 'Source subtitle' : '竖屏短字幕' }]
+            : []
+        } })),
         workdir,
         signal: new AbortController().signal,
         reportProgress() {}
@@ -589,7 +795,7 @@ describe('KrillinAI CLI runner', () => {
         stage,
         config,
         artifacts: inputs,
-        options: { bilingual: true }
+        options: { bilingual: true, bilingualTop: subtitlePosition === 'top', dubbed }
       });
       return JSON.parse(readFileSync(join(workdir, 'observed-args.json'), 'utf8')) as string[];
     };
@@ -602,11 +808,23 @@ describe('KrillinAI CLI runner', () => {
       artifacts.filter(artifact => artifact.kind !== 'vertical_subtitle')
     ))).toBe(bilingual);
     expect(selectedSubtitle(await run('render-horizontal', 'stage-run-horizontal'))).toBe(bilingual);
+    const dubbedVideo = join(jobsRoot, 'job-render', 'artifacts', 'dubbed.mp4');
+    writeFileSync(dubbedVideo, 'fixture-dubbed-video');
+    expect(selectedSubtitle(await run('render-vertical', 'stage-run-dubbed-vertical', [
+      ...artifacts,
+      { id: 'dubbed-1', kind: 'dubbed_video', path: dubbedVideo }
+    ], true))).toBe(bilingual);
+    expect(JSON.parse(readFileSync(join(jobsRoot, 'job-render', 'stage-run-dubbed-vertical', 'observed-subtitle-document.json'), 'utf8')))
+      .toMatchObject({ cues: [{ startMs: 0, endMs: 1000, text: '目标字幕', sourceText: 'Source subtitle' }] });
+    for (const stageRunId of ['stage-run-horizontal', 'stage-run-vertical-fallback']) {
+      expect(JSON.parse(readFileSync(join(jobsRoot, 'job-render', stageRunId, 'observed-subtitle-document.json'), 'utf8')))
+        .toMatchObject({ bilingual: true, subtitlePosition, cues: [{ startMs: 0, endMs: 1000, text: '目标字幕', sourceText: 'Source subtitle' }] });
+    }
   });
 });
 
 const FAKE_CLI = String.raw`
-const { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } = require('node:fs');
+const { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const { join } = require('node:path');
 
@@ -614,12 +832,16 @@ const args = process.argv.slice(2);
 const workdir = args[args.indexOf('--workdir') + 1];
 mkdirSync(workdir, { recursive: true });
 writeFileSync(join(workdir, 'observed-args.json'), JSON.stringify(args));
+if (args.includes('--subtitle-document')) {
+  writeFileSync(join(workdir, 'observed-subtitle-document.json'), readFileSync(args[args.indexOf('--subtitle-document') + 1]));
+}
 writeFileSync(
   join(workdir, 'observed-config.toml'),
   readFileSync(join(process.cwd(), 'config', 'config.toml'))
 );
 const voiceIndex = args.indexOf('--voice');
-const shouldFail = args[0] === 'tts' && voiceIndex >= 0 && args[voiceIndex + 1] === 'FAIL';
+if (args[0] === 'tts') writeFileSync(join(workdir, 'observed-dubbing-cache.txt'), process.env.OPENCREATOR_KRILLIN_DUBBING_CACHE || '');
+const shouldFail = args[0] === 'tts' && (existsSync(join(workdir, 'fail-dubbing')) || (voiceIndex >= 0 && args[voiceIndex + 1] === 'FAIL'));
 if (shouldFail) {
   process.stdout.write(JSON.stringify({
     type: 'progress',
@@ -641,9 +863,18 @@ if (shouldFail) {
 }
 let outputs;
 if (args[0] === 'tts') {
+  process.stdout.write(JSON.stringify({ type: 'progress', phase: 'generating_voice', percent: 48, completed: 4, total: 10, message: '已生成配音 4/10 段' }) + '\n');
   outputs = {
+    target_srt: join(workdir, 'target_language_srt.srt'),
     tts_audio: join(workdir, 'dubbed_audio.wav')
   };
+  writeFileSync(outputs.target_srt, '1\n00:00:00,000 --> 00:00:01,000\n配音文案\n');
+  const originSrt = join(workdir, 'origin_language_srt.srt');
+  if (existsSync(originSrt)) {
+    outputs.origin_srt = originSrt;
+    outputs.bilingual_srt = join(workdir, 'bilingual_srt.srt');
+    writeFileSync(outputs.bilingual_srt, '1\n00:00:00,000 --> 00:00:01,000\n配音文案\nHello\n');
+  }
   writeFileSync(outputs.tts_audio, 'audio');
 } else if (args[0] === 'render-horizontal') {
   outputs = {
@@ -655,6 +886,20 @@ if (args[0] === 'tts') {
     vertical_video: join(workdir, 'vertical_video.mp4')
   };
   writeFileSync(outputs.vertical_video, 'video');
+} else if (args[0] === 'clip') {
+  mkdirSync(join(workdir, 'clips'), { recursive: true });
+  const clips = [1, 2].map(number => {
+    const file = 'clips/clip-0' + number + '.mp4';
+    writeFileSync(join(workdir, file), 'video');
+    return { id: 'clip-0' + number, file, start_ms: (number - 1) * 30000,
+      end_ms: number * 30000, score: 0.8, selection_reason: {
+        text: 'Un exemple illustre le propos.', offset_ms: number === 1 ? 12000 : 30000,
+        locale: process.env.OPENCREATOR_CLIP_REASON_LOCALE
+      } };
+  });
+  outputs = { clip_index: join(workdir, 'clips.json') };
+  writeFileSync(outputs.clip_index, JSON.stringify({ schema_version: 1,
+    caption_source: 'youtube_vtt', requested_count: 2, clips }));
 } else {
   process.stdout.write(JSON.stringify({
     type: 'progress',
@@ -662,6 +907,9 @@ if (args[0] === 'tts') {
     percent: 25,
     message: 'Platform captions could not be processed. Switching to audio transcription.'
   }) + '\n');
+  for (const completed of [0, 3]) {
+    process.stdout.write(JSON.stringify({ type: 'progress', phase: 'translating_subtitles', percent: 5 + completed * 15, completed, total: 6 }) + '\n');
+  }
   const ytDlpPath = join(
     process.env.KRILLINAI_RESOURCE_ROOT,
     'bin',

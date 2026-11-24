@@ -49,7 +49,7 @@ export type CreatorSessionContextValue = {
   runPreflight(stageId: string, options?: { inputResultVersion?: number }): Promise<CreatorPreflightResponse>;
   updateDraft(
     patch: Record<string, CreatorJson>,
-    options?: { semantic?: boolean; persist?: boolean }
+    options?: { semantic?: boolean; persist?: boolean; userEdited?: boolean }
   ): void;
   flush(): Promise<void>;
   clearError(): void;
@@ -63,9 +63,10 @@ export type CreatorSessionContextValue = {
   focusIssue(issue: OpenCreatorIssue | null): void;
   askPendingIssue(question: string, issue: OpenCreatorIssue): void;
   applyRemoteSnapshot(job: CreatorJob): void;
-  applyAction(request: Omit<CreatorActionRequest, 'expectedRevision'>): Promise<CreatorJob>;
+  applyAction(request: Omit<CreatorActionRequest, 'expectedRevision'>, options?: { serverPreflight?: boolean }): Promise<CreatorJob>;
   cancelJob(): Promise<void>;
   resumeJob(): Promise<void>;
+  controlDownload?(stageRunId: string, action: 'pause' | 'resume' | 'cancel'): Promise<void>;
   uploadSourceVideo(file: File): Promise<void>;
   uploadReferenceImage(file: File): Promise<void>;
   uploadVideoReference?(file: File): Promise<{ assetId: string; expiresAt: string }>;
@@ -74,6 +75,8 @@ export type CreatorSessionContextValue = {
   openArtifact(artifactId: string): Promise<Response>;
   openDownloadThumbnail(probeArtifactId: string): Promise<Response>;
   openSubtitlePreview?: CreatorWebService['openSubtitlePreview'];
+  prepareSubtitleRender?: CreatorWebService['prepareSubtitleRender'];
+  openSubtitleFont?: CreatorWebService['openSubtitleFont'];
   openArtifactJson<T = unknown>(artifactId: string): Promise<T>;
   agentSession: CreatorAgentSession | null;
   turns: CreatorAgentTurn[];
@@ -171,6 +174,8 @@ export function CreatorSessionProvider(props: {
     | 'openArtifact'
     | 'openDownloadThumbnail'
     | 'openSubtitlePreview'
+    | 'prepareSubtitleRender'
+    | 'openSubtitleFont'
     | 'uploadReferenceImage'
     | 'uploadVideoReference'
     | 'uploadArticleImage'
@@ -178,6 +183,7 @@ export function CreatorSessionProvider(props: {
     | 'uploadSourceDocument'
     | 'cancelJob'
     | 'resumeJob'
+    | 'controlDownload'
     | 'preflight'
     | 'subscribeJobEvents'>>;
   children: ReactNode;
@@ -216,7 +222,7 @@ export function CreatorSessionProvider(props: {
   dirtyRef.current = dirtyFields;
   localIssuesRef.current = localIssues;
 
-  const ensurePersistedJob = useCallback((): Promise<CreatorJob> => {
+  const ensurePersistedJob = useCallback((userEdited = false): Promise<CreatorJob> => {
     if (!isPendingCreatorJob(confirmedRef.current)) {
       return Promise.resolve(confirmedRef.current);
     }
@@ -226,7 +232,11 @@ export function CreatorSessionProvider(props: {
     }
 
     const capturedDraft = { ...draftRef.current };
-    const creationState = { ...confirmedRef.current.state, ...capturedDraft };
+    const creationState = {
+      ...confirmedRef.current.state,
+      ...capturedDraft,
+      __creatorUserEdited: userEdited || confirmedRef.current.state.__creatorUserEdited === true || capturedDraft.__creatorUserEdited === true
+    };
     const work = props.ensureJob(creationState).then(next => {
       confirmedRef.current = next;
       setConfirmedJob(next);
@@ -333,21 +343,32 @@ export function CreatorSessionProvider(props: {
 
   const updateDraft = useCallback((
     patch: Record<string, CreatorJson>,
-    options: { semantic?: boolean; persist?: boolean } = {}
+    options: { semantic?: boolean; persist?: boolean; userEdited?: boolean } = {}
   ) => {
     const currentState = { ...confirmedRef.current.state, ...draftRef.current };
+    // Multiple model fields can initialize in the same render. Merge their
+    // individual choices against the latest draft so they cannot overwrite one another.
+    if (isRecord(patch.officialModels)) {
+      patch = { ...patch, officialModels: {
+        ...(isRecord(currentState.officialModels) ? currentState.officialModels : {}),
+        ...patch.officialModels
+      } };
+    }
     const changedPatch = Object.fromEntries(Object.entries(patch).filter(([field, value]) => (
       !sameCreatorJson(currentState[field], value)
     ))) as Record<string, CreatorJson>;
     const changedFields = Object.keys(changedPatch);
     if (changedFields.length === 0) return;
 
-    const nextDraft = { ...draftRef.current, ...changedPatch };
+    const persistedPatch = options.persist === false || options.userEdited === false
+      ? changedPatch
+      : { ...changedPatch, __creatorUserEdited: true };
+    const nextDraft = { ...draftRef.current, ...persistedPatch };
     draftRef.current = nextDraft;
     setDraft(nextDraft);
     if (options.persist === false) return;
 
-    const nextDirty = new Set([...dirtyRef.current, ...changedFields]);
+    const nextDirty = new Set([...dirtyRef.current, ...Object.keys(persistedPatch)]);
     dirtyRef.current = nextDirty;
     setDirtyFields(nextDirty);
     if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
@@ -461,7 +482,7 @@ export function CreatorSessionProvider(props: {
     props.onAskPendingIssue(issue, question);
   }, [props.onAskPendingIssue]);
 
-  const runPreflight = useCallback(async (stageId: string, options?: { inputResultVersion?: number }) => {
+  const runPreflight = useCallback(async (stageId: string, options?: { inputResultVersion?: number; launch?: boolean }) => {
     if (props.service.preflight === undefined) {
       const cause = new Error('Creator preflight is unavailable');
       captureCreatorFailure('creator.preflight', cause, 'Preflight checks are unavailable. Try again later.', 'preflight');
@@ -470,7 +491,7 @@ export function CreatorSessionProvider(props: {
     await flush();
     await ensurePersistedJob();
     try {
-      const result = options?.inputResultVersion === undefined
+      const result = options?.inputResultVersion === undefined && !options?.launch
         ? await props.service.preflight(confirmedRef.current.id, stageId)
         : await props.service.preflight(confirmedRef.current.id, stageId, options);
       setPreflight(result);
@@ -490,6 +511,15 @@ export function CreatorSessionProvider(props: {
         return previous !== undefined && terminalCreatorStage(previous.status)
           && (stage.status === 'queued' || stage.status === 'running');
       }))) return;
+    if (next.id === current.id) {
+      const stages = next.stages.map(stage => {
+        const previous = current.stages.find(candidate => candidate.id === stage.id);
+        return previous
+          ? olderDownloadProgress(stage, previous) ? previous : mergeMonotonicStageProgress(stage, previous)
+          : stage;
+      });
+      if (stages.some((stage, index) => stage !== next.stages[index])) next = { ...next, stages };
+    }
     const conflicts = [...dirtyRef.current].filter(field => (
       JSON.stringify(next.state[field]) !== JSON.stringify(draftRef.current[field])
     ));
@@ -613,17 +643,20 @@ export function CreatorSessionProvider(props: {
   }, [confirmedJob.id, props.service, reloadAgentTimeline]);
 
   const applyAction = useCallback(async (
-    request: Omit<CreatorActionRequest, 'expectedRevision'>
+    request: Omit<CreatorActionRequest, 'expectedRevision'>,
+    options?: { serverPreflight?: boolean }
   ) => {
     let requestRevision = confirmedRef.current.revision;
     try {
       await flush();
       await ensurePersistedJob();
       requestRevision = confirmedRef.current.revision;
-      if (request.action === 'run-stage' && props.service.preflight !== undefined) {
+      if (request.action === 'run-stage' && !options?.serverPreflight && props.service.preflight !== undefined) {
         const stageId = request.input.stageId;
-        if (typeof stageId === 'string') await runPreflight(stageId,
-          typeof request.input.inputResultVersion === 'number' ? { inputResultVersion: request.input.inputResultVersion } : undefined);
+        if (typeof stageId === 'string') await runPreflight(stageId, {
+          launch: true,
+          ...(typeof request.input.inputResultVersion === 'number' ? { inputResultVersion: request.input.inputResultVersion } : {})
+        });
       }
       const response = await props.service.applyAction(confirmedRef.current.id, {
         ...request,
@@ -633,6 +666,8 @@ export function CreatorSessionProvider(props: {
       setError(null);
       return confirmedRef.current;
     } catch (cause) {
+      const blocked = (cause as { details?: { preflight?: CreatorPreflightResponse } } | null)?.details?.preflight;
+      if (options?.serverPreflight && blocked?.canStart === false && Array.isArray(blocked.blocked)) setPreflight(blocked);
       const nextError = toSessionError(cause);
       if (!isSupersededRevisionConflict(cause, requestRevision, confirmedRef.current.revision)) {
         setError(nextError);
@@ -659,7 +694,10 @@ export function CreatorSessionProvider(props: {
     const inputResultVersion = failedStage?.progress.inputResultVersion;
     await applyAction({
       action: 'run-stage',
-      input: { stageId: issue.stageId, ...(typeof inputResultVersion === 'number' ? { inputResultVersion } : {}) },
+      input: { stageId: issue.stageId,
+        ...(confirmedRef.current.templateId === 'video-translation' && issue.stageId === 'subtitle' && failedStage
+          ? { resumedFromStageRunId: failedStage.id } : {}),
+        ...(typeof inputResultVersion === 'number' ? { inputResultVersion } : {}) },
       repairIssueId: issue.id
     });
   }, [applyAction]);
@@ -782,15 +820,14 @@ export function CreatorSessionProvider(props: {
     try {
       await ensurePersistedJob();
       const response = await props.service.cancelJob(confirmedRef.current.id);
-      confirmedRef.current = response.job;
-      setConfirmedJob(response.job);
+      applyRemoteSnapshot(response.job);
       setError(null);
     } catch (cause) {
       setError(toSessionError(cause));
       captureCreatorFailure('creator.cancel-job', cause);
       throw cause;
     }
-  }, [captureCreatorFailure, ensurePersistedJob, props.service]);
+  }, [applyRemoteSnapshot, captureCreatorFailure, ensurePersistedJob, props.service]);
 
   const resumeJob = useCallback(async () => {
     if (props.service.resumeJob === undefined) {
@@ -804,8 +841,7 @@ export function CreatorSessionProvider(props: {
       await ensurePersistedJob();
       requestRevision = confirmedRef.current.revision;
       const response = await props.service.resumeJob(confirmedRef.current.id);
-      confirmedRef.current = response.job;
-      setConfirmedJob(response.job);
+      applyRemoteSnapshot(response.job);
       setError(null);
     } catch (cause) {
       if (!isSupersededRevisionConflict(cause, requestRevision, confirmedRef.current.revision)) {
@@ -814,7 +850,20 @@ export function CreatorSessionProvider(props: {
       }
       throw cause;
     }
-  }, [captureCreatorFailure, ensurePersistedJob, flush, props.service]);
+  }, [applyRemoteSnapshot, captureCreatorFailure, ensurePersistedJob, flush, props.service]);
+
+  const controlDownload = useCallback(async (stageRunId: string, action: 'pause' | 'resume' | 'cancel') => {
+    if (!props.service.controlDownload) throw new Error('Download control is unavailable');
+    try {
+      const response = await props.service.controlDownload(confirmedRef.current.id, stageRunId, action);
+      applyRemoteSnapshot(response.job);
+      setError(null);
+    } catch (cause) {
+      setError(toSessionError(cause));
+      captureCreatorFailure(`creator.download-${action}`, cause);
+      throw cause;
+    }
+  }, [applyRemoteSnapshot, captureCreatorFailure, props.service]);
 
   const openArtifact = useCallback(async (artifactId: string) => {
     if (props.service.openArtifact === undefined) {
@@ -865,7 +914,7 @@ export function CreatorSessionProvider(props: {
     let requestRevision = confirmedRef.current.revision;
     try {
       await flush();
-      await ensurePersistedJob();
+      await ensurePersistedJob(true);
       requestRevision = confirmedRef.current.revision;
       const clientMessageId = createClientMessageId();
       const start = props.service.startAgentTurn ?? props.service.runAgentTurn;
@@ -998,6 +1047,7 @@ export function CreatorSessionProvider(props: {
     applyAction,
     cancelJob,
     resumeJob,
+    ...(props.service.controlDownload ? { controlDownload } : {}),
     uploadReferenceImage,
     uploadVideoReference: props.service.uploadVideoReference,
     uploadSourceDocument,
@@ -1006,6 +1056,8 @@ export function CreatorSessionProvider(props: {
     openArtifact,
     openDownloadThumbnail,
     openSubtitlePreview: props.service.openSubtitlePreview,
+    prepareSubtitleRender: props.service.prepareSubtitleRender,
+    openSubtitleFont: props.service.openSubtitleFont,
     openArtifactJson,
     agentSession,
     turns,
@@ -1016,7 +1068,7 @@ export function CreatorSessionProvider(props: {
     steerAgentTurn,
     interruptAgentTurn,
     respondAgentApproval
-  }), [connection, reconnect, agentBusy, agentSession, askPendingIssue, applyAction, applyRemoteSnapshot, approvals, cancelJob, captureCreatorFailure, clearError, confirmedJob, conflictedFields, draft, error, flush, focusIssue, focusedIssue, interruptAgentTurn, issues, items, openArtifact, openDownloadThumbnail, openArtifactJson, preflight, props.service.openSubtitlePreview, props.service.uploadVideoReference, repairIssue, respondAgentApproval, resumeJob, runAgentTurn, runPreflight, steerAgentTurn, turns, updateDraft, uploadArticleImage, uploadReferenceImage, uploadSourceDocument, uploadSourceVideo]);
+  }), [connection, reconnect, agentBusy, agentSession, askPendingIssue, applyAction, applyRemoteSnapshot, approvals, cancelJob, captureCreatorFailure, clearError, confirmedJob, controlDownload, conflictedFields, draft, error, flush, focusIssue, focusedIssue, interruptAgentTurn, issues, items, openArtifact, openDownloadThumbnail, openArtifactJson, preflight, props.service.controlDownload, props.service.openSubtitlePreview, props.service.prepareSubtitleRender, props.service.openSubtitleFont, props.service.uploadVideoReference, repairIssue, respondAgentApproval, resumeJob, runAgentTurn, runPreflight, steerAgentTurn, turns, updateDraft, uploadArticleImage, uploadReferenceImage, uploadSourceDocument, uploadSourceVideo]);
 
   return (
     <CreatorSessionContext.Provider value={value}>
@@ -1038,11 +1090,13 @@ function mergeCreatorEvent(job: CreatorJob, event: CreatorEventEnvelope): Creato
     if (stage === null) return job;
     const index = job.stages.findIndex(candidate => candidate.id === stage.id);
     const previous = job.stages[index];
+    if (previous && olderDownloadProgress(stage, previous)) return job;
     if (previous !== undefined && terminalCreatorStage(previous.status)
       && (stage.status === 'queued' || stage.status === 'running') && event.revision <= job.revision) return job;
+    const mergedStage = previous ? mergeMonotonicStageProgress(stage, previous) : stage;
     const stages = index < 0
       ? [...job.stages, stage]
-      : job.stages.map(candidate => candidate.id === stage.id ? stage : candidate);
+      : job.stages.map(candidate => candidate.id === stage.id ? mergedStage : candidate);
     return {
       ...job,
       stages,
@@ -1072,6 +1126,37 @@ function mergeCreatorEvent(job: CreatorJob, event: CreatorEventEnvelope): Creato
 
 function terminalCreatorStage(status: string): boolean {
   return ['succeeded', 'failed', 'canceled', 'interrupted'].includes(status);
+}
+
+function olderDownloadProgress(incoming: CreatorStageRun, current: CreatorStageRun): boolean {
+  return incoming.stageId === 'download' && incoming.executor === 'download'
+    && (Number(incoming.progress.downloadProgressSequence) || 0) < (Number(current.progress.downloadProgressSequence) || 0);
+}
+
+function mergeMonotonicStageProgress(incoming: CreatorStageRun, current: CreatorStageRun): CreatorStageRun {
+  const currentPercent = current.progress.percent;
+  const incomingPercent = incoming.progress.percent;
+  const currentPhasePercent = current.progress.phasePercent;
+  const incomingPhasePercent = incoming.progress.phasePercent;
+  const unknownVideoProviderProgress = incoming.executor === 'video' && incomingPercent === null
+    && (incoming.progress.phase === 'queued' || incoming.progress.phase === 'generating');
+  const keepPercent = typeof currentPercent === 'number' && Number.isFinite(currentPercent)
+    && ((incomingPercent === null && !unknownVideoProviderProgress)
+      || (typeof incomingPercent === 'number' && Number.isFinite(incomingPercent) && incomingPercent < currentPercent));
+  const keepPhasePercent = current.progress.phase === 'normalizing_media'
+    && incoming.progress.phase === 'normalizing_media'
+    && typeof currentPhasePercent === 'number' && Number.isFinite(currentPhasePercent)
+    && (incomingPhasePercent === null
+      || (typeof incomingPhasePercent === 'number' && Number.isFinite(incomingPhasePercent) && incomingPhasePercent < currentPhasePercent));
+  if (!keepPercent && !keepPhasePercent) return incoming;
+  return {
+    ...incoming,
+    progress: {
+      ...incoming.progress,
+      ...(keepPercent ? { percent: currentPercent } : {}),
+      ...(keepPhasePercent ? { phasePercent: currentPhasePercent } : {})
+    }
+  };
 }
 
 function mergeIssueIntoJob(job: CreatorJob, issue: OpenCreatorIssue): CreatorJob {
