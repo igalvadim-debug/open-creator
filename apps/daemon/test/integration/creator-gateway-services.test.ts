@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { createDefaultCreatorServicesConfig } from '@opencreator/protocol';
+import { createDefaultCreatorServicesConfig, type GatewayModel } from '@opencreator/protocol';
 import { afterEach, expect, it, vi } from 'vitest';
 import * as module from '../../src/gateway/creator-service-source.js';
 import { createVideoGenerationService } from '../../src/video-generation/service.js';
@@ -13,6 +13,46 @@ import { createCreatorIssueService } from '../../src/creator/issues.js';
 
 const close: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const callback of close.splice(0)) await callback(); });
+
+it.each(['text', 'image', 'video', 'speech', 'transcription'] as const)('uses the saved %s choice only inside its task execution scope', async modality => {
+  const kinds = ['text', 'image', 'video', 'speech', 'transcription'] as const;
+  const defaults = Object.fromEntries(kinds.map(kind => [kind, `${kind}-default`]));
+  const models: GatewayModel[] = kinds.flatMap(kind => ['default', 'task'].map(suffix => ({
+    id: `${kind}-${suffix}`, modality: kind, catalogSchema: 2,
+    capabilities: kind === 'text' ? ['chat', 'responses'] : kind === 'transcription' ? ['subtitle_timestamps'] : ['generate']
+  })));
+  const state = { source: 'gateway' as const, transport: 'gateway' as const, authState: 'signed_in' as const,
+    activationState: 'ready' as const, account: { id: 'a', email: 'a@example.test', verified: true },
+    bindingVersion: 'a:1', selectedModels: { ...defaults }, models, activationError: null };
+  const credentials = { accountId: 'a', transport: 'gateway' as const, modelKey: 'test-key', keyVersion: '1',
+    bindingVersion: 'a:1', baseUrl: 'https://gateway.example/v1', defaults: { ...defaults }, models };
+  const manual = createDefaultCreatorServicesConfig();
+  const fetcher = vi.fn<typeof fetch>();
+  const source = module.createGatewayCreatorSource({
+    account: { peekState: () => state, modelCredentials: async () => credentials },
+    manual: { read: async () => manual, write: async config => config, reset: async () => manual },
+    getLocalOrigin: () => 'http://127.0.0.1:39999', fetcher,
+    readJobBinding: () => ({ source: 'gateway', accountId: 'a', bindingVersion: 'a:1', models: { ...defaults },
+      capabilities: Object.fromEntries(kinds.map(kind => [kind, models.find(model => model.id === defaults[kind])!.capabilities])) }),
+    readJobState: () => ({ officialModels: { [modality]: `${modality}-task` } })
+  });
+  close.push(() => source.revoke());
+  const outside = await source.store.read();
+  await source.runForJob('task', 'stage', async () => {
+    const config = await source.store.read();
+    const expected = { ...defaults, [modality]: `${modality}-task` };
+    expect(module.gatewayCreatorBinding(config)?.models).toEqual(expected);
+    expect(config.llm.model).toBe(expected.text);
+    expect(config.image.openai.model).toBe(expected.image);
+    expect(config.tts.openai.model).toBe(expected.speech);
+    expect(config.transcription.openai.model).toBe(expected.transcription);
+  });
+  expect(module.gatewayCreatorBinding(outside)?.models).toEqual(defaults);
+  expect(module.gatewayCreatorBinding(await source.store.read())?.models).toEqual(defaults);
+  expect(state.selectedModels).toEqual(defaults);
+  expect(credentials.defaults).toEqual(defaults);
+  expect(fetcher).not.toHaveBeenCalled();
+});
 
 it.each(['failed', 'outcome_unknown'] as const)('reconciles a rejected Krillin stream with the gateway state (%s)', async remoteState => {
   const root = await mkdtemp(join(tmpdir(), 'oc-gateway-krillin-error-'));
@@ -252,18 +292,20 @@ it('official services share one local capability and inject the cloud Key only d
 });
 
 it('uses a task-specific official model without changing account defaults and rejects custom choices before execution', async () => {
-  const models = [{ id: 'official/text', modality: 'text' as const, capabilities: ['responses'] }, { id: 'official/image-first', modality: 'image' as const, capabilities: [] }, { id: 'official/image-second', modality: 'image' as const, capabilities: ['edit'] }];
+  const models: GatewayModel[] = [{ id: 'official/text', modality: 'text', capabilities: ['responses'] }, { id: 'official/image-first', modality: 'image', capabilities: [] }, { id: 'official/image-second', modality: 'image', capabilities: ['edit'], catalogSchema: 2 }];
   const state = { source: 'gateway' as const, authState: 'signed_in' as const, activationState: 'ready' as const, account: { id: 'a', email: 'a@example.test', verified: true }, bindingVersion: 'a:1', selectedModels: { text: 'official/text', image: 'official/image-first' }, models, activationError: null };
-  const credentials = { accountId: 'a', modelKey: 'cloud-secret', keyVersion: '1', bindingVersion: 'a:1', baseUrl: 'https://gateway.example/v1', defaults: { ...state.selectedModels }, models };
+  const credentials = { accountId: 'a', transport: 'gateway' as const, modelKey: 'cloud-secret', keyVersion: '1', bindingVersion: 'a:1', baseUrl: 'https://gateway.example/v1', defaults: { ...state.selectedModels }, models };
   let choices = { image: 'official/image-second' };
   const manual = createDefaultCreatorServicesConfig();
   const fetcher = vi.fn<typeof fetch>(async () => Response.json({ data: [] }));
+  const trace = vi.fn();
   const source = module.createGatewayCreatorSource({
     account: { peekState: () => state, modelCredentials: async () => credentials },
     manual: { read: async () => manual, write: async c => c, reset: async () => manual },
     getLocalOrigin: () => 'http://127.0.0.1:39999', fetcher,
     readJobBinding: () => ({ source: 'gateway', accountId: 'a', bindingVersion: 'a:1', models: { ...credentials.defaults }, capabilities: { text: ['responses'], image: [] } }),
-    readJobState: () => ({ officialModels: choices })
+    readJobState: () => ({ officialModels: choices }), readJobTemplateId: () => 'image-generation',
+    telemetry: { traceEnabled: () => true, gatewayCall: trace }
   });
   const server = Fastify(); close.push(() => server.close());
   await source.register(server);
@@ -274,6 +316,12 @@ it('uses a task-specific official model without changing account defaults and re
     expect((await server.inject({ method: 'POST', url: '/internal/krillin-llm/gateway/v1/images/generations', headers: { Authorization: `Bearer ${config.image.openai.apiKey}` }, payload: { model: config.image.openai.model, prompt: 'draw' } })).statusCode).toBe(200);
   });
   expect(JSON.parse(String(fetcher.mock.lastCall?.[1]?.body))).toMatchObject({ model: 'official/image-second' });
+  const callId = new Headers(fetcher.mock.lastCall?.[1]?.headers).get('X-OC-Call-ID');
+  expect(callId).toMatch(/^[0-9a-f-]{36}$/);
+  expect(trace.mock.calls.map(([event]) => event)).toEqual([
+    expect.objectContaining({ event_type: 'request_started', feature: 'image-generation', operation: 'images/generations', call_id: callId }),
+    expect.objectContaining({ event_type: 'request_finished', feature: 'image-generation', outcome: 'succeeded', call_id: callId })
+  ]);
   expect(credentials.defaults.image).toBe('official/image-first');
   expect(state.selectedModels.image).toBe('official/image-first');
   choices = { image: 'personal-model' };
@@ -282,6 +330,49 @@ it('uses a task-specific official model without changing account defaults and re
   expect(execute).not.toHaveBeenCalled();
   expect(fetcher).toHaveBeenCalledOnce();
   await source.revoke();
+});
+
+it.each([
+  ['video-generation', 'POST', 'video/jobs', 'video/jobs', 202],
+  ['video-generation', 'GET', `requests/ocreq_${'a'.repeat(48)}`, 'status_lookup', 200],
+  ['video-generation', 'GET', `requests/ocreq_${'a'.repeat(48)}/result`, 'result_read', 502],
+  ['transcription', 'POST', 'audio/transcriptions', 'audio/transcriptions', 502],
+  ['smart-dubbing', 'POST', 'audio/speech', 'audio/speech', 502],
+  ['stickman-video', 'POST', 'audio/speech', 'audio/speech', 502]
+] as const)('tags %s %s %s only when scoped to a supported task', async (feature, method, resource, operation, status) => {
+  const model = { id: 'fixture-text', modality: 'text' as const, capabilities: ['responses'] };
+  const account = { id: 'a', email: 'fixture@example.test', verified: true };
+  const defaults = { text: model.id };
+  const manual = createDefaultCreatorServicesConfig();
+  const requestId = `ocreq_${'a'.repeat(48)}`;
+  const fetcher = vi.fn<typeof fetch>(async () => Response.json({}, { status, headers: { 'X-Request-ID': requestId } }));
+  const trace = vi.fn();
+  const source = module.createGatewayCreatorSource({ account: {
+    peekState: () => ({ source: 'gateway', authState: 'signed_in', activationState: 'ready', account, bindingVersion: 'a:1', models: [model], selectedModels: defaults, activationError: null }),
+    modelCredentials: async () => ({ accountId: 'a', transport: 'gateway', modelKey: 'fixture-key', keyVersion: '1', bindingVersion: 'a:1', baseUrl: 'https://gateway.example/v1', models: [model], defaults })
+  }, manual: { read: async () => manual, write: async value => value, reset: async () => manual },
+  getLocalOrigin: () => 'http://127.0.0.1:39999', fetcher, readJobTemplateId: () => feature,
+  telemetry: { traceEnabled: () => true, gatewayCall: trace } });
+  const server = Fastify(); close.push(() => server.close(), () => source.revoke());
+  await source.register(server);
+  await source.runForJob('fixture-job', 'fixture-attempt', async () => {
+    const binding = await source.binding();
+    const response = await server.inject({ method, url: `/internal/krillin-llm/gateway/v1/${resource}`,
+      headers: { Authorization: `Bearer ${binding!.apiKey}` }, ...(method === 'POST' ? { payload: {} } : {}) });
+    expect(response.statusCode).toBe(status);
+  });
+  expect(fetcher).toHaveBeenCalledOnce();
+  const callId = new Headers(fetcher.mock.lastCall?.[1]?.headers).get('X-OC-Call-ID');
+  if (feature === 'stickman-video') {
+    expect(callId).toBeNull();
+    expect(trace).not.toHaveBeenCalled();
+  } else {
+    expect(callId).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/));
+    expect(trace.mock.calls.map(([event]) => event)).toEqual([
+      expect.objectContaining({ event_type: 'request_started', feature, operation, call_id: callId, task_id: 'fixture-job', attempt_id: 'fixture-attempt' }),
+      expect.objectContaining({ event_type: 'request_finished', feature, operation, call_id: callId, gateway_request_id: requestId, http_status: status })
+    ]);
+  }
 });
 
 it('video uses the unified gateway task and preserves its account for query and download', async () => {
@@ -310,4 +401,62 @@ it('video uses the unified gateway task and preserves its account for query and 
   await expect(service.refresh(result.id)).rejects.toThrow();
   binding.accountId = 'a';
   await expect(service.create({ prompt: 'official model duration', provider: 'veo', size: '720x1280', duration: 5 })).resolves.toMatchObject({ status: 'in_progress', videoSize: '720x1280' });
+});
+
+it('keeps the signed-in gateway Veo model and its catalog parameters independent from the Google direct provider', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'oc-gateway-veo-')); close.push(() => rm(root, { recursive: true, force: true }));
+  const model = 'veo-3.1-generate-preview';
+  const requestId = `ocreq_${'c'.repeat(48)}`;
+  const video = Buffer.from('gateway-veo-video');
+  const headers = { 'X-Request-ID': requestId };
+  const fetcher = vi.fn<typeof fetch>(async url => String(url).endsWith('/video/jobs')
+    ? Response.json({ requestId, state: 'waiting_upstream' }, { status: 202, headers })
+    : String(url).endsWith('/result') ? new Response(new Uint8Array(video), { headers })
+      : Response.json({ requestId, state: 'succeeded' }, { headers }));
+  const config = createDefaultCreatorServicesConfig();
+  config.video.veo.apiKey = 'personal-google-key';
+  const read = vi.fn(async () => config);
+  const binding = {
+    accountId: 'a', bindingVersion: 'a:1', baseUrl: 'http://127.0.0.1:39999/internal/krillin-llm/gateway/v1',
+    apiKey: 'gateway-token', models: { video: model },
+    catalog: [{ id: model, modality: 'video' as const, capabilities: [], sizes: ['1024x1024'], durations: [5] }]
+  };
+  const service = createVideoGenerationService({
+    dataDir: root, configStore: { read, write: async value => value, reset: async () => config },
+    fetchImpl: fetcher, gatewaySource: { binding: async () => binding }
+  });
+  const result = await service.create({ prompt: 'Gateway Veo', provider: 'veo', model, size: '1024x1024', duration: 5 });
+  expect(result).toMatchObject({ model, status: 'in_progress', videoSize: '1024x1024', duration: 5 });
+  await expect(service.refresh(result.id)).resolves.toMatchObject({ model, status: 'completed' });
+  expect((await service.read(result.id)).content).toEqual(video);
+  expect(read).not.toHaveBeenCalled();
+  expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+    `${binding.baseUrl}/video/jobs`, `${binding.baseUrl}/requests/${requestId}`, `${binding.baseUrl}/requests/${requestId}/result`
+  ]);
+  expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({ model, size: '1024x1024', duration: 5 });
+  expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('Authorization')).toBe('Bearer gateway-token');
+});
+
+it('keeps a rejected official video task reason without another submission', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'oc-gateway-video-rejected-'));
+  close.push(() => rm(root, { recursive: true, force: true }));
+  const requestId = `ocreq_${'b'.repeat(48)}`;
+  const fetcher = vi.fn<typeof fetch>(async url => String(url).endsWith('/result')
+    ? Response.json({ error: { code: 'upstream_rejected', message: '图片未通过内容安全审核', requestId } },
+      { status: 400, headers: { 'X-Request-ID': requestId } })
+    : Response.json({ requestId, state: 'failed', errorCode: 'video_submit_rejected' },
+      { headers: { 'X-Request-ID': requestId } }));
+  const binding = { accountId: 'a', bindingVersion: 'a:1', baseUrl: 'https://gateway.example/v1', apiKey: 'local-token',
+    models: { video: 'gateway-video' }, catalog: [{ id: 'gateway-video', modality: 'video' as const,
+      capabilities: [], sizes: ['1280x720'], durations: [5] }] };
+  const service = createVideoGenerationService({ dataDir: root,
+    configStore: { read: async () => createDefaultCreatorServicesConfig(), write: async c => c,
+      reset: async () => createDefaultCreatorServicesConfig() }, fetchImpl: fetcher,
+    gatewaySource: { binding: async () => binding } });
+  const result = await service.create({ prompt: 'test', provider: 'seedance', size: '1280x720', duration: 5 });
+  expect(result).toMatchObject({ status: 'failed', publicFacts: { httpStatus: 400,
+    upstreamCode: 'upstream_rejected', upstreamMessage: '图片未通过内容安全审核', requestId } });
+  expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+    'https://gateway.example/v1/video/jobs', `https://gateway.example/v1/requests/${requestId}/result`
+  ]);
 });

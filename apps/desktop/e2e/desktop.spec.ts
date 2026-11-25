@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync
@@ -17,10 +18,12 @@ import {
   resolve
 } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
+import type { CreatorJob } from '@opencreator/protocol';
 import {
   expect,
   test,
@@ -48,7 +51,187 @@ const fakeCodexLauncherSource = join(e2eDir, 'fixtures', 'fake-codex-launcher.go
 
 test.describe.configure({ mode: 'serial' });
 
-test('@package-smoke 官方配音等待异步回执后返回音频', async ({}, testInfo) => {
+test('@package-smoke 字幕转录余额不足时不自动重试，充值后手动重试产出字幕', async ({}, testInfo) => {
+  test.setTimeout(210_000);
+  const account = { id: 'subtitle-test', email: 'subtitle@example.test', verified: true };
+  const models = [
+    { id: 'deepseek-v4-flash', modality: 'text' as const, capabilities: ['chat', 'responses'] },
+    { id: 'whisper-1', modality: 'transcription' as const, capabilities: ['subtitle_timestamps'] }
+  ];
+  const defaults = { text: 'deepseek-v4-flash', transcription: 'whisper-1' };
+  let funded = false;
+  let translations = 0;
+  const submissions: Array<{ key: string; audio: boolean; funded: boolean }> = [];
+  const transcriptionCallIds: string[] = [];
+  const rejectedTraceEvents: Array<Record<string, unknown>> = [];
+  const acceptedTraceIDs = new Set<unknown>();
+  let telemetryAvailable = false;
+  const sourceText = 'Hello world.';
+  const targetText = '你好，世界。';
+  const gateway = createServer(async (request, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    const path = request.url?.split('?')[0];
+    if (path === '/api/v1/client/bootstrap') return response.end(JSON.stringify(bootstrap));
+    if (path === '/api/v1/me') return response.end(JSON.stringify({ account }));
+    if (path === '/api/v1/client/models') return response.end(JSON.stringify({ models, defaults }));
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const payload = Buffer.concat(chunks).toString('utf8');
+    if (path === '/v1/audio/transcriptions' && request.method === 'POST') {
+      const key = String(request.headers['idempotency-key'] ?? '');
+      transcriptionCallIds.push(String(request.headers['x-oc-call-id'] ?? ''));
+      submissions.push({ key, audio: payload.includes('name="file"') && payload.includes('whisper-1'), funded });
+      if (!funded) return response.writeHead(402).end(JSON.stringify({ error: { code: 'credits_insufficient', message: 'Insufficient credits' } }));
+      const id = `ocreq_${createHash('sha256').update(`${account.id}:${key}`).digest('hex').slice(0, 48)}`;
+      return response.writeHead(200, { 'X-Request-ID': id }).end(JSON.stringify({
+        language: 'en', duration: 3, text: sourceText, segments: [{ start: 0.1, end: 2.8, text: sourceText }]
+      }));
+    }
+    if (path === '/v1/chat/completions') {
+      const { messages } = JSON.parse(payload) as { messages: Array<{ content: string }> };
+      const input = JSON.parse(messages.at(-1)?.content.split('Input JSON:\n').at(1) ?? '{}') as {
+        source_text?: string; max_target_characters?: number; max_characters?: number;
+        sentences?: Array<{ sentence_id: string; text: string }>
+      };
+      let content: string;
+      if (input.source_text !== undefined) content = JSON.stringify({ terms: [] });
+      else if (input.max_characters !== undefined) content = JSON.stringify({ corrections: [] });
+      else if (input.max_target_characters !== undefined && input.sentences) {
+        translations++;
+        const sentences = input.sentences;
+        content = JSON.stringify({ sentences: sentences.map(sentence => ({ sentence_id: sentence.sentence_id,
+          segments: [{ source: sentence.text, target: targetText }] })) });
+      } else return response.writeHead(400).end(JSON.stringify({ error: { code: 'unexpected_fixture_prompt' } }));
+      return response.end(JSON.stringify({ id: 'subtitle-test-translation', choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }] }));
+    }
+    if (path === '/telemetry/task-events' && request.method === 'POST') {
+      const { events } = JSON.parse(payload) as { events: Array<Record<string, unknown>> };
+      if (!telemetryAvailable) {
+        rejectedTraceEvents.push(...events);
+        request.socket.destroy();
+        return;
+      }
+      const ids = events.map(event => event.event_id);
+      ids.forEach(id => acceptedTraceIDs.add(id));
+      return response.end(JSON.stringify({ error: 0, data: { acknowledged_event_ids: ids } }));
+    }
+    if (path?.startsWith('/v1/requests/')) return response.writeHead(404).end(JSON.stringify({ error: { code: 'request_not_found' } }));
+    return response.end(JSON.stringify({ items: [] }));
+  });
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`;
+  const bootstrap = {
+    schemaVersion: 3 as const, account, models, defaults, keyVersion: 'subtitle-1', bindingVersion: 'subtitle:1',
+    keyRotation: false, transport: 'gateway' as const, supplier: 'chatanywhere' as const, baseUrl: `${origin}/v1`
+  };
+  let fixture: DesktopFixture | undefined;
+  try {
+    fixture = await launchPackagedDesktop('success', { runtimeMode: 'bundled', gatewayOrigin: origin,
+      telemetryUrl: `${origin}/telemetry`, gatewaySelectedModels: defaults,
+      gatewayCredentials: { ...bootstrap, accessToken: 'subtitle-fixture-access', refreshToken: 'subtitle-fixture-refresh',
+        expiresIn: 900, accessExpiresAt: new Date(Date.now() + 900_000).toISOString() }
+    });
+    const { page } = fixture;
+    await waitForWorkspace(page);
+    await expect.poll(async () => (await runtimeRequest<{ activationState: string }>(page, 'GET', '/gateway/account')).body.activationState).toBe('ready');
+    const { body: { projects } } = await runtimeRequest<{ projects: Array<{ id: string }> }>(page, 'GET', '/projects?status=all');
+    const created = await runtimeRequest<{ job: CreatorJob }>(page, 'POST', '/creator/jobs', {
+      projectId: projects[0]?.id, templateId: 'video-translation', templateVersion: 2, creationKey: 'credits-retry',
+      state: { sourceType: 'file', sourceLanguage: 'en', targetLanguage: 'zh_cn', preferPlatformCaptions: false, dubbing: false, composeVideo: false }
+    });
+    expect(created.body.job).toBeDefined();
+    const { id, revision } = created.body.job;
+    const audio = Buffer.alloc(44 + 3 * 16_000 * 2);
+    audio.write('RIFF');
+    audio.writeUInt32LE(audio.length - 8, 4);
+    audio.write('WAVEfmt ', 8);
+    audio.writeUInt32LE(16, 16);
+    audio.writeUInt16LE(1, 20);
+    audio.writeUInt16LE(1, 22);
+    audio.writeUInt32LE(16_000, 24);
+    audio.writeUInt32LE(32_000, 28);
+    audio.writeUInt16LE(2, 32);
+    audio.writeUInt16LE(16, 34);
+    audio.write('data', 36);
+    audio.writeUInt32LE(audio.length - 44, 40);
+    for (let sample = 0; sample < 48_000; sample++) audio.writeInt16LE(Math.round(9000 * Math.sin(sample * 2 * Math.PI * 440 / 16_000)), 44 + sample * 2);
+    const uploaded = await page.evaluate(async ({ id, revision, bytes }) => {
+      const query = new URLSearchParams({ expectedRevision: String(revision), fileName: 'fixture.wav', mime: 'audio/wav' });
+      const response = await fetch(`/.opencreator/runtime/creator/jobs/${id}/source-video?${query}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/vnd.opencreator.creator-source' }, body: new Uint8Array(bytes)
+      });
+      return { status: response.status, body: await response.json() as { job: CreatorJob } };
+    }, { id, revision, bytes: [...audio] });
+    expect(uploaded).toMatchObject({ status: 201, body: { job: { id } } });
+    const started = await runtimeRequest(page, 'POST', `/creator/jobs/${id}/actions`, {
+      action: 'run-stage', expectedRevision: uploaded.body.job.revision, input: { stageId: 'subtitle', workflow: true }
+    });
+    expect(started.body).toMatchObject({ job: { id } });
+    const readJob = async () => (await runtimeRequest<{ job: CreatorJob }>(page, 'GET', `/creator/jobs/${id}`)).body.job;
+    await expect.poll(async () => (await readJob()).stages.at(-1)).toMatchObject({ status: 'failed', errorCode: 'credits_insufficient' });
+    const failed = (await readJob()).stages.at(-1)!;
+    await page.goto(`opencreator-app://app/#/workbench?tool=video-translation&jobId=${id}&returnTo=projects`);
+    await expect(page.getByText('请充值后重试当前阶段。', { exact: false }).first()).toBeVisible();
+    const retry = page.getByRole('button', { name: '重试当前阶段', exact: true }).first();
+    await expect(retry).toBeEnabled();
+    expect(submissions).toEqual([{ key: expect.stringMatching(/^creator:/), audio: true, funded: false }]);
+    expect(translations).toBe(0);
+    expect(transcriptionCallIds[0]).toMatch(/^[0-9a-f-]{36}$/);
+    const readTrace = async () => (await runtimeRequest<{ events: Array<Record<string, unknown>> }>(page, 'GET', '/telemetry/task-events')).body.events;
+    await expect.poll(readTrace).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event_type: 'task_started', task_id: id }),
+      expect.objectContaining({ event_type: 'request_finished', task_id: id, call_id: transcriptionCallIds[0], http_status: 402 }),
+      expect.objectContaining({ event_type: 'stage_finished', task_id: id, attempt_id: failed.id, code: 'credits_insufficient' })
+    ]));
+    await page.screenshot({ path: testInfo.outputPath('subtitle-credits-insufficient.png') });
+
+    const failedTrace = expect.objectContaining({ event_type: 'stage_finished', attempt_id: failed.id, code: 'credits_insufficient' });
+    await expect.poll(() => rejectedTraceEvents, { timeout: 70_000 }).toEqual(expect.arrayContaining([failedTrace]));
+    expect(await readTrace()).toEqual(expect.arrayContaining([failedTrace]));
+
+    funded = true;
+    await retry.click();
+    await expect.poll(async () => (await readJob()).stages.find(stage => stage.stageId === 'subtitle' && stage.id !== failed.id), { timeout: 30_000 })
+      .toMatchObject({ status: 'succeeded', errorCode: null });
+    const completed = await readJob();
+    expect(completed.stages.filter(stage => stage.stageId === 'subtitle')).toHaveLength(2);
+    expect(submissions).toHaveLength(2);
+    expect(submissions[1]).toMatchObject({ audio: true, funded: true });
+    expect(submissions[1]?.key).not.toBe(submissions[0]?.key);
+    expect(transcriptionCallIds[1]).not.toBe(transcriptionCallIds[0]);
+    expect(translations).toBeGreaterThan(0);
+    for (const [kind, text] of [['source_subtitle', sourceText], ['target_subtitle', targetText], ['bilingual_subtitle', targetText]] as const) {
+      const artifact = completed.artifacts?.find(candidate => candidate.kind === kind && candidate.status === 'completed');
+      expect(artifact, kind).toBeDefined();
+      const srt = await page.evaluate(async ({ id, artifactId }) => {
+        const response = await fetch(`/.opencreator/runtime/creator/jobs/${id}/artifacts/${artifactId}/content`);
+        return { status: response.status, text: await response.text() };
+      }, { id, artifactId: artifact!.id });
+      expect(srt.status).toBe(200);
+      expect(srt.text).toContain(text);
+      expect(srt.text).toMatch(/\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}/);
+    }
+    const taskEvents = async (activePage: Page) => (await runtimeRequest<{ events: Array<Record<string, unknown>> }>(activePage, 'GET', '/telemetry/task-events')).body.events.filter(event => event.task_id === id);
+    await expect.poll(() => taskEvents(page)).toEqual(expect.arrayContaining([failedTrace,
+      expect.objectContaining({ event_type: 'task_state', outcome: 'completed' })]));
+    const pendingIDs = (await taskEvents(page)).map(event => event.event_id);
+    const previous = fixture;
+    await closePackagedApp(previous);
+    fixture = { ...await relaunchPackagedApp(previous), root: previous.root, stateDir: previous.stateDir };
+    await waitForWorkspace(fixture.page);
+    expect((await taskEvents(fixture.page)).map(event => event.event_id)).toEqual(pendingIDs);
+    telemetryAvailable = true;
+    await expect.poll(() => pendingIDs.filter(id => !acceptedTraceIDs.has(id)), { timeout: 70_000 }).toEqual([]);
+    await expect.poll(() => taskEvents(fixture!.page)).toEqual([]);
+    expect(submissions).toHaveLength(2);
+  } finally {
+    if (fixture) await closeFixture(fixture);
+    gateway.closeAllConnections();
+    await new Promise<void>(resolve => gateway.close(() => resolve()));
+  }
+});
+
+test('@package-smoke 官方配音试听加载公开样本且不触发付费合成', async ({}, testInfo) => {
   const account = { id: 'speech-test', email: 'speech@example.test', verified: true };
   const models = [
     { id: 'text-model', modality: 'text' as const, capabilities: ['chat'] },
@@ -56,7 +239,7 @@ test('@package-smoke 官方配音等待异步回执后返回音频', async ({}, 
   ];
   const requestId = 'ocreq_packaged_speech';
   let submissions = 0;
-  let statusQueries = 0;
+  const samples: Array<{ model: string | null; voice: string | null; language: string | null; authorization?: string }> = [];
   const gateway = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
     const path = request.url?.split('?')[0];
@@ -66,12 +249,12 @@ test('@package-smoke 官方配音等待异步回执后返回音频', async ({}, 
     else if (path === '/v1/audio/speech') {
       submissions++;
       response.writeHead(202, { 'X-Request-ID': requestId }).end(JSON.stringify({ requestId, state: 'submitting', billingState: 'reserved' }));
-    } else if (path === `/v1/requests/${requestId}`) {
-      statusQueries++;
-      response.end(JSON.stringify({ requestId, state: statusQueries === 1 ? 'waiting_upstream' : 'succeeded' }));
-    } else if (path === `/v1/requests/${requestId}/result`) {
-      response.setHeader('Content-Type', 'audio/wav');
-      response.end('RIFF-packaged-speech');
+    } else if (path === '/api/v1/voice-previews') {
+      const query = new URL(request.url!, 'http://localhost').searchParams;
+      samples.push({ model: query.get('model'), voice: query.get('voice'), language: query.get('language'), authorization: request.headers.authorization });
+      response.setHeader('Content-Type', 'audio/mpeg');
+      response.setHeader('Content-Language', 'en');
+      response.end('ID3-packaged-speech');
     } else response.end(JSON.stringify({ items: [] }));
   });
   await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve));
@@ -98,11 +281,11 @@ test('@package-smoke 官方配音等待异步回执后返回音频', async ({}, 
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: 'openai', voiceId: 'marin', text: 'Hello' }) });
       return { status: response.status, contentType: response.headers.get('content-type'), content: await response.text() };
     });
-    expect(audio).toMatchObject({ status: 200, contentType: 'audio/wav', content: 'RIFF-packaged-speech' });
-    expect(submissions).toBe(1);
-    expect(statusQueries).toBe(2);
-    await testInfo.attach('speech-receipt.json', { body: JSON.stringify({ submissions, statusQueries, audio }), contentType: 'application/json' });
-    await fixture.page.screenshot({ path: testInfo.outputPath('speech-receipt-workspace.png') });
+    expect(audio).toMatchObject({ status: 200, contentType: 'audio/mpeg', content: 'ID3-packaged-speech' });
+    expect(samples).toEqual([{ model: 'speech-model', voice: 'marin', language: 'en', authorization: undefined }]);
+    expect(submissions).toBe(0);
+    await testInfo.attach('voice-preview.json', { body: JSON.stringify({ submissions, samples, audio }), contentType: 'application/json' });
+    await fixture.page.screenshot({ path: testInfo.outputPath('voice-preview-workspace.png') });
   } finally {
     if (fixture) await closeFixture(fixture);
     gateway.closeAllConnections();
@@ -371,7 +554,7 @@ test('@package-smoke 充值回跳进入个人中心并以网关订单确认到�
   }
 });
 
-test('@package-smoke 授权回调唤起个人中心，模型初始化期间立即显示登录态', async ({}, testInfo) => {
+test('@package-smoke 授权回调保留图像生成工作台和草稿，模型初始化期间更新登录态', async ({}, testInfo) => {
   let approved = false;
   let tokenRequests = 0;
   let releaseBootstrap!: () => void;
@@ -406,10 +589,11 @@ test('@package-smoke 授权回调唤起个人中心，模型初始化期间立�
   try {
     fixture = await launchPackagedDesktop('success', { gatewayOrigin: origin });
     await waitForWorkspace(fixture.page);
+    await navigateToAppRoute(fixture.page, '#/workbench?tool=image-generation');
+    const prompt = fixture.page.getByRole('textbox', { name: '提示词' });
+    await prompt.fill('A sunlit studio portrait');
     const grant = await runtimeRequest(fixture.page, 'POST', '/gateway/auth/start', {});
     expect(grant.status).toBe(200);
-    await navigateToAppRoute(fixture.page, '#/account');
-    await expect(fixture.page.getByText('请在浏览器中完成登录')).toBeVisible();
     if (process.platform === 'win32') {
       if (fixture.process.pid === undefined) throw new Error('Desktop process ID is unavailable');
       execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
@@ -434,23 +618,22 @@ test('@package-smoke 授权回调唤起个人中心，模型初始化期间立�
     const checks: string[] = [];
     fixture.page.on('request', request => { if (request.url().endsWith('/gateway/auth/check')) checks.push(request.url()); });
     await launchSecondInstance(fixture, ['opencreator://auth/complete']);
-    await expect(fixture.page).toHaveURL(/#\/account\?login=complete$/);
+    await expect(fixture.page).toHaveURL(/#\/workbench\?tool=image-generation$/);
     await expect.poll(() => fixture!.page.evaluate(() => document.visibilityState)).toBe('visible');
     await expect.poll(() => checks.length).toBeGreaterThan(0);
-    await expect(fixture.page.getByRole('region', { name: 'OpenCreator 账户', exact: true }).getByRole('status')).toHaveText('已登录', { timeout: 10_000 });
-    await expect(fixture.page.getByText('官方模型服务正在连接', { exact: true })).toBeVisible();
+    await expect(prompt).toHaveValue('A sunlit studio portrait');
+    await expect(fixture.page.getByRole('main', { name: '个人中心' })).toHaveCount(0);
+    await expect.poll(async () => (await runtimeRequest<{ authState: string }>(fixture!.page, 'GET', '/gateway/account')).body.authState).toBe('signed_in');
     const state = await runtimeRequest<{ authState: string; activationState: string }>(fixture.page, 'GET', '/gateway/account');
     expect(state.body).toMatchObject({ authState: 'signed_in', activationState: 'loading' });
     expect(tokenRequests).toBe(1);
-    await fixture.page.screenshot({ path: testInfo.outputPath('login-models-loading.png') });
+    await fixture.page.screenshot({ path: testInfo.outputPath('login-return-workbench.png') });
     releaseBootstrap();
-    await expect(fixture.page.getByRole('heading', { name: account.email, exact: true })).toBeVisible();
-    await expect(fixture.page.getByRole('region', { name: 'OpenCreator 账户', exact: true }).getByRole('status')).toHaveText('已登录');
-    await expect(fixture.page.getByText('官方模型服务暂不可用', { exact: true })).toBeVisible();
-    await expect(fixture.page.getByRole('button', { name: '模型设置', exact: true })).toBeEnabled();
+    await expect.poll(async () => (await runtimeRequest<{ activationState: string }>(fixture!.page, 'GET', '/gateway/account')).body.activationState).toBe('blocked');
     const signedIn = await runtimeRequest(fixture.page, 'GET', '/gateway/account');
     expect(signedIn.body).toMatchObject({ authState: 'signed_in', activationState: 'blocked', account });
     expect(JSON.stringify(signedIn.body)).not.toMatch(/private-access|private-refresh|private-device-secret/);
+    await expect(prompt).toHaveValue('A sunlit studio portrait');
   } finally {
     releaseBootstrap();
     if (fixture) await closeFixture(fixture);
@@ -459,7 +642,7 @@ test('@package-smoke 授权回调唤起个人中心，模型初始化期间立�
   }
 });
 
-test('@package-smoke 全新账号启动时引导配置 Agent，跳过后可重新配置', async () => {
+test('@package-smoke 全新资料首次展示引导，跳过后只在常规设置配置 Agent', async () => {
   const fixture = await launchPackagedDesktop('success', { signedOut: true });
   try {
     await waitForRuntimeReady(fixture.page, false);
@@ -471,7 +654,70 @@ test('@package-smoke 全新账号启动时引导配置 Agent，跳过后可重�
     await fixture.page.getByRole('button', { name: /AI 服务/ }).click();
     await expect(fixture.page.getByText('Agent 尚未配置，无法发送任务。')).toBeVisible();
     await fixture.page.getByRole('button', { name: '配置 Agent' }).click();
-    await expect(fixture.page.getByRole('region', { name: '开始使用 Agent' })).toBeVisible();
+    await expect(fixture.page.getByRole('region', { name: 'Codex Agent' }).getByLabel('API Key')).toBeVisible();
+    await expect(fixture.page.getByRole('region', { name: '开始使用 Agent' })).toHaveCount(0);
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test('@package-smoke first run defaults to English and switches language across setup and settings', async ({}, testInfo) => {
+  const fixture = await launchPackagedDesktop('success', {
+    signedOut: true,
+    uiLanguage: null,
+    browserLanguage: 'zh-CN',
+    gatewayOrigin: 'http://127.0.0.1:9'
+  });
+  try {
+    await fixture.page.waitForURL(url => url.protocol === 'opencreator-app:' && url.hostname === 'app');
+    await expect.poll(async () => (await fixture.page.evaluate(() => window.opencreatorDesktop?.readBootstrapState()))?.phase).toBe('ready');
+    await expect(fixture.page.locator('html')).toHaveAttribute('lang', 'en-US');
+    await expect(fixture.page.getByRole('region', { name: 'Get started with Agent' })).toBeVisible();
+    await expect(fixture.page.getByRole('button', { name: 'Sign-in mode' })).toBeVisible();
+    await expect(fixture.page.getByRole('button', { name: 'Local mode' })).toBeVisible();
+    const englishSelector = fixture.page.getByRole('combobox', { name: 'Display language' });
+    await expect(englishSelector).toHaveValue('English');
+    await expect(englishSelector).toHaveAttribute('data-value', 'en-US');
+    await expect.poll(async () => (await runtimeRequest<{ settings: { language: string } }>(fixture.page, 'GET', '/settings/ui')).body.settings.language).toBe('en-US');
+    await fixture.page.screenshot({ path: testInfo.outputPath('first-run-english.png') });
+
+    await englishSelector.click();
+    await fixture.page.locator('[role="option"][data-value="zh-CN"]').click();
+    await expect(fixture.page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+    await expect(fixture.page.getByRole('button', { name: '登录模式' })).toBeVisible();
+    await expect(fixture.page.getByRole('button', { name: '本地模式', exact: true })).toBeVisible();
+    const chineseSelector = fixture.page.getByRole('combobox', { name: '显示语言' });
+    await expect(chineseSelector).toHaveValue('简体中文 · Chinese (Simplified)');
+    await fixture.page.screenshot({ path: testInfo.outputPath('first-run-chinese.png') });
+    const originalViewport = await fixture.page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    await fixture.page.setViewportSize({ width: 375, height: 812 });
+    await expect(chineseSelector).toBeVisible();
+    expect(await chineseSelector.evaluate(element => {
+      const input = element as HTMLInputElement;
+      const style = getComputedStyle(input);
+      const canvas = document.createElement('canvas').getContext('2d');
+      if (canvas === null) return false;
+      canvas.font = style.font;
+      return canvas.measureText(input.value).width <= input.clientWidth
+        - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    })).toBe(true);
+    expect(await fixture.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await fixture.page.screenshot({ path: testInfo.outputPath('first-run-chinese-narrow.png') });
+    await fixture.page.setViewportSize(originalViewport);
+    await expect.poll(async () => (await runtimeRequest<{ settings: { language: string } }>(fixture.page, 'GET', '/settings/ui')).body.settings.language).toBe('zh-CN');
+
+    await chineseSelector.click();
+    await fixture.page.locator('[role="option"][data-value="en-US"]').click();
+    await expect(fixture.page.locator('html')).toHaveAttribute('lang', 'en-US');
+    await expect.poll(async () => (await runtimeRequest<{ settings: { language: string } }>(fixture.page, 'GET', '/settings/ui')).body.settings.language).toBe('en-US');
+    await fixture.page.getByRole('button', { name: 'Sign-in mode' }).click();
+    await expect(fixture.page.getByRole('button', { name: 'Sign in to OpenCreator' })).toBeVisible();
+    await fixture.page.getByRole('button', { name: 'Back' }).click();
+    await fixture.page.getByRole('button', { name: 'Local mode' }).click();
+    await expect(fixture.page.getByRole('combobox', { name: 'Provider' })).toBeVisible();
+    await fixture.page.getByRole('button', { name: 'Continue locally and set up later' }).click();
+    await fixture.page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await expect(fixture.page.getByRole('combobox', { name: 'Display language' })).toHaveValue('English');
   } finally {
     await closeFixture(fixture);
   }
@@ -1566,6 +1812,56 @@ test('@package-smoke 关闭后隐藏保留本地服务，重新打开后可以�
   }
 });
 
+test('@package-smoke 无代理的视频下载事件流反复取消后仍能加载生成历史', async () => {
+  const fixture = await launchPlatformProbeDesktop('success');
+  try {
+    await waitForWorkspace(fixture.page);
+    const projects = await runtimeRequest<{ projects: Array<{ id: string; name: string }> }>(
+      fixture.page, 'GET', '/projects?status=all'
+    );
+    const projectId = projects.body.projects.find(project => project.name === 'Default project')!.id;
+    const created = await runtimeRequest<{ job: { id: string } }>(fixture.page, 'POST', '/creator/jobs', {
+      projectId,
+      templateId: 'video-download',
+      state: { sourceUrl: 'https://www.youtube.com/watch?v=bzLvyhNnpeo' }
+    });
+    expect(created.status).toBe(201);
+    // A draft is sufficient: the reported hang happens before a download stage
+    // starts, and local history must stay usable regardless of source connectivity.
+    for (const cancelReader of [false, true]) {
+      const completed = await fixture.page.evaluate(async ({ jobId, cancelReader }) => {
+        for (let i = 0; i < 20; i++) {
+          const controller = new AbortController();
+          const response = await fetch(`/.opencreator/runtime/creator/jobs/${jobId}/events`, {
+            signal: controller.signal
+          });
+          const reader = response.body!.getReader();
+          await reader.read();
+          if (cancelReader) await reader.cancel();
+          controller.abort();
+          const health = await fetch('/.opencreator/runtime/healthz', { signal: AbortSignal.timeout(2_000) });
+          if (!health.ok) throw new Error('Runtime health failed after cancelling SSE');
+          await health.json();
+        }
+        return 20;
+      }, { jobId: created.body.job.id, cancelReader });
+      expect(completed).toBe(20);
+    }
+    const history = await runtimeRequest<{ jobs: Array<{ id: string }> }>(
+      fixture.page, 'GET', `/creator/jobs?projectId=${encodeURIComponent(projectId)}`
+    );
+    expect(history.status).toBe(200);
+    expect(history.body.jobs.some(job => job.id === created.body.job.id)).toBe(true);
+    await navigateToAppRoute(fixture.page, '#/projects');
+    const historyPage = fixture.page.locator('.dashboard-generation-history-page');
+    await expect(historyPage).toBeVisible();
+    await expect(historyPage.getByText('正在加载生成记录', { exact: true })).toHaveCount(0);
+    await expect(historyPage.getByRole('alert')).toHaveCount(0);
+  } finally {
+    await closeFixture(fixture);
+  }
+});
+
 test('@package-smoke 创作模块连接内嵌 Runtime 并使用默认项目', async ({}, testInfo) => {
   const fixture = await launchPackagedDesktop('success');
   try {
@@ -1585,7 +1881,7 @@ test('@package-smoke 创作模块连接内嵌 Runtime 并使用默认项目', as
       ['video-download', '视频下载'],
       ['image-generation', '图像生成'],
       ['video-generation', '视频生成'],
-      ['smart-dubbing', '智能配音'],
+      ['smart-dubbing', '文本转语音'],
       ['cover-generator', '封面生成'],
       ['stickman-video', '火柴人动画']
     ]) {
@@ -1595,6 +1891,94 @@ test('@package-smoke 创作模块连接内嵌 Runtime 并使用默认项目', as
       await fixture.page.screenshot({ path: testInfo.outputPath(`${tool}.png`) });
     }
   } finally {
+    await closeFixture(fixture);
+  }
+});
+
+test('@package-smoke 字幕 Worker 和 WASM 在实际 App 的 CSP 下加载并渲染', async ({}, testInfo) => {
+  test.setTimeout(180_000);
+  const fixture = await launchPackagedDesktop('success', { runtimeMode: 'bundled' });
+  const loaded: string[] = [];
+  const errors: string[] = [];
+  const consoleErrors: string[] = [];
+  const failedRequests: string[] = [];
+  const requested: string[] = [];
+  const failedResponses: Array<{ url: string; status: number }> = [];
+  const timings: Record<string, number> = {};
+  fixture.page.on('request', request => requested.push(request.url()));
+  fixture.page.on('response', response => {
+    loaded.push(response.url());
+    if (response.status() >= 400) failedResponses.push({ url: response.url(), status: response.status() });
+  });
+  fixture.page.on('pageerror', error => errors.push(error.message));
+  fixture.page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
+  fixture.page.on('requestfailed', request => failedRequests.push(`${request.url()}: ${request.failure()?.errorText}`));
+  try {
+    await waitForWorkspace(fixture.page);
+    // A fresh profile hashes the complete bundled Runtime in the background.
+    // Its cache is written only after every resource has passed verification.
+    const verificationStartedAt = Date.now();
+    const verificationCache = join(fixture.root, '.opencreator', 'data', 'runtime-verification', 'krillinai.json');
+    await expect.poll(() => existsSync(verificationCache), {
+      message: 'Bundled Creator Runtime integrity verification must complete before subtitle compilation',
+      timeout: 120_000,
+      intervals: [100, 250, 500, 1_000]
+    }).toBe(true);
+    timings.runtimeVerificationMs = Date.now() - verificationStartedAt;
+    expect(JSON.parse(readFileSync(verificationCache, 'utf8')).files.length).toBeGreaterThan(0);
+    await fixture.page.setViewportSize({ width: 1440, height: 900 });
+    const projects = await runtimeRequest<{ projects: Array<{ id: string }> }>(fixture.page, 'GET', '/projects?status=all');
+    const created = await runtimeRequest<{ job: { id: string } }>(fixture.page, 'POST', '/creator/jobs', {
+      projectId: projects.body.projects[0]!.id, templateId: 'video-translation', templateVersion: 2, creationKey: 'packaged-subtitle-renderer',
+      state: { sourceType: 'file', sourceLanguage: 'en', targetLanguage: 'zh_cn', composeVideo: true, workspacePhase: 'result', resultVersion: 1 }
+    });
+    expect(created.status).toBe(201);
+    const jobId = created.body.job.id;
+    const videoPath = join(fixture.root, '.opencreator', 'creator', 'jobs', jobId, 'source.mp4');
+    mkdirSync(dirname(videoPath), { recursive: true });
+    const resources = process.platform === 'darwin'
+      ? resolve(dirname(packagedExecutable(desktopDir)), '../Resources')
+      : join(dirname(packagedExecutable(desktopDir)), 'resources');
+    const ffmpeg = join(resources, 'creator-runtime', 'krillinai', 'bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    execFileSync(ffmpeg, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x202020:s=640x360:d=2:r=25', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', videoPath], { windowsHide: true });
+    const database = new DatabaseSync(join(fixture.root, '.opencreator', 'data', 'app.sqlite'));
+    try {
+      const row = database.prepare('SELECT state_json, created_at FROM creator_jobs WHERE id = ?').get(jobId)!;
+      const state = JSON.parse(String(row.state_json));
+      const sourceId = 'packaged-subtitle-source';
+      const subtitleId = 'packaged-subtitle-target';
+      const insert = database.prepare('INSERT INTO creator_artifacts (id, job_id, kind, version, status, path, metadata_json) VALUES (?, ?, ?, 1, ?, ?, ?)');
+      insert.run(sourceId, jobId, 'source_video', 'completed', videoPath, JSON.stringify({ fileName: 'source.mp4', width: 640, height: 360, resultVersion: 1 }));
+      insert.run(subtitleId, jobId, 'target_subtitle', 'completed', null, JSON.stringify({ resultVersion: 1,
+        cues: [{ id: 1, start: '00:00:00,000', end: '00:00:02,000', text: '字幕渲染测试' }] }));
+      state.resultSnapshots = [{ version: 1, createdAt: row.created_at, action: 'stage-succeeded', stageId: 'subtitle', description: 'Subtitle translation',
+        artifactRefs: { source_video: [sourceId], target_subtitle: [subtitleId] }, changedArtifactIds: [subtitleId], staleArtifactIds: [], state: { ...state } }];
+      database.prepare('UPDATE creator_jobs SET status = ?, revision = revision + 1, state_json = ? WHERE id = ?').run('completed', JSON.stringify(state), jobId);
+    } finally { database.close(); }
+    // Measure compilation separately from cold Runtime verification and rendering.
+    const compilationStartedAt = Date.now();
+    const compilation = fixture.page.waitForResponse(response => response.url().endsWith('/creator/subtitle-render/prepare'), { timeout: 60_000 });
+    await navigateToAppRoute(fixture.page, `#/workbench?tool=video-translation&jobId=${created.body.job.id}`);
+    expect((await compilation).status()).toBe(200);
+    timings.compilationMs = Date.now() - compilationStartedAt;
+    const renderingStartedAt = Date.now();
+    const composition = fixture.page.locator('.subtitle-composition-preview');
+    await expect(composition).toHaveAttribute('data-status', 'ready');
+    timings.renderingMs = Date.now() - renderingStartedAt;
+    await expect(composition.locator('canvas')).toBeVisible();
+    expect(loaded.some(url => url.includes('/subtitle-render/fonts/'))).toBe(true);
+    expect(loaded.some(url => /\/assets\/worker-.*\.js$/.test(url))).toBe(true);
+    expect(loaded.some(url => /\.wasm$/.test(url))).toBe(true);
+    expect(errors).toEqual([]);
+    await fixture.page.waitForTimeout(300);
+    await composition.screenshot({ path: testInfo.outputPath('packaged-subtitle-preview.png') });
+  } finally {
+    const subtitleResource = (url: string) => /\/subtitle-render\/|\/assets\/(?:subtitle-renderer|worker-)|\.wasm$/.test(url);
+    await testInfo.attach('subtitle-renderer-diagnostics.json', {
+      body: JSON.stringify({ timings, loaded: loaded.filter(subtitleResource), requested: requested.filter(subtitleResource), errors, consoleErrors, failedRequests, failedResponses }, null, 2), contentType: 'application/json'
+    });
+    const desktopLog = join(fixture.root, '.opencreator', 'logs', 'desktop-main.log');
+    if (existsSync(desktopLog)) await testInfo.attach('subtitle-desktop-main.log', { path: desktopLog, contentType: 'text/plain' });
     await closeFixture(fixture);
   }
 });
@@ -1775,9 +2159,11 @@ async function launchPackagedDesktop(
     gatewayCredentials?: GatewayCredentials;
     gatewaySelectedModels?: Record<string, string>;
     proxy?: string;
+    uiLanguage?: 'zh-CN' | null;
+    browserLanguage?: string;
   } = {}
 ): Promise<DesktopFixture> {
-  const root = mkdtempSync(join(tmpdir(), 'opencreator-desktop-e2e-'));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'opencreator-desktop-e2e-'));
   const binDir = options.codexLocation === 'nvm'
     ? join(root, '.nvm', 'versions', 'node', 'v22.14.0', 'bin')
     : options.codexLocation === 'chatgpt-app'
@@ -1822,7 +2208,8 @@ async function launchPackagedDesktop(
     writeOpenCreatorConfig(
       join(root, '.opencreator'),
       join(binDir, process.platform === 'win32' ? 'codex.exe' : 'codex'),
-      options.runtimeMode ?? 'external'
+      options.runtimeMode ?? 'external',
+      options.uiLanguage === undefined ? 'zh-CN' : options.uiLanguage
     );
   }
   if (options.proxy) {
@@ -1851,7 +2238,8 @@ async function launchPackagedDesktop(
     executablePath: packagedExecutable(desktopDir),
     args: [
       `--user-data-dir=${userData}`,
-      '--disable-gpu'
+      '--disable-gpu',
+      ...(options.browserLanguage ? [`--lang=${options.browserLanguage}`] : [])
     ],
     env: {
       ...withoutElectronRunAsNode(process.env),
@@ -1894,7 +2282,8 @@ async function launchPackagedDesktop(
 function writeOpenCreatorConfig(
   productHome: string,
   codexBin: string,
-  runtimeMode: 'bundled' | 'external'
+  runtimeMode: 'bundled' | 'external',
+  uiLanguage: 'zh-CN' | null
 ): void {
   mkdirSync(productHome, { recursive: true });
   writeFileSync(join(productHome, 'config.toml'), [
@@ -1907,6 +2296,7 @@ function writeOpenCreatorConfig(
     '[runtime]',
     `codex_mode = ${JSON.stringify(runtimeMode)}`,
     `external_codex_bin = ${JSON.stringify(codexBin)}`,
+    ...(uiLanguage === null ? [] : ['', '[ui]', `language = ${JSON.stringify(uiLanguage)}`]),
     ''
   ].join('\n'));
 }
@@ -1976,16 +2366,16 @@ async function waitForRuntimeReady(page: Page, confirmSetup = true): Promise<voi
   })).toBe('ready');
   const confirmed = await page.evaluate(() => window.localStorage.getItem('opencreator.agent-setup-confirmed.v1') !== null);
   if (confirmed) return;
-  const setup = page.getByRole('region', { name: '开始使用 Agent' });
+  const setup = page.getByRole('region', { name: /^(开始使用 Agent|Get started with Agent)$/ });
   await setup.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => undefined);
   if (!await setup.isVisible()) return;
-  const localMode = page.getByRole('button', { name: '本地模式', exact: true });
+  const localMode = page.getByRole('button', { name: /^(本地模式|Local mode)$/ });
   if (await localMode.isVisible()) await localMode.click();
   if (!confirmSetup) return;
-  const useLocalCodex = page.getByRole('button', { name: '使用本机 Codex，继续' });
+  const useLocalCodex = page.getByRole('button', { name: /^(使用本机 Codex，继续|Use local Codex and continue)$/ });
   if (await useLocalCodex.isVisible()) await useLocalCodex.click();
   await setup.waitFor({ state: 'hidden', timeout: 3_000 }).catch(() => undefined);
-  if (await setup.isVisible()) await page.getByRole('button', { name: '稍后配置，进入本地模式' }).click();
+  if (await setup.isVisible()) await page.getByRole('button', { name: /^(稍后配置，进入本地模式|Continue locally and set up later)$/ }).click();
 }
 
 async function runtimeRequest<T>(

@@ -1,14 +1,17 @@
 import type { CreatorJob } from '@opencreator/protocol';
-import { CheckCircle2, FileVideo, LoaderCircle, Plus, RefreshCw, X } from 'lucide-react';
+import { CheckCircle2, FileVideo, Link2, LoaderCircle, Plus, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
+import { IssueNotice } from '../issues/IssuePresenter.js';
+import { useGenerationAccess } from './DashboardGenerationAccess.js';
 import type { CreatorWebService } from '../../services/creator-service.js';
 import {
   CreatorSessionProvider,
   useCreatorSession,
   type CreatorSessionContextValue
 } from './creator-session-store.js';
-import VideoDownloadWorkspace from './VideoDownloadWorkspace.js';
+import VideoDownloadWorkspace, { formatDownloadError } from './VideoDownloadWorkspace.js';
+import { useCreatorRecoveryCopy } from './creator-recovery-copy.js';
 import SupportedVideoSources from './SupportedVideoSources.js';
 import VideoDownloadThumbnail from './VideoDownloadThumbnail.js';
 import {
@@ -24,6 +27,7 @@ import {
 export type VideoDownloadBatchView = {
   jobs: CreatorJob[];
   hasSelectedSource: boolean;
+  hasMultipleSources: boolean;
   toolbarActions: ReactNode;
   editor: ReactNode;
   sourceList: ReactNode;
@@ -37,6 +41,8 @@ export default function VideoDownloadBatchWorkspace(props: ComponentProps<typeof
 }) {
   const root = useCreatorSession();
   const l = useLocalizedCopy();
+  const recoveryCopy = useCreatorRecoveryCopy();
+  const requireGenerationAccess = useGenerationAccess();
   const [jobs, setJobs] = useState<CreatorJob[]>([]);
   const [selectedId, setSelectedId] = useState(ROOT);
   const [editorOpen, setEditorOpen] = useState(() => downloadSourceForJob({ ...root.job, state: root.state }) === undefined
@@ -139,6 +145,7 @@ export default function VideoDownloadBatchWorkspace(props: ComponentProps<typeof
 
   async function addLink() {
     if (busyRef.current || loading) return;
+    if (!requireGenerationAccess()) return;
     const parsed = parseDownloadLink(linksText);
     if (parsed.error) {
       setError(linkError(parsed.error));
@@ -210,7 +217,8 @@ export default function VideoDownloadBatchWorkspace(props: ComponentProps<typeof
     try {
       session.clearError();
       const latest = session.job.stages.at(-1);
-      if ((latest?.status === 'canceled' || latest?.status === 'interrupted') && source.job.artifacts.some(artifact => artifact.kind === 'download_probe')) {
+      if ((latest?.status === 'canceled' || latest?.status === 'interrupted') && latest.progress.downloadControl !== 'canceled'
+        && source.job.artifacts.some(artifact => artifact.kind === 'download_probe')) {
         await session.resumeJob();
       } else if (latest?.status === 'failed' && latest.stageId === 'download'
         && typeof latest.progress.optionId === 'string'
@@ -252,7 +260,10 @@ export default function VideoDownloadBatchWorkspace(props: ComponentProps<typeof
     <ul className="video-download-source-list" aria-label={l('视频链接列表', 'Video links')}>
       {sources.map(source => {
         const active = source.status === 'analyzing' || source.status === 'downloading' || retryingIds.has(source.id);
-        const failed = source.status === 'failed' || jobErrors[source.id] !== undefined;
+        const sourceError = jobErrors[source.id];
+        const failed = source.status === 'failed' || sourceError !== undefined;
+        const showRowIssue = failed && sources.length > 1;
+        const failedStage = source.job.stages.at(-1)?.status === 'failed' ? source.job.stages.at(-1) : undefined;
         const status = failed ? l('失败', 'Failed') : {
           waiting: l('待解析', 'Waiting'), analyzing: l('解析中', 'Analyzing'), ready: l('可下载', 'Ready'),
           downloading: l('下载中', 'Downloading'), completed: l('已完成', 'Completed'), failed: l('失败', 'Failed'), canceled: l('已停止', 'Stopped')
@@ -262,7 +273,7 @@ export default function VideoDownloadBatchWorkspace(props: ComponentProps<typeof
             onClick={() => setSelectedId(source.id === root.job.id ? ROOT : source.id)} title={jobErrors[source.id] ?? source.url}>
             {source.thumbnail ? <VideoDownloadThumbnail key={source.thumbnailArtifactId} src={source.thumbnail} alt=""
               load={source.thumbnailArtifactId ? () => props.service.openDownloadThumbnail(source.id, source.thumbnailArtifactId!) : undefined} /> : <FileVideo size={24} aria-hidden="true" />}
-            <span><strong>{source.title}</strong><small>{status}{source.percent === undefined ? '' : ` · ${Math.round(source.percent)}%`}</small></span>
+            <span><strong>{source.title}</strong><small>{status}</small></span>
           </button>
           {failed || source.status === 'waiting' || source.status === 'canceled' ? <button className="video-download-source-action" type="button"
             disabled={busy || active} onClick={() => void retrySource(source)} aria-label={`${l('重试', 'Retry')} ${source.title}`} title={l('重试', 'Retry')}>
@@ -272,6 +283,12 @@ export default function VideoDownloadBatchWorkspace(props: ComponentProps<typeof
             onClick={() => void removeSource(source)} aria-label={`${l('移除链接', 'Remove link')} ${source.title}`} title={l('移除链接', 'Remove link')}>
             <X size={15} aria-hidden="true" />
           </button>
+          {showRowIssue ? <div className="video-download-source-issue">
+            <IssueNotice compact
+              title={failedStage?.stageId === 'download' ? recoveryCopy.downloadFailed : recoveryCopy.analysisFailed}
+              description={formatDownloadError(sourceError ?? `${failedStage?.errorCode ?? ''}: ${failedStage?.errorMessage ?? ''}`, l)}
+            />
+          </div> : null}
         </li>;
       })}
     </ul>
@@ -281,7 +298,8 @@ export default function VideoDownloadBatchWorkspace(props: ComponentProps<typeof
       {sources.length === 0 ? <SupportedVideoSources label={l('支持的视频来源', 'Supported video sources')} /> : null}
       <label htmlFor="video-download-add-links">{l('视频链接', 'Video URL')}</label>
       <div className="video-download-link-input" data-valid={validLink || undefined}>
-        <input id="video-download-add-links" ref={inputRef} value={linksText} disabled={busy} type="text" inputMode="url"
+        <Link2 className="video-download-link-icon" size={18} strokeWidth={1.8} aria-hidden="true" />
+        <input id="video-download-add-links" ref={inputRef} value={linksText} disabled={busy} type="text" inputMode="url" autoComplete="off"
           aria-invalid={inputError && parsedLink.error ? true : undefined}
           aria-describedby={inputError ? 'video-download-link-error' : validLink ? 'video-download-link-valid' : undefined}
           onChange={event => { setLinksText(event.target.value); setError(''); setLinkTouched(false); }}
@@ -313,6 +331,7 @@ export default function VideoDownloadBatchWorkspace(props: ComponentProps<typeof
   </>;
   const batch: VideoDownloadBatchView = {
     jobs: allJobs, hasSelectedSource: sources.some(source => source.id === activeJobId), sourceList, editor,
+    hasMultipleSources: sources.length > 1,
     resolveSession,
     toolbarActions: hasAnalyzedVideo ? <button type="button" className="video-download-add-button" disabled={busy} onClick={() => setEditorOpen(value => !value)} aria-expanded={editorOpen} aria-controls={editorOpen ? 'video-download-add-links' : undefined}><Plus size={16} aria-hidden="true" />{l('添加链接', 'Add link')}</button> : null
   };

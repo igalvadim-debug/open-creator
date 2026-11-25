@@ -1,3 +1,4 @@
+import AppSelect from '../../components/forms/Select.js';
 import {
   readCreatorResultSnapshots,
   type CreatorArtifact,
@@ -33,7 +34,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { TtsVoicePicker } from '../../components/tts/TtsVoicePicker.js';
-import { useOfficialServices } from './official-services.js';
+import { OfficialTaskModelFields, useOfficialServices } from './official-services.js';
 import NativeSelect from '../../components/forms/NativeSelect.js';
 import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
 import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
@@ -296,7 +297,10 @@ export default function StickmanVideoWorkspace(props: {
       setImageConfigurationStatus(!officialImage.ready ? 'unavailable' : officialImage.model?.capabilities.includes('edit') ? 'configured' : 'unsupported');
       if (scriptArtifact === undefined) {
         const voices = officialSpeech.model?.voices ?? [];
-        session.updateDraft({ ttsProvider: 'openai', ttsModel: officialSpeech.model?.id ?? '', voiceCode: voices.includes(voiceCode) ? voiceCode : voices[0] ?? '', voiceName: voices.includes(voiceCode) ? voiceName : voices[0] ?? '' });
+        session.updateDraft(
+          { ttsProvider: 'openai', ttsModel: officialSpeech.model?.id ?? '', voiceCode: voices.includes(voiceCode) ? voiceCode : voices[0] ?? '', voiceName: voices.includes(voiceCode) ? voiceName : voices[0] ?? '' },
+          { persist: job.id.startsWith('pending:') ? false : undefined, userEdited: false }
+        );
       }
       return;
     }
@@ -338,7 +342,7 @@ export default function StickmanVideoWorkspace(props: {
           ttsModel: providerConfig?.model ?? '',
           voiceCode: configured ? providerConfig?.defaultVoiceId ?? '' : '',
           voiceName: configured ? providerConfig?.defaultVoiceId ?? '' : ''
-        });
+        }, { persist: job.id.startsWith('pending:') ? false : undefined, userEdited: false });
       })
       .catch(cause => {
         if (active) {
@@ -735,6 +739,7 @@ export default function StickmanVideoWorkspace(props: {
     >
       <div className="creator-tool-stack stickman-tool-stack">
         <div className="stickman-tool-top">
+          <OfficialTaskModelFields modalities={sourceType === 'url' ? ['text', 'speech', 'image', 'transcription'] : ['text', 'speech', 'image']} disabled={isBusy || scriptSubmitting} />
           <nav className="video-translation-steps creator-tool-steps stickman-steps" aria-label={l('火柴人视频制作步骤', 'Stickman video steps')}>
             <ol>
               {steps.map((step, index) => {
@@ -1033,7 +1038,7 @@ function SourceAndCharacterStep(props: {
       <div className="creator-tool-form-row">
         <label className="creator-tool-field">
           <span>{props.l('Formato de saída', 'Output format')}</span>
-          <select
+          <AppSelect
             value={props.outputPreset}
             aria-label={props.l('Formato de saída', 'Output format')}
             onChange={event => props.onFormatChange(
@@ -1042,7 +1047,7 @@ function SourceAndCharacterStep(props: {
           >
             <option value="youtube-shorts">{props.l('YouTube Short · 9:16 · 30 s', 'YouTube Short · 9:16 · 30 s')}</option>
             <option value="landscape">{props.l('Vídeo horizontal · 16:9', 'Landscape video · 16:9')}</option>
-          </select>
+          </AppSelect>
           <small>{props.ratio === '9:16'
             ? props.l('Imagens pelo Codex e legendas serão compostas no formato vertical.', 'Codex images and burned-in captions will use the vertical canvas.')
             : props.l('Mantém o fluxo horizontal existente.', 'Keeps the existing landscape workflow.')}</small>

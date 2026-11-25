@@ -11,6 +11,7 @@ import (
 
 type fakeTTS struct {
 	failures      int
+	failText      string
 	calls         int
 	texts         []string
 	writeOnReturn bool
@@ -19,7 +20,7 @@ type fakeTTS struct {
 func (f *fakeTTS) Text2Speech(text, voice, outputFile string) error {
 	f.calls++
 	f.texts = append(f.texts, text)
-	if f.calls <= f.failures {
+	if f.calls <= f.failures || (f.failText != "" && text == f.failText) {
 		return errors.New("tts failed")
 	}
 	if !f.writeOnReturn {
@@ -136,8 +137,8 @@ func TestGenerateRawChunkSegmentsCallsTTSOncePerChunk(t *testing.T) {
 	if gotPlan[0].ActualDuration != 0 || gotPlan[1].ActualDuration != 0 {
 		t.Fatalf("item actual durations should remain chunk-derived later: %+v", gotPlan)
 	}
-	if len(progress) != 2 || progress[0] != [2]int{1, 2} || progress[1] != [2]int{2, 2} {
-		t.Fatalf("progress = %+v, want [[1 2] [2 2]]", progress)
+	if len(progress) != 3 || progress[0] != [2]int{0, 2} || progress[1] != [2]int{1, 2} || progress[2] != [2]int{2, 2} {
+		t.Fatalf("progress = %+v, want [[0 2] [1 2] [2 2]]", progress)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "raw", "chunk_1.wav")); err != nil {
 		t.Fatalf("chunk raw file missing: %v", err)

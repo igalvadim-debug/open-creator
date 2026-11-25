@@ -93,6 +93,26 @@ func TestParseSubtitleSourceOnly(t *testing.T) {
 	}
 }
 
+func TestParseClipCommand(t *testing.T) {
+	t.Setenv("OPENCREATOR_CLIP_REASON_LOCALE", "zh-TW")
+	cmd, err := Parse([]string{"clip", "--input", "https://youtu.be/demo", "--workdir", "job", "--count", "4", "--min-duration-sec", "60", "--max-duration-sec", "90", "--defer-transcription", "--dry-run"})
+	if err != nil || cmd.Name != "clip" || cmd.Clip.Count != 4 || cmd.Clip.ReasonLocale != "zh-TW" || !cmd.Clip.DeferTranscription || !cmd.DryRun {
+		t.Fatalf("Parse clip: command=%+v error=%v", cmd, err)
+	}
+	if response := Execute(context.Background(), nil, cmd); !response.OK || response.Stage != pipeline.StageClip {
+		t.Fatalf("dry run response=%+v", response)
+	}
+	for _, args := range [][]string{
+		{"clip", "--input", "video.mp4", "--workdir", "job", "--count", "21"},
+		{"clip", "--input", "video.mp4", "--workdir", "job", "--min-duration-sec", "120", "--max-duration-sec", "60"},
+		{"clip", "--input", "video.mp4", "--workdir", "job", "--caption-source", "platform"},
+	} {
+		if _, err := Parse(args); err == nil {
+			t.Fatalf("expected invalid clip command: %v", args)
+		}
+	}
+}
+
 func TestParseSubtitleCommandCanPutTargetLanguageOnBottom(t *testing.T) {
 	cmd, err := Parse([]string{
 		"subtitle",
@@ -147,6 +167,22 @@ func TestParseRenderCommandAcceptsSubtitleStyleFile(t *testing.T) {
 	}
 	if cmd.SubtitleStyleFile != "style.json" {
 		t.Fatalf("SubtitleStyleFile = %q", cmd.SubtitleStyleFile)
+	}
+}
+
+func TestParseRenderCommandAcceptsSubtitleDocument(t *testing.T) {
+	cmd, err := Parse([]string{
+		"render-horizontal",
+		"--workdir", "tasks/demo",
+		"--video", "origin.mp4",
+		"--subtitle", "bilingual.srt",
+		"--subtitle-document", "subtitle-document.json",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cmd.Render.SubtitleDocument != "subtitle-document.json" {
+		t.Fatalf("SubtitleDocument = %q", cmd.Render.SubtitleDocument)
 	}
 }
 
