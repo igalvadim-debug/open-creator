@@ -24,9 +24,10 @@ import { rm, stat } from 'node:fs/promises';
 import { basename, extname, resolve, sep } from 'node:path';
 import type { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { z, ZodError } from 'zod';
+import { z, ZodError } from 'zod/v3';
 import { creatorSubtitleStyleSchema } from '../creator/presets/module-schemas.js';
 import type { SubtitlePreviewService } from '../creator/krillin/subtitle-preview.js';
+import type { createSubtitleRenderService } from '../creator/krillin/subtitle-render.js';
 import type { CreatorEventHub } from '../creator/events.js';
 import {
   creatorAgentEventKind,
@@ -91,6 +92,9 @@ import { readCodexImageConfiguration } from '../image-generation/codex-runtime.j
 import type { CodexNativeImageRuntime } from '../image-generation/provider.js';
 import type { CreatorIssueService } from '../creator/issues.js';
 import { registerCreatorThumbnailRoutes } from './routes.creator-thumbnail.js';
+import { GatewayError } from '../gateway/client.js';
+import { CreatorGatewayNotReadyError } from '../gateway/creator-service-source.js';
+import type { CreatorTelemetrySink } from '../telemetry/creator.js';
 
 export async function registerCreatorRoutes(
   server: FastifyInstance,
@@ -110,17 +114,53 @@ export async function registerCreatorRoutes(
     artifactImportService?: CreatorArtifactImportService;
     jobsRoot: string;
     dispatcher: CreatorCommandDispatcher;
+    telemetry?: CreatorTelemetrySink;
     preflight?: Pick<CreatorPreflight, 'check'>;
-    stageRunner?: Pick<CreatorStageRunner, 'cancel' | 'cancelJob'>;
+    stageRunner?: Pick<CreatorStageRunner, 'cancel' | 'cancelJob' | 'pauseDownload' | 'resumeDownload'>;
     presets?: CreatorPresetRegistry;
     presetCatalogRoot?: string;
+    presetAssetsRoot?: string;
     readServicesConfig?(): Promise<CreatorServicesConfig>;
     codexImageRuntime?: CodexNativeImageRuntime;
     issueService?: CreatorIssueService;
     subtitlePreviewService?: SubtitlePreviewService;
+    subtitleRenderService?: ReturnType<typeof createSubtitleRenderService>;
   }
 ): Promise<void> {
+  async function checkResumePreflight(...args: Parameters<CreatorPreflight['check']>) {
+    const [job, stage] = args;
+    options.telemetry?.taskStarted(job);
+    try {
+      const result = await options.preflight!.check(...args);
+      if (!result.canStart) throw new CreatorPreflightError(result);
+    } catch (error) {
+      options.telemetry?.preflightRejected(job, stage.id, error, error instanceof CreatorPreflightError ? error.result.blocked : undefined);
+      throw error;
+    }
+  }
+
   await registerCreatorThumbnailRoutes(server, service, options.readServicesConfig);
+  server.post('/creator/subtitle-render/prepare', { bodyLimit: 16 * 1024 * 1024 }, async (request, reply) => {
+    try {
+      const cue = z.object({ startMs: z.number().int().nonnegative(), endMs: z.number().int().positive(), text: z.string().max(100_000), sourceText: z.string().max(100_000).optional() }).strict().refine(value => value.endMs > value.startMs);
+      const input = z.object({
+        width: z.number().int().min(32).max(8192), height: z.number().int().min(32).max(8192), horizontal: z.boolean(),
+        bilingual: z.boolean(), subtitlePosition: z.enum(['top', 'bottom']), subtitleStyle: creatorSubtitleStyleSchema,
+        majorTitle: z.string().max(2000).optional(), minorTitle: z.string().max(2000).optional(), cues: z.array(cue).max(50_000)
+      }).strict().parse(request.body);
+      if (!options.subtitleRenderService) return reply.code(503).send(apiError('creator_subtitle_style_unsupported', 'Subtitle renderer is unavailable'));
+      return reply.header('Cache-Control', 'no-store').send(await options.subtitleRenderService.compile(input));
+    } catch (error) {
+      if (error instanceof ZodError || error instanceof TypeError) return sendCreatorError(reply, error);
+      return reply.code(503).send(apiError('creator_subtitle_style_unsupported', error instanceof Error ? error.message : 'Subtitle compilation failed'));
+    }
+  });
+  server.get('/creator/subtitle-render/fonts/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const data = await options.subtitleRenderService?.font(id);
+    if (!data) return reply.code(404).send(apiError('creator_artifact_not_found', 'Subtitle font is unavailable'));
+    return reply.type('font/ttf').header('Cache-Control', 'private, max-age=31536000, immutable').send(data);
+  });
   server.get('/creator/subtitle-preview', async (request, reply) => {
     try {
       const query = readObject(request.query);
@@ -236,7 +276,7 @@ export async function registerCreatorRoutes(
     server.get('/creator-presets/:fileName', async (request, reply) => {
     try {
       const { fileName } = request.params as { fileName: string };
-      const file = resolveCreatorPresetAsset(presetCatalogRoot, fileName);
+      const file = resolveCreatorPresetAsset(presetCatalogRoot, fileName, options.presetAssetsRoot);
       const info = await stat(file);
       if (!info.isFile()) throw new Error('Preset asset is not a file');
       const rangeHeader = typeof request.headers.range === 'string'
@@ -514,23 +554,32 @@ export async function registerCreatorRoutes(
     }))
   }));
 
-  server.get<{ Params: { id: string }; Querystring: { stageId?: string; inputResultVersion?: string } }>(
+  server.get<{ Params: { id: string }; Querystring: { stageId?: string; inputResultVersion?: string; launch?: string } }>(
     '/creator/jobs/:id/preflight',
     async (request, reply) => {
+      let launchJob: CreatorJob | undefined;
       try {
         const job = requireCreatorJob(service, request.params.id);
+        if (request.query.launch === '1') {
+          launchJob = job;
+          options.telemetry?.taskStarted(job);
+        }
         if (options.preflight === undefined) {
+          if (launchJob) options.telemetry?.preflightRejected(launchJob, request.query.stageId ?? 'unknown', { code: 'creator_preflight_unavailable' });
           return reply.code(503).send(apiError('creator_preflight_unavailable' as RuntimeErrorCode, 'Creator preflight is unavailable'));
         }
         const stageId = readString(request.query.stageId, 'stageId');
         const stage = service.templates.get(job.templateId, job.templateVersion).stages.find(candidate => candidate.id === stageId);
         if (stage === undefined) throw new CreatorServiceError('creator_stage_not_found', 'Creator stage was not found');
-        return options.preflight.check(job, stage, {
+        const result = await options.preflight.check(job, stage, {
           ...(request.query.inputResultVersion === undefined
             ? {}
             : { inputResultVersion: readQueryInteger(request.query.inputResultVersion, 'inputResultVersion') })
         });
+        if (launchJob && !result.canStart) options.telemetry?.preflightRejected(launchJob, stageId, new CreatorPreflightError(result), result.blocked);
+        return result;
       } catch (error) {
+        if (launchJob) options.telemetry?.preflightRejected(launchJob, request.query.stageId ?? 'unknown', error);
         return sendCreatorError(reply, error, {
           jobId: request.params.id,
           source: 'preflight',
@@ -684,6 +733,66 @@ export async function registerCreatorRoutes(
     }
   });
 
+  for (const action of ['pause', 'resume', 'cancel'] as const) {
+    server.post(`/creator/jobs/:id/downloads/:stageRunId/${action}`, async (request, reply) => {
+      const { id, stageRunId } = request.params as { id: string; stageRunId: string };
+      try {
+        if (!options.stageRunner) throw new CreatorServiceError('creator_job_control_unavailable', 'Download control is unavailable');
+        let job = requireCreatorJob(service, id);
+        const target = job.stages.find(stage => stage.id === stageRunId);
+        if (job.templateId !== 'video-download' || job.templateVersion < 2 || target?.stageId !== 'download') {
+          return reply.code(404).send(apiError('creator_stage_not_found' as RuntimeErrorCode, 'Download was not found'));
+        }
+        const resumed = job.stages.find(stage => stage.progress.resumedFromStageRunId === target.id);
+        if (resumed) {
+          if (action === 'resume') return { job, stage: resumed, control: 'resumed' };
+          throw new CreatorServiceError('creator_job_not_resumable', 'This download has already been continued. Use its current record.');
+        }
+        if (action !== 'resume') {
+          if (action === 'pause' && target.progress.downloadControl === 'canceled') {
+            throw new CreatorServiceError('creator_job_not_running', 'Download was canceled');
+          }
+          if (action === 'pause' && !['queued', 'running'].includes(target.status)
+            && target.progress.downloadControl !== 'paused') {
+            throw new CreatorServiceError('creator_job_not_running', 'Download is not running');
+          }
+          if (target.status === 'succeeded' || target.status === 'failed') {
+            throw new CreatorServiceError('creator_job_not_running', 'Download has already finished');
+          }
+          const stage = (action === 'pause' ? options.stageRunner.pauseDownload(target.id)
+            : options.stageRunner.cancel(target.id, { downloadControl: 'canceled' }))!;
+          const pending = (stage.status === 'running' || stage.status === 'queued')
+            && !(action === 'pause' && stage.progress.downloadControl === 'paused' && stage.progress.cancelRequested !== true);
+          return reply.code(pending ? 202 : 200).send({
+            job: requireCreatorJob(service, id), stage,
+            control: action === 'pause' ? pending ? 'pausing' : 'paused' : pending ? 'canceling' : 'canceled'
+          });
+        }
+        const live = options.stageRunner.resumeDownload(target.id);
+        if (live) return { job: requireCreatorJob(service, id), stage: live, control: 'resumed' };
+        if (!['canceled', 'interrupted'].includes(target.status) || target.progress.downloadControl === 'canceled') {
+          throw new CreatorServiceError('creator_job_not_resumable', 'Download is not paused or was canceled');
+        }
+        const definition = service.templates.get(job.templateId, job.templateVersion).stages.find(stage => stage.id === 'download')!;
+        if (options.preflight) {
+          await checkResumePreflight(job, definition);
+        }
+        job = requireCreatorJob(service, id);
+        const result = options.dispatcher.dispatch(id, {
+          action: 'run-stage', expectedRevision: job.revision, idempotencyKey: `resume:${target.id}`,
+          input: { stageId: 'download', optionId: target.progress.optionId ?? null,
+            mediaType: target.progress.mediaType ?? null, sourceUrl: target.progress.sourceUrl ?? null,
+            resumedFromStageRunId: target.id }
+        }, 'user');
+        const latest = requireCreatorJob(service, id);
+        const stage = latest.stages.find(candidate => candidate.id === result.commandReceipt.stageRunId)!;
+        return reply.code(202).send({ job: latest, stage, control: 'resumed' });
+      } catch (error) {
+        return sendCreatorError(reply, error);
+      }
+    });
+  }
+
   server.post('/creator/jobs/:id/cancel', async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
@@ -698,7 +807,7 @@ export async function registerCreatorRoutes(
         stage.status === 'queued' || stage.status === 'running'
       ));
       if (activeStages.length === 0) {
-        const latest = job.stages.at(-1);
+        const latest = jobControlStage(job);
         if (latest?.status === 'canceled') {
           return {
             job,
@@ -712,15 +821,15 @@ export async function registerCreatorRoutes(
         );
       }
       const stages = options.stageRunner.cancelJob(id);
-      const stage = stages.at(-1);
+      const latestJob = requireCreatorJob(service, id);
+      const stage = jobControlStage(latestJob);
       if (stage === undefined) {
         throw new CreatorServiceError(
           'creator_job_not_running',
           'Creator job has no active stage'
         );
       }
-      const latestJob = requireCreatorJob(service, id);
-      const canceling = stage.status === 'queued' || stage.status === 'running';
+      const canceling = stages.some(candidate => candidate.status === 'queued' || candidate.status === 'running');
       return reply.code(canceling ? 202 : 200).send({
         job: latestJob,
         stage,
@@ -742,7 +851,11 @@ export async function registerCreatorRoutes(
         );
       }
       let job = requireCreatorJob(service, id);
-      const latest = job.stages.at(-1);
+      const latest = jobControlStage(job);
+      if (job.templateId === 'video-download' && latest) {
+        const live = options.stageRunner.resumeDownload(latest.id);
+        if (live) return { job: requireCreatorJob(service, id), stage: live, control: 'resumed' };
+      }
       if (latest !== undefined && isAlreadyResumed(job, latest)) {
         return {
           job,
@@ -750,7 +863,8 @@ export async function registerCreatorRoutes(
           control: 'resumed'
         };
       }
-      if (latest === undefined || (latest.status !== 'canceled' && latest.status !== 'interrupted')) {
+      if (latest === undefined || (latest.status !== 'canceled' && latest.status !== 'interrupted')
+        || (job.templateId === 'video-download' && latest.progress.downloadControl === 'canceled')) {
         throw new CreatorServiceError(
           'creator_job_not_resumable',
           'Creator job has no canceled or interrupted stage to resume'
@@ -759,12 +873,11 @@ export async function registerCreatorRoutes(
       if (options.preflight !== undefined) {
         const stage = service.templates.get(job.templateId, job.templateVersion).stages.find(candidate => candidate.id === latest.stageId);
         if (stage === undefined) throw new CreatorServiceError('creator_stage_not_found', 'Creator stage was not found');
-        const preflight = await options.preflight.check(job, stage, {
+        await checkResumePreflight(job, stage, {
           ...(typeof latest.progress.inputResultVersion === 'number'
             ? { inputResultVersion: latest.progress.inputResultVersion }
             : {})
         });
-        if (!preflight.canStart) throw new CreatorPreflightError(preflight);
       }
       if (job.templateId === 'video-translation' && options.videoTranslationWorkflow !== undefined) {
         try {
@@ -793,19 +906,29 @@ export async function registerCreatorRoutes(
         }
         job = requireCreatorJob(service, id);
       }
-      const target = job.stages.at(-1);
+      job = requireCreatorJob(service, id);
+      const target = jobControlStage(job);
+      if (target?.progress.resumedFromStageRunId === latest.id && isAlreadyResumed(job, target)) {
+        return { job, stage: target, control: 'resumed' };
+      }
       if (target?.id !== latest.id || (target.status !== 'canceled' && target.status !== 'interrupted')) {
         throw new CreatorServiceError(
           'creator_job_not_resumable',
           'Creator job state changed before it could be resumed'
         );
       }
+      // Only a stored workflow download may be resumed through system dispatch.
+      const backgroundSourceDownload = job.templateId === 'video-translation'
+        && target.progress.backgroundSourceDownload === true;
       const result = options.dispatcher.dispatch(id, {
         action: 'run-stage',
         expectedRevision: job.revision,
         idempotencyKey: `resume:${target.id}`,
         input: {
           stageId: target.stageId,
+          ...(backgroundSourceDownload
+            ? { backgroundSourceDownload: true }
+            : {}),
           ...(typeof target.progress.baseResultVersion === 'number'
             ? { baseResultVersion: target.progress.baseResultVersion }
             : {}),
@@ -823,7 +946,7 @@ export async function registerCreatorRoutes(
             : {}),
           resumedFromStageRunId: target.id
         }
-      }, 'user', {
+      }, backgroundSourceDownload ? 'system' : 'user', {
         scopeKey: target.scopeKey,
         inputFingerprint: target.inputFingerprint,
         resumedFromStageRunId: target.id,
@@ -900,6 +1023,7 @@ export async function registerCreatorRoutes(
 
   server.post<{ Body: unknown }>('/creator/jobs/:id/actions', async (request, reply) => {
     const { id } = request.params as { id: string };
+    let preflightTrace: { job: CreatorJob; stageId: string } | undefined;
     try {
       const body = readObject(request.body);
       const action = readString(body.action, 'action');
@@ -907,6 +1031,10 @@ export async function registerCreatorRoutes(
       const jobBeforeAction = service.getJob(id);
       if (jobBeforeAction === undefined) {
         throw new CreatorServiceError('creator_job_not_found', 'Creator job not found');
+      }
+      if ((action === 'run-stage' || action === 'retry-stage') && typeof actionInput.stageId === 'string') {
+        preflightTrace = { job: jobBeforeAction, stageId: actionInput.stageId };
+        options.telemetry?.taskStarted(jobBeforeAction);
       }
       if (
         (action === 'run-stage' || action === 'retry-stage')
@@ -996,6 +1124,7 @@ export async function registerCreatorRoutes(
           throw error;
         }
       }
+      preflightTrace = undefined;
       const expectedRevision = readInteger(body.expectedRevision, 'expectedRevision');
       const result = await options.dispatcher.dispatchAsync(id, {
         idempotencyKey: typeof body.idempotencyKey === 'string'
@@ -1040,10 +1169,13 @@ export async function registerCreatorRoutes(
       }
       return result;
     } catch (error) {
+      if (preflightTrace) options.telemetry?.preflightRejected(preflightTrace.job, preflightTrace.stageId, error,
+        error instanceof CreatorPreflightError ? error.result.blocked : undefined);
       return sendCreatorError(reply, error, {
         jobId: id,
-        source: error instanceof CreatorPreflightError ? 'preflight' : 'api',
+        source: error instanceof CreatorPreflightError || error instanceof CreatorGatewayNotReadyError ? 'preflight' : 'api',
         operation: 'creator.action',
+        stageId: preflightTrace?.stageId,
         service,
         issueService: options.issueService
       });
@@ -1413,7 +1545,7 @@ function sendCreatorError(reply: FastifyReply, error: unknown, context?: Creator
   if (error instanceof CreatorPreflightError) {
     return reply.code(400).send({
       error: {
-        ...response(error.code as RuntimeErrorCode, error.message).error,
+        ...response(error.code as RuntimeErrorCode, error.message, { preflight: error.result }).error,
         preflight: error.result
       }
     });
@@ -1475,6 +1607,16 @@ function sendCreatorError(reply: FastifyReply, error: unknown, context?: Creator
       ...(error.latestRevision === undefined ? {} : { latestRevision: error.latestRevision })
     }));
   }
+  if (error instanceof GatewayError && error.code === 'auth_required') {
+    return reply.code(401).send(response(
+      'GATEWAY_AUTH_REQUIRED',
+      'OpenCreator sign-in has expired. Sign in again before retrying.',
+      undefined
+    ));
+  }
+  if (error instanceof CreatorGatewayNotReadyError) {
+    return reply.code(503).send(response('GATEWAY_SERVICES_NOT_READY', error.message));
+  }
   if (error instanceof ZodError || error instanceof TypeError) {
     return reply.code(400).send(response('VALIDATION_FAILED', error.message));
   }
@@ -1490,6 +1632,9 @@ function sendCreatorError(reply: FastifyReply, error: unknown, context?: Creator
         : 400;
     return reply.code(status)
       .send(response(error.code as RuntimeErrorCode, error.message));
+  }
+  if (context?.source === 'agent' && issue !== undefined) {
+    return reply.code(502).send(response(issue.code as RuntimeErrorCode, issue.fallbackMessage));
   }
   throw error;
 }
@@ -1591,6 +1736,16 @@ function latestStageMatching(
   predicate: (stage: CreatorStageRun) => boolean
 ): CreatorStageRun | undefined {
   return [...job.stages].reverse().find(predicate);
+}
+
+function jobControlStage(job: CreatorJob): CreatorStageRun | undefined {
+  if (job.templateId !== 'video-translation') return job.stages.at(-1);
+  const foreground = latestStageMatching(job, stage => stage.progress.backgroundSourceDownload !== true);
+  if (foreground === undefined || foreground.status !== 'succeeded') return foreground ?? job.stages.at(-1);
+  // A completed subtitle stage may still be waiting for its parallel media download.
+  // Never let that download hide a stopped foreground stage or an ensuing render.
+  return latestStageMatching(job, stage => stage.progress.backgroundSourceDownload === true
+    && stage.progress.workflowParentStageRunId === foreground.id) ?? foreground;
 }
 
 function isAlreadyResumed(job: CreatorJob, latest: CreatorStageRun): boolean {

@@ -277,7 +277,7 @@ func task792PairedResponse() string {
  {"sentence_id":"3","target_text":"那年我20岁。","segments":[{"source":"I was 20 years old.","target":"那年我20岁。"}]}]}`
 }
 
-func TestBatchTranslateSrtBlocksFailsAfterThreeAttemptsWithoutOriginalFallback(t *testing.T) {
+func TestBatchTranslateSrtBlocksMarksUntranslatedAfterRecoveryFailure(t *testing.T) {
 	log.InitLogger()
 	previous := config.Conf
 	t.Cleanup(func() { config.Conf = previous })
@@ -285,9 +285,14 @@ func TestBatchTranslateSrtBlocksFailsAfterThreeAttemptsWithoutOriginalFallback(t
 	completer := &scriptedCompleter{responses: []string{"not-json", "not-json", "not-json"}}
 	translator := &Translator{chatCompleter: completer}
 	blocks := task792TranslationBlocks()
-	_, err := translator.BatchTranslateSrtBlocks(context.Background(), blocks, "en", "zh_cn", nil)
-	if err == nil || !strings.Contains(err.Error(), "4841-4845") || completer.calls != 3 {
-		t.Fatalf("翻译错误 = %v, 调用次数 = %d, want 3", err, completer.calls)
+	output, err := translator.BatchTranslateSrtBlocks(context.Background(), blocks, "en", "zh_cn", nil)
+	if err != nil || len(output) != 3 || completer.calls != 3 {
+		t.Fatalf("翻译错误 = %v, 调用次数 = %d, want 3 completed responses", err, completer.calls)
+	}
+	for _, block := range output {
+		if block.TargetLanguageSentence != "[待翻译] "+block.OriginLanguageSentence {
+			t.Fatalf("未译内容未明确标记: %+v", block)
+		}
 	}
 	for _, block := range blocks {
 		if block.TargetLanguageSentence != "" {
@@ -309,7 +314,7 @@ func TestBatchTranslateTextsRetriesUntranslatedSentenceWithProperNoun(t *testing
 	}
 }
 
-func TestSplitTextAndTranslateDoesNotReturnOriginalOnFailure(t *testing.T) {
+func TestSplitTextAndTranslateMarksSourceOnFailure(t *testing.T) {
 	log.InitLogger()
 	previous := config.Conf
 	t.Cleanup(func() { config.Conf = previous })
@@ -318,7 +323,8 @@ func TestSplitTextAndTranslateDoesNotReturnOriginalOnFailure(t *testing.T) {
 	completer := &scriptedCompleter{responses: []string{"I was a nobody.", "I was a nobody.", "I was a nobody."}}
 	translator := &Translator{chatCompleter: completer}
 	items, err := translator.SplitTextAndTranslate("I was a nobody.", "en", "zh_cn")
-	if err == nil || items != nil || completer.calls != 3 {
+	if err != nil || len(items) != 1 || items[0].OriginText != "I was a nobody." ||
+		items[0].TranslatedText != "[待翻译] I was a nobody." || completer.calls != 3 {
 		t.Fatalf("items = %v, calls = %d, error = %v", items, completer.calls, err)
 	}
 }
@@ -332,7 +338,7 @@ func TestSubtitleTranslationUsesSurroundingContextWithoutExtraCalls(t *testing.T
 		t.Run(fmt.Sprintf("导入字幕=%v", imported), func(t *testing.T) {
 			blocks := make([]*util.SrtBlock, 6)
 			for i := range blocks {
-				blocks[i] = &util.SrtBlock{Index: i + 1, Timestamp: formatSRTTimeline(int64(i*1000), int64((i+1)*1000)), OriginLanguageSentence: fmt.Sprintf("source %d.", i+1)}
+				blocks[i] = &util.SrtBlock{Index: i + 1, Timestamp: formatSRTTimeline(int64(i*1000), int64((i+1)*1000)), OriginLanguageSentence: fmt.Sprintf("Source %d.", i+1)}
 			}
 			var inputs []pairedTranslationInput
 			translator := &Translator{chatCompleter: translationCompleterFunc(func(prompt string) (string, error) {
@@ -353,7 +359,7 @@ func TestSubtitleTranslationUsesSurroundingContextWithoutExtraCalls(t *testing.T
 				t.Fatalf("calls=%d error=%v", len(inputs), err)
 			}
 			middle := inputs[1].Sentences[0]
-			if fmt.Sprint(middle.Before) != "[source 1. source 2.]" || fmt.Sprint(middle.After) != "[source 4. source 5.]" {
+			if fmt.Sprint(middle.Before) != "[Source 1. Source 2.]" || fmt.Sprint(middle.After) != "[Source 4. Source 5.]" {
 				t.Fatalf("缺少整句上下文: %+v", middle)
 			}
 		})

@@ -1,5 +1,15 @@
 import {
   creatorPromptMaxLength,
+  createDefaultCreatorServicesConfig,
+  imageModelOptions,
+  imageSizeAspectRatio,
+  type CreatorServicesConfig,
+  type CreatorServicesCredentialField,
+  gatewayModelIdMatches,
+  gatewayModelReady,
+  type GatewayAccountState,
+  type GatewayImageCatalog,
+  type GatewayModel,
   imagePromptRequiresReference,
   readCreatorResultSnapshots,
   safePublicErrorMessage,
@@ -11,8 +21,8 @@ import {
   type ImageGenerationSize
 } from '@opencreator/protocol';
 import { OfficialModelField, useOfficialServices } from './official-services.js';
+import { useGenerationAccess } from './DashboardGenerationAccess.js';
 import {
-  Check,
   Download,
   Image as ImageIcon,
   ImagePlus,
@@ -20,25 +30,29 @@ import {
   LoaderCircle,
   RotateCcw,
   Sparkles,
-  UploadCloud,
+  Trash2,
   X,
   WandSparkles
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useLocalizedCopy, type LocalizeCopy } from '../../i18n/useLocalizedCopy.js';
+import OfficialModelSelect from '../../components/forms/OfficialModelSelect.js';
 import CreatorResultVersionMenu from './CreatorResultVersionMenu.js';
+import ImageGenerationSettings, { type ImageGenerationSettingSection } from './ImageGenerationSettings.js';
+import ImageGenerationDiscovery from './ImageGenerationDiscovery.js';
 import CreatorTaskSummary from './CreatorTaskSummary.js';
 import CreatorToolShell from './CreatorToolShell.js';
 import { publicErrorReason } from '../issues/issue-catalog.js';
 import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
+import type { GatewayAccountSettingsService } from '../../services/gateway-account-service.js';
 import {
   captureCreatorClientFailure,
   createCreatorArtifactObjectUrl,
   CreatorPreflightBlockedError,
   useOptionalCreatorSession
 } from './creator-session-store.js';
+import './image-generation-workspace.css';
 
-type ImageStep = 0 | 1 | 2;
 type ImageResultVersion = {
   value: number;
   description: string;
@@ -58,6 +72,7 @@ const qualities: Array<{ value: ImageGenerationQuality; zh: string; en: string }
   { value: 'high', zh: '高清', en: 'High' }
 ];
 
+const localImageModelId = '__local_image__';
 const providers: Array<{ value: ImageGenerationProvider; zh: string; en: string }> = [
   { value: 'codex-native', zh: '本机 Codex 生图', en: 'Local Codex image generation' },
   { value: 'openai', zh: 'GPT Image', en: 'GPT Image' },
@@ -65,30 +80,27 @@ const providers: Array<{ value: ImageGenerationProvider; zh: string; en: string 
   { value: 'kling', zh: '可灵', en: 'Kling' },
   { value: 'gemini', zh: 'Gemini', en: 'Gemini' }
 ];
+const defaultImageConfig = createDefaultCreatorServicesConfig().image;
 
 const samplePromptZh = '一间通透的现代创意工作室，清晨自然光从落地窗照入，桌面有相机、手稿和绿植，真实摄影质感，构图干净，细节丰富';
 const samplePromptEn = 'A bright modern creative studio at sunrise, natural light through floor-to-ceiling windows, a camera, sketches, and plants on the desk, realistic photography, clean composition, rich detail';
+const samplePromptSv = 'En ljus modern kreativ studio i gryningen, naturligt ljus genom fönster från golv till tak, en kamera, skisser och växter på skrivbordet, realistiskt fotografi, ren komposition och rika detaljer';
 
 export default function ImageGenerationWorkspace(props: {
   onBack(): void;
   promptHint?: string;
+  embedded?: boolean;
+  embeddedTabs?: ReactNode;
+  forceComposer?: boolean;
+  onGenerated?(): void;
   creatorServicesService?: CreatorServicesSettingsService | null;
+  gatewayAccountService?: GatewayAccountSettingsService | null;
+  onGatewayStateChange?(state: GatewayAccountState): void;
 }) {
   const l = useLocalizedCopy();
+  const requireGenerationAccess = useGenerationAccess();
   const session = useOptionalCreatorSession();
-  const official = useOfficialServices('image');
-  const restoredResults = session?.job.artifacts.some(artifact => artifact.kind === 'generated_image') === true;
-  const restoredStep = restoredResults
-    ? 2
-    : readImageStep(session?.state.currentStep, 0);
-  const [currentStep, setCurrentStep] = useState<ImageStep>(restoredStep);
-  const [furthestStep, setFurthestStep] = useState<ImageStep>(() => (
-    Math.max(
-      restoredStep,
-      readImageStep(session?.state.furthestStep, restoredStep),
-      restoredResults ? 2 : 0
-    ) as ImageStep
-  ));
+  const official = useOfficialServices('image', true, undefined, models => models[0]);
   const [prompt, setPrompt] = useState(() => readString(session?.state.prompt));
   const [provider, setProvider] = useState<ImageGenerationProvider>(() => readProvider(session?.state.provider));
   const [size, setSize] = useState<ImageGenerationSize>(() => readSize(session?.state.size));
@@ -97,19 +109,77 @@ export default function ImageGenerationWorkspace(props: {
   const [aspectRatio, setAspectRatio] = useState(() => readString(session?.state.aspectRatio));
   const [resolution, setResolution] = useState(() => readString(session?.state.resolution));
   const [officialQuality, setOfficialQuality] = useState(() => readString(session?.state.officialQuality));
-  const imageOptions = official.official ? official.model?.imageOptions : undefined;
+  const [modelQuality, setModelQuality] = useState(() => readString(session?.state.modelQuality));
+  const [imageConfig, setImageConfig] = useState<CreatorServicesConfig['image'] | null>(null);
+  const [configuredCredentials, setConfiguredCredentials] = useState<CreatorServicesCredentialField[]>([]);
+  const [codexImageReady, setCodexImageReady] = useState<boolean>();
+  const [publicCatalog, setPublicCatalog] = useState<GatewayImageCatalog | undefined>(() => props.gatewayAccountService?.getCachedImageCatalog?.());
+  const catalogRequest = useRef(0);
+  const catalogWork = useRef<{ service: GatewayAccountSettingsService; promise: Promise<GatewayImageCatalog> }>();
+  const [pendingModelId, setPendingModelId] = useState<string>();
+  const pendingValidation = useRef<string>();
+  const localProvider = imageConfig?.provider ?? provider;
+  const localConfigured = imageConfig !== null && (localProvider === 'codex-native' ? codexImageReady === true
+    : localProvider === 'kling' ? configuredCredentials.includes('image.kling.accessKey') && configuredCredentials.includes('image.kling.secretKey') && !!imageConfig.kling.model
+      : configuredCredentials.includes(`image.${localProvider}.apiKey` as CreatorServicesCredentialField) && !!imageConfig[localProvider].model);
+  const localModel: GatewayModel | undefined = imageConfig ? {
+    id: localImageModelId, name: l('本地生图服务', 'Local image service'), modality: 'image', capabilities: [],
+    vendor: l('本地', 'Local'), status: localConfigured ? 'ready' : 'temporarily_unavailable'
+  } : undefined;
+  const publicModels = publicCatalog?.models ?? [];
+  const catalogModels = official.official ? official.models : [...(localModel ? [localModel] : []), ...publicModels];
+  const loginRequiredModelIds = new Set(official.official ? [] : publicModels.map(model => model.id));
+  const selectedCatalogId = official.official ? official.selected ?? official.model?.id ?? '' : pendingModelId ?? (localConfigured ? localImageModelId : '');
+  function loadPublicCatalog() {
+    const request = ++catalogRequest.current;
+    const service = props.gatewayAccountService;
+    const cached = service?.getCachedImageCatalog?.();
+    setPublicCatalog(cached);
+    if (!service?.getImageCatalog) return;
+    const promise = catalogWork.current?.service === service
+      ? catalogWork.current.promise : service.getImageCatalog();
+    catalogWork.current = { service, promise };
+    void promise.then(catalog => {
+      if (request === catalogRequest.current) setPublicCatalog(catalog);
+    }).catch(() => undefined).finally(() => {
+      if (catalogWork.current?.promise === promise) catalogWork.current = undefined;
+    });
+  }
+  useEffect(() => {
+    return () => { catalogRequest.current++; };
+  }, [props.gatewayAccountService]);
+  const configuredModel = localProvider === 'codex-native' ? '' : (imageConfig ?? defaultImageConfig)[localProvider].model;
+  const imageOptions = useMemo(() => official.official
+    ? official.model?.imageOptions ?? {}
+    : localProvider === 'codex-native' ? undefined : imageModelOptions(localProvider, configuredModel),
+  [official.official, official.model, localProvider, configuredModel]);
+  const activeQuality = official.official ? officialQuality : modelQuality;
+  useEffect(() => {
+    if (official.official) return;
+    let active = true;
+    void props.creatorServicesService?.getConfig().then(response => {
+      if (active) { setImageConfig(response.config.image); setConfiguredCredentials(response.configuredCredentials ?? []); }
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [props.creatorServicesService, official.official]);
   useEffect(() => {
     if (!imageOptions || official.taskRunning) return;
-    const nextRatio = imageOptions.aspectRatios?.includes(aspectRatio) ? aspectRatio : imageOptions.aspectRatios?.[0] ?? '';
+    const inheritedRatio = aspectRatio || imageSizeAspectRatio(size);
+    const inheritedQuality = activeQuality || quality;
+    const nextRatio = imageOptions.aspectRatios?.includes(inheritedRatio) ? inheritedRatio : imageOptions.aspectRatios?.[0] ?? '';
     const nextResolution = imageOptions.resolutions?.includes(resolution) ? resolution : imageOptions.resolutions?.[0] ?? '';
-    const nextQuality = imageOptions.qualities?.includes(officialQuality) ? officialQuality : imageOptions.qualities?.[0] ?? '';
-    const nextCount = Math.min(count, imageOptions.maxImages);
-    setAspectRatio(nextRatio); setResolution(nextResolution); setOfficialQuality(nextQuality);
+    const nextQuality = imageOptions.qualities?.includes(inheritedQuality) ? inheritedQuality : imageOptions.qualities?.[0] ?? '';
+    const nextCount = Math.min(count, official.official ? official.model?.imageOptions?.maxImages ?? 4 : 4);
+    setAspectRatio(nextRatio); setResolution(nextResolution);
+    if (official.official) setOfficialQuality(nextQuality); else setModelQuality(nextQuality);
     if (nextCount !== count) setCount(nextCount);
-    if (nextRatio !== aspectRatio || nextResolution !== resolution || nextQuality !== officialQuality || nextCount !== count) {
-      session?.updateDraft({ aspectRatio: nextRatio, resolution: nextResolution, officialQuality: nextQuality, candidateCount: nextCount });
+    if (official.official && (nextRatio !== aspectRatio || nextResolution !== resolution || nextQuality !== activeQuality || nextCount !== count)) {
+      session?.updateDraft(
+        { aspectRatio: nextRatio, resolution: nextResolution, officialQuality: nextQuality, candidateCount: nextCount },
+        { persist: session.job.id.startsWith('pending:') ? false : undefined, userEdited: false }
+      );
     }
-  }, [official.model?.id, imageOptions, official.taskRunning, aspectRatio, resolution, officialQuality, count]);
+  }, [imageOptions, official.taskRunning, official.official, aspectRatio, resolution, activeQuality, count, size, quality]);
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [referencePreview, setReferencePreview] = useState('');
   const resultVersion = session?.job.state.resultVersion;
@@ -117,45 +187,54 @@ export default function ImageGenerationWorkspace(props: {
   const [previewError, setPreviewError] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const characterCount = useMemo(() => [...prompt.trim()].length, [prompt]);
-  const selectedSize = imageOptions ? { value: resolution, zh: aspectRatio, en: aspectRatio, ratio: aspectRatio } : sizes.find(item => item.value === size) ?? sizes[0]!;
-  const selectedQuality = imageOptions ? { zh: officialQuality || resolution || '默认', en: officialQuality || resolution || 'Default' } : qualities.find(item => item.value === quality) ?? qualities[1]!;
-  const selectedProvider = official.official ? { zh: '官方服务', en: 'Official service' } : providers.find(item => item.value === provider) ?? providers[0]!;
+  const selectedSize = imageOptions ? { value: resolution, zh: aspectRatio || l('默认', 'Default'), en: aspectRatio || l('默认', 'Default'), ratio: aspectRatio || l('默认', 'Default') } : sizes.find(item => item.value === size) ?? sizes[0]!;
+  const selectedQuality = imageOptions ? { zh: imageQualityLabel(activeQuality, l) || l('默认', 'Default'), en: imageQualityLabel(activeQuality, l) || l('默认', 'Default') } : qualities.find(item => item.value === quality) ?? qualities[1]!;
+  const selectedProvider = official.official ? { zh: '官方服务', en: 'Official service' } : { zh: '本地生图服务', en: 'Local image service' };
   const resultVersions = useMemo(
     () => createImageResultVersions(session?.job.artifacts ?? [], session?.state.resultSnapshots),
     [session?.job.artifacts, session?.state.resultSnapshots]
   );
   const latestVersion = resultVersions.at(-1)?.value;
-  const selectedResult = resultVersions.find(version => version.value === resultVersion)
-    ?? resultVersions.at(-1);
+  const selectedResult = props.forceComposer
+    ? undefined
+    : resultVersions.find(version => version.value === resultVersion) ?? resultVersions.at(-1);
   const latestStage = session?.job.stages.filter(stage => stage.stageId === 'generate').at(-1);
   const generating = latestStage?.status === 'queued' || latestStage?.status === 'running';
+  const busy = generating || submitting;
   const runtimeError = latestStage?.status === 'failed'
     ? formatImageError({ code: latestStage.errorCode, message: latestStage.errorMessage,
         publicFacts: session?.issues.find(issue => issue.stageRunId === latestStage.id)?.publicFacts }, l)
     : session?.error === null || session?.error === undefined
       ? ''
       : formatImageError(session.error, l);
-  const visibleError = error || runtimeError || previewError;
+  const visibleError = error || (props.embedded ? '' : runtimeError || previewError);
   const resultSettings = selectedResult?.state;
   const resultSize = readSize(resultSettings?.size);
-  const resultSizeOption = resultSettings?.officialModels && typeof resultSettings.aspectRatio === 'string'
+  const resultSizeOption = typeof resultSettings?.aspectRatio === 'string' && resultSettings.aspectRatio
     ? { value: readString(resultSettings.resolution), zh: resultSettings.aspectRatio, en: resultSettings.aspectRatio, ratio: resultSettings.aspectRatio }
     : sizes.find(item => item.value === resultSize) ?? sizes[0]!;
   const resultProvider = resultSettings?.officialModels ? { zh: '官方服务', en: 'Official service' } : providers.find(item => item.value === readProvider(resultSettings?.provider))
     ?? providers[0]!;
-  const resultQuality = resultSettings?.officialModels && typeof resultSettings.officialQuality === 'string' && resultSettings.officialQuality
-    ? { zh: resultSettings.officialQuality, en: resultSettings.officialQuality }
+  const savedModelQuality = readString(resultSettings?.officialModels ? resultSettings.officialQuality : resultSettings?.modelQuality);
+  const resultQuality = savedModelQuality || resultSettings?.modelQuality === ''
+    ? { zh: imageQualityLabel(savedModelQuality, l) || l('默认', 'Default'), en: imageQualityLabel(savedModelQuality, l) || l('默认', 'Default') }
     : qualities.find(item => item.value === readQuality(resultSettings?.quality)) ?? qualities[1]!;
-  const supportsReferenceImage = session === null
-    || session.job.id.startsWith('pending:')
-    || session.job.templateVersion >= 2;
+  const outputBatchSize = official.model?.catalogSchema === 2 ? official.model.imageOptions?.imagesPerRequest ?? 1 : 1;
+  const showsImageFormat = !imageOptions || Boolean(imageOptions.aspectRatios?.length);
+  const showsImageResolution = !imageOptions || Boolean(imageOptions.resolutions?.length);
+  const showsImageQuality = !imageOptions || Boolean(imageOptions.qualities?.length);
+  const currentImageSummary = [l(selectedProvider.zh, selectedProvider.en),
+    ...(showsImageFormat ? [selectedSize.ratio] : []), String(count * outputBatchSize)].join(' · ');
+  const supportsReferenceImage = (session === null || session.job.id.startsWith('pending:') || session.job.templateVersion >= 2)
+    && (!official.official || official.model?.catalogSchema !== 2 || (official.model.capabilities.includes('edit') && (official.model.imageOptions?.maxReferences ?? 0) > 0));
   const activeReferenceArtifact = findArtifact(
     session?.job.artifacts ?? [],
     session?.state.referenceImageArtifactId,
     'reference_image'
   );
-  const missingReference = imagePromptRequiresReference(prompt)
+  const missingReference = (imagePromptRequiresReference(prompt) || official.model?.capabilities.includes('reference_required'))
     && referenceFile === null && activeReferenceArtifact === undefined;
   const referenceValidationMessage = missingReference ? l(
     '当前提示词需要基于已有图片生成，请先上传参考图；如需纯文字生图，请移除对上传图片或原图的要求。',
@@ -172,6 +251,13 @@ export default function ImageGenerationWorkspace(props: {
     activeReferenceArtifact?.version, activeReferenceArtifact?.sha256, activeReferenceArtifact?.path]);
   const currentReferenceName = referenceFile?.name
     ?? readArtifactString(activeReferenceArtifact, 'fileName');
+  useEffect(() => {
+    if (supportsReferenceImage || official.taskRunning || busy) return;
+    if (referenceFile !== null) setReferenceFile(null);
+    if (activeReferenceArtifact !== undefined) {
+      session?.updateDraft({ referenceImageArtifactId: null }, { semantic: true });
+    }
+  }, [supportsReferenceImage, official.taskRunning, busy, referenceFile, activeReferenceArtifact?.id, session?.updateDraft]);
   const shouldLoadDefaultProvider = session !== null
     && (
       session.state.provider === undefined
@@ -184,26 +270,61 @@ export default function ImageGenerationWorkspace(props: {
     );
 
   useEffect(() => {
+    setCodexImageReady(undefined);
+    if (official.official || imageConfig?.provider !== 'codex-native') return;
+    const service = props.creatorServicesService;
+    if (!service?.getCodexImageStatus) {
+      setCodexImageReady(false);
+      return;
+    }
+    let active = true;
+    void service.getCodexImageStatus().then(status => {
+      if (active) setCodexImageReady(status.ready);
+    }).catch(() => {
+      if (active) setCodexImageReady(false);
+    });
+    return () => { active = false; };
+  }, [imageConfig?.provider, official.official, props.creatorServicesService]);
+
+  useEffect(() => {
     if (official.official) return;
     if (session === null || !shouldLoadDefaultProvider) return;
+    if (!imageConfig) return;
+    const nextProvider = imageConfig.provider;
+    const nextCount = nextProvider === 'codex-native' ? 1 : count;
+    setProvider(nextProvider);
+    setCount(nextCount);
+    session.updateDraft(
+      { providerSource: 'default' },
+      { persist: false }
+    );
+  }, [count, imageConfig, session, shouldLoadDefaultProvider, official.official]);
+
+  useEffect(() => {
+    if (!pendingModelId || official.authState !== 'signed_in' || official.activationState !== 'ready'
+      || pendingValidation.current === pendingModelId || !props.gatewayAccountService) return;
+    pendingValidation.current = pendingModelId;
     let active = true;
-    void props.creatorServicesService?.getConfig().then(response => {
+    void props.gatewayAccountService.getState({ refreshModels: true }).then(state => {
       if (!active) return;
-      const nextProvider = response.config.image.provider;
-      const nextCount = nextProvider === 'codex-native' ? 1 : count;
-      setProvider(nextProvider);
-      setCount(nextCount);
-      session.updateDraft(
-        {
-          provider: nextProvider,
-          providerSource: 'default',
-          candidateCount: nextCount
-        },
-        { persist: false }
-      );
-    }).catch(() => undefined);
+      props.onGatewayStateChange?.(state);
+      const ready = state.models.filter(model => model.modality === 'image' && gatewayModelReady(model));
+      const requested = ready.find(model => gatewayModelIdMatches(model.id, pendingModelId));
+      const recommended = ready.find(model => gatewayModelIdMatches(model.id, state.recommendedModels?.image))
+        ?? ready.find(model => model.recommended);
+      const chosen = requested ?? recommended ?? ready[0];
+      if (chosen) session?.updateDraft({ officialModels: { image: chosen.id }, __creatorUserSelected: true });
+      if (!requested) setNotice(chosen
+        ? recommended
+          ? l('所选模型当前账户不可用，已切换为推荐图片模型。', 'That model is unavailable for this account. A recommended image model is selected.')
+          : l('所选模型当前账户不可用，已切换为可用图片模型。', 'That model is unavailable for this account. An available image model is selected.')
+        : l('当前账户暂无可用的图片模型。', 'No image model is available for this account.'));
+      setPendingModelId(undefined);
+    }).catch(() => {
+      if (active) { setPendingModelId(undefined); setNotice(l('账户模型目录刷新失败，请重新选择模型。', 'Could not refresh your account models. Select a model again.')); }
+    });
     return () => { active = false; };
-  }, [count, props.creatorServicesService, session, shouldLoadDefaultProvider, official.official]);
+  }, [pendingModelId, official.authState, official.activationState, props.gatewayAccountService, props.onGatewayStateChange, session?.job.id]);
 
   useEffect(() => {
     const { session, l } = previewContext.current;
@@ -293,63 +414,83 @@ export default function ImageGenerationWorkspace(props: {
     }
   }, [generating, l, latestVersion]);
 
-  function openStep(step: ImageStep) {
-    const nextFurthestStep = Math.max(furthestStep, step) as ImageStep;
-    setCurrentStep(step);
-    setFurthestStep(nextFurthestStep);
-    session?.updateDraft({
-      currentStep: step,
-      furthestStep: nextFurthestStep
-    });
-  }
-
-  function nextStep() {
-    setError('');
-    if (currentStep === 0 && characterCount === 0) {
-      setError(l('请先描述需要生成的画面', 'Describe the image you want to create'));
-      return;
-    }
-    if (missingReference) {
-      setError(referenceValidationMessage);
-      openStep(0);
-      return;
-    }
-    openStep(Math.min(2, currentStep + 1) as ImageStep);
-  }
-
   function updatePrompt(value: string) {
     setPrompt(value);
     session?.updateDraft({ prompt: value });
     setError('');
   }
 
+  function applyTemplate(value: string, ratio: string) {
+    updatePrompt(value);
+    if (imageOptions?.aspectRatios?.includes(ratio)) {
+      setAspectRatio(ratio);
+      session?.updateDraft({ aspectRatio: ratio });
+    }
+    setNotice(l('已填入模版提示词，可以继续调整', 'Template prompt added. You can keep refining it.'));
+    const input = document.getElementById('image-prompt-input');
+    input?.focus({ preventScroll: true });
+    if (input && typeof input.scrollIntoView === 'function') {
+      input.scrollIntoView({
+        behavior: typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        block: 'center'
+      });
+    }
+  }
+
   function updateProvider(value: ImageGenerationProvider) {
     if (official.official) return;
     setProvider(value);
+    const options = imageModelOptions(value, value === 'codex-native' ? '' : (imageConfig ?? defaultImageConfig)[value].model);
+    const nextRatio = options.aspectRatios?.includes(aspectRatio) ? aspectRatio : options.aspectRatios?.[0] ?? '';
+    const nextResolution = options.resolutions?.includes(resolution) ? resolution : options.resolutions?.[0] ?? '';
+    const nextQuality = options.qualities?.includes(modelQuality) ? modelQuality : options.qualities?.includes(quality) ? quality : options.qualities?.[0] ?? '';
+    setAspectRatio(nextRatio); setResolution(nextResolution); setModelQuality(nextQuality);
     const nextCount = value === 'codex-native' ? 1 : count;
     if (nextCount !== count) setCount(nextCount);
     session?.updateDraft({
       provider: value,
       providerSource: 'user',
-      candidateCount: nextCount
+      candidateCount: nextCount,
+      aspectRatio: value === 'codex-native' ? '' : nextRatio,
+      resolution: nextResolution,
+      modelQuality: nextQuality
     });
     setError('');
   }
 
+  function selectCatalogModel(id: string) {
+    if (id === localImageModelId) {
+      setPendingModelId(undefined);
+      pendingValidation.current = undefined;
+      if (imageConfig && localConfigured) updateProvider(imageConfig.provider);
+      return;
+    }
+    if (official.official) { official.selectModel(id); return; }
+    if (!publicModels.some(model => gatewayModelIdMatches(model.id, id) && gatewayModelReady(model))) return;
+    setPendingModelId(id);
+    session?.updateDraft({ __creatorUserSelected: true }, { semantic: true });
+    pendingValidation.current = undefined;
+    requireGenerationAccess();
+  }
+
   function updateSize(value: ImageGenerationSize) {
     setSize(value);
-    session?.updateDraft({ size: value });
+    const nextRatio = imageSizeAspectRatio(value);
+    if (imageOptions?.aspectRatios?.includes(nextRatio)) setAspectRatio(nextRatio);
+    session?.updateDraft({ size: value, ...(imageOptions?.aspectRatios?.includes(nextRatio) ? { aspectRatio: nextRatio } : {}) });
     setError('');
   }
 
   function updateQuality(value: ImageGenerationQuality) {
     setQuality(value);
-    session?.updateDraft({ quality: value });
+    const manualQuality = !official.official && imageOptions?.qualities?.includes(value);
+    if (manualQuality) setModelQuality(value);
+    session?.updateDraft({ quality: value, ...(manualQuality ? { modelQuality: value } : {}) });
     setError('');
   }
 
   function updateCount(value: number) {
-    if (!official.official && provider === 'codex-native' && value !== 1) return;
+    if (!official.official && localProvider === 'codex-native' && value !== 1) return;
     setCount(value);
     session?.updateDraft({ candidateCount: value });
     setError('');
@@ -373,7 +514,8 @@ export default function ImageGenerationWorkspace(props: {
   }
 
   async function generate() {
-    if (generating) return;
+    if (busy) return;
+    if (!requireGenerationAccess(!official.official && !pendingModelId)) return;
     if (official.official && !official.ready) { setError(l('官方图片服务暂不可用，请在账户页面检查连接状态', 'Official image service is unavailable. Check the connection in your account.')); return; }
     if (session === null) {
       setError(l(
@@ -384,23 +526,26 @@ export default function ImageGenerationWorkspace(props: {
     }
     if (!prompt.trim()) {
       setError(l('请先描述需要生成的画面', 'Describe the image you want to create'));
-      openStep(0);
+      return;
+    }
+    if (!official.official && !localConfigured) {
+      setError(l('请先在设置中配置可用的本地生图服务。', 'Configure a ready local image service in Settings first.'));
       return;
     }
     if (missingReference) {
       setError(referenceValidationMessage);
-      openStep(0);
       return;
     }
     setError('');
     setNotice('');
+    setSubmitting(true);
     session.updateDraft({
       prompt: prompt.trim(),
-      provider: official.official ? 'openai' : provider,
+      provider: official.official ? 'openai' : localProvider,
       size,
       quality,
       candidateCount: count,
-      ...(official.official ? { ...official.draftPatch, aspectRatio, resolution, officialQuality } : {})
+      ...(official.official ? { ...official.draftPatch, aspectRatio, resolution, officialQuality } : { aspectRatio: imageOptions ? aspectRatio : '', resolution: imageOptions ? resolution : '', modelQuality: imageOptions ? modelQuality : quality })
     }, { semantic: true });
     try {
       await session.flush();
@@ -409,13 +554,17 @@ export default function ImageGenerationWorkspace(props: {
         await session.uploadReferenceImage(referenceFile);
         setReferenceFile(null);
       }
-      await session.applyAction({
+      const next = await session.applyAction({
         actor: 'user',
         action: 'run-stage',
         input: { stageId: 'generate' }
       });
+      const submittedStage = next.stages.filter(stage => stage.stageId === 'generate').at(-1);
       setNotice(l('生成任务已提交，完成后会自动显示结果', 'Generation started. Results will appear automatically.'));
-    } catch {}
+      if (submittedStage?.status !== 'failed' && submittedStage?.status !== 'interrupted') props.onGenerated?.();
+    } catch {} finally {
+      setSubmitting(false);
+    }
   }
 
   async function download(artifact: CreatorArtifact, index: number) {
@@ -436,7 +585,7 @@ export default function ImageGenerationWorkspace(props: {
       link.download = artifactFileName(artifact, selectedResult?.value ?? 1, index + 1);
       link.click();
       if (temporaryUrl !== undefined) window.setTimeout(() => URL.revokeObjectURL(temporaryUrl), 0);
-      setNotice(l(`图片 ${index + 1} 已开始下载`, `Image ${index + 1} download started`));
+      setNotice(l(`图片 ${index + 1} 已开始下载`, `Image ${index + 1} download started`, `Nedladdning av bild ${index + 1} har startat`));
     } catch (caught) {
       session.captureCreatorFailure(
         'image-generation.download-result',
@@ -448,346 +597,319 @@ export default function ImageGenerationWorkspace(props: {
   }
 
   function selectVersion(version: number) {
-    openStep(2);
-    setNotice(l(`正在查看 V${version}`, `Viewing V${version}`));
+    setNotice(l(`正在查看 V${version}`, `Viewing V${version}`, `Visar V${version}`));
   }
 
   function handleCommand(command: string) {
     if (/示例|sample/i.test(command)) {
-      updatePrompt(l(samplePromptZh, samplePromptEn));
-      openStep(0);
+      updatePrompt(l(samplePromptZh, samplePromptEn, samplePromptSv));
       return l('示例提示词已填入，可以继续设置画幅和质量。', 'The sample prompt is ready. Continue with format and quality.');
     }
     if (/横向|横版|landscape|3:2/i.test(command)) {
       updateSize('1536x1024');
-      openStep(1);
       return l('画幅已改为横向 3:2。', 'Format changed to landscape 3:2.');
     }
     if (/竖向|竖版|portrait|2:3/i.test(command)) {
       updateSize('1024x1536');
-      openStep(1);
       return l('画幅已改为竖向 2:3。', 'Format changed to portrait 2:3.');
     }
     if (/方形|square|1:1/i.test(command)) {
       updateSize('1024x1024');
-      openStep(1);
       return l('画幅已改为方形 1:1。', 'Format changed to square 1:1.');
-    }
-    const normalized = command.toLowerCase();
-    const providerMatch = providers.find(item => (
-      normalized.includes(item.value)
-      || command.includes(item.zh)
-      || normalized.includes(item.en.toLowerCase())
-    ));
-    if (providerMatch) {
-      updateProvider(providerMatch.value);
-      openStep(1);
-      return l(
-        `图像服务已改为${providerMatch.zh}。`,
-        `Image provider changed to ${providerMatch.en}.`
-      );
     }
     if (command.trim().length > 8) {
       updatePrompt(command.trim());
-      openStep(0);
       return l('画面描述已同步，可以继续设置生成参数。', 'The image description is synchronized. Continue with generation settings.');
     }
     return l('请描述画面主体、环境、风格、光线和构图。', 'Describe the subject, setting, style, lighting, and composition.');
   }
 
+  const imageSettingSections: ImageGenerationSettingSection[] = [{
+    id: 'aspect-ratio',
+    label: l('图片画幅', 'Image format'),
+    value: imageOptions ? aspectRatio : size,
+    options: imageOptions
+      ? (imageOptions.aspectRatios ?? []).map(value => ({ value, label: value }))
+      : sizes.map(item => ({ value: item.value, label: item.ratio })),
+    ratio: true,
+    onChange: value => {
+      if (imageOptions) {
+        setAspectRatio(value);
+        session?.updateDraft({ aspectRatio: value });
+      } else updateSize(readSize(value));
+    }
+  }];
+  if (imageOptions?.resolutions?.length) {
+    imageSettingSections.push({
+      id: 'resolution',
+      label: l('分辨率', 'Resolution'),
+      value: resolution,
+      options: imageOptions.resolutions.map(value => ({ value, label: value })),
+      onChange: value => {
+        setResolution(value);
+        session?.updateDraft({ resolution: value });
+      }
+    });
+  }
+  imageSettingSections.push({
+    id: 'quality',
+    label: l('图片质量', 'Image quality'),
+    value: imageOptions ? activeQuality : quality,
+    options: imageOptions
+      ? (imageOptions.qualities ?? []).map(value => ({ value, label: imageQualityLabel(value, l) }))
+      : qualities.map(item => ({ value: item.value, label: l(item.zh, item.en) })),
+    onChange: value => {
+      if (!imageOptions) {
+        updateQuality(readQuality(value));
+      } else if (official.official) {
+        setOfficialQuality(value);
+        session?.updateDraft({ officialQuality: value });
+      } else {
+        setModelQuality(value);
+        session?.updateDraft({ modelQuality: value });
+      }
+    }
+  }, {
+    id: 'count',
+    label: l('生成数量', 'Number of images'),
+    value: String(count),
+    options: (!official.official && localProvider === 'codex-native' ? [1] : [1, 2, 4]
+      .filter(value => value <= (official.official ? official.model?.imageOptions?.maxImages ?? 4 : 4)))
+      .map(value => ({
+        value: String(value),
+        label: `${value * outputBatchSize} ${l('张', value * outputBatchSize === 1 ? 'image' : 'images')}`
+      })),
+    onChange: value => updateCount(Number(value))
+  });
+  const availableImageSettingSections = imageSettingSections.filter(section => section.options.length > 0);
+  const hasImageSetting = (id: string) => availableImageSettingSections.some(section => section.id === id);
+  const imageSettingsSummary = {
+    aspectRatio: hasImageSetting('aspect-ratio') ? selectedSize.ratio : '',
+    count: String(count * outputBatchSize),
+    resolution: hasImageSetting('resolution') ? imageOptions ? resolution : size : '',
+    quality: hasImageSetting('quality') ? l(selectedQuality.zh, selectedQuality.en) : ''
+  };
+  const promptField = <div className="creator-tool-field image-generation-prompt-field">
+    <span id="image-prompt-label" className="image-generation-visually-hidden">{l('提示词', 'Prompt')}</span>
+    <textarea
+      id="image-prompt-input"
+      rows={5}
+      maxLength={creatorPromptMaxLength}
+      value={prompt}
+      onChange={event => updatePrompt(event.target.value)}
+      aria-labelledby="image-prompt-label"
+      aria-invalid={missingReference}
+      aria-describedby={missingReference ? 'image-reference-validation' : undefined}
+      placeholder={l('例如：一位产品设计师站在明亮的工作室中，真实摄影，柔和侧光，画面简洁', 'For example: A product designer in a bright studio, realistic photography, soft side lighting, clean composition')}
+    />
+    {missingReference ? <p id="image-reference-validation" className="creator-services-inline-note" role="status">{referenceValidationMessage}</p> : null}
+  </div>;
+
   return (
     <CreatorToolShell
       title={l('图像生成', 'Image Generation')}
       subtitle={l('从文字创意生成可下载的视觉素材', 'Create downloadable visual assets from a written idea')}
-      context={selectedResult
-        ? l(`V${selectedResult.value} · ${selectedResult.artifacts.length} 张图片`, `V${selectedResult.value} · ${selectedResult.artifacts.length} images`)
-        : currentStep === 0
-          ? l('正在编辑画面描述', 'Editing image description')
-          : currentStep === 1
-            ? `${l(selectedSize.zh, selectedSize.en)} · ${selectedSize.ratio}`
-            : generating
-              ? l('正在生成', 'Generating')
-              : l('等待生成', 'Ready to generate')}
-      initialMessage={l('描述你想生成的画面，我会帮你整理画幅、质量和输出数量。', 'Describe the image you want, then set its format, quality, and output count.')}
+      context={busy
+        ? l('正在生成图片', 'Generating images')
+        : selectedResult
+          ? l(`V${selectedResult.value} · ${selectedResult.artifacts.length} 张图片`, `V${selectedResult.value} · ${selectedResult.artifacts.length} images`, `V${selectedResult.value} · ${selectedResult.artifacts.length} bilder`)
+          : currentImageSummary}
+      taskSummary={<CreatorTaskSummary
+        sourceIcon={ImageIcon}
+        sourceLabel={l('画面描述', 'Prompt')}
+        sourceValue={(selectedResult ? readString(resultSettings?.prompt) : prompt.trim()) || l('待添加', 'Not added', 'Inte tillagt')}
+        compactSummary={selectedResult
+          ? `${l(resultProvider.zh, resultProvider.en)} · ${resultSizeOption.ratio} · V${selectedResult.value}`
+          : [l(selectedProvider.zh, selectedProvider.en), ...(showsImageFormat ? [selectedSize.ratio] : []),
+            l(`${count * outputBatchSize} 张`, `${count * outputBatchSize} images`, `${count * outputBatchSize} bilder`)].join(' · ')}
+        items={selectedResult ? [
+          { label: l('图像服务', 'Provider'), value: l(resultProvider.zh, resultProvider.en) },
+          { label: l('画幅', 'Format'), value: resultSettings?.aspectRatio ? resultSizeOption.ratio : `${l(resultSizeOption.zh, resultSizeOption.en)} · ${resultSizeOption.ratio}` },
+          { label: l('分辨率', 'Resolution'), value: readString(resultSettings?.resolution) || (resultSettings?.aspectRatio ? l('默认', 'Default') : resultSize) },
+          { label: l('质量', 'Quality'), value: l(resultQuality.zh, resultQuality.en) },
+          { label: l('当前版本', 'Version'), value: `V${selectedResult.value}` }
+        ] : [
+          ...(currentReferenceName ? [{ label: l('参考图', 'Reference image'), value: currentReferenceName }] : []),
+          { label: l('图像服务', 'Provider'), value: l(selectedProvider.zh, selectedProvider.en) },
+          ...(showsImageFormat ? [{ label: l('画幅', 'Format'), value: imageOptions ? selectedSize.ratio : `${l(selectedSize.zh, selectedSize.en)} · ${selectedSize.ratio}` }] : []),
+          ...(showsImageResolution ? [{ label: l('分辨率', 'Resolution'), value: imageOptions ? resolution : size }] : []),
+          ...(showsImageQuality ? [{ label: l('质量', 'Quality'), value: l(selectedQuality.zh, selectedQuality.en) }] : []),
+          { label: l('生成数量', 'Images'), value: String(count) }
+        ]}
+      />}
+      initialMessage={showsImageFormat && showsImageQuality
+        ? l('描述你想生成的画面，我会帮你整理画幅、质量和输出数量。', 'Describe the image you want, then set its format, quality, and output count.')
+        : l('请描述画面主体、环境、风格、光线和构图。', 'Describe the subject, setting, style, lighting, and composition.')}
       currentIssue={visibleError || undefined}
-      suggestions={[l('填入示例提示词', 'Use a sample prompt'), l('生成横向图片', 'Create a landscape image')]}
+      workspaceIssue={!props.embedded && visibleError ? {
+        title: `${l('图片生成', 'Image generation')} · ${l('失败', 'Failed')}`,
+        description: visibleError
+      } : undefined}
+      suggestions={[l('填入示例提示词', 'Use a sample prompt'), ...(showsImageFormat ? [l('生成横向图片', 'Create a landscape image')] : [])]}
       placeholder={props.promptHint ?? l('描述需要生成的图片', 'Describe the image to generate')}
       onBack={props.onBack}
       onCommand={handleCommand}
       pageClassName="image-generation-workspace-page"
       contentClassName="media-generation-workspace-content"
+      embedded={props.embedded && !selectedResult}
     >
-      <div className="creator-tool-stack media-generation-stack">
-        <nav className="video-translation-steps creator-tool-steps image-generation-steps" aria-label={l('图像生成流程', 'Image generation workflow')}>
-          <ol>
-            {[l('画面描述', 'Prompt'), l('生成设置', 'Settings'), l('生成图片', 'Generate')].map((label, index) => {
-              const active = currentStep === index;
-              const completed = index < currentStep;
-              return (
-                <li key={label} data-active={active} data-completed={completed}>
-                  <button
-                    type="button"
-                    disabled={index > furthestStep}
-                    aria-current={active ? 'step' : undefined}
-                    onClick={() => openStep(index as ImageStep)}
-                  >
-                    <span>{completed ? <Check size={13} strokeWidth={2.2} /> : index + 1}</span>
-                    <strong>{label}</strong>
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-        </nav>
-
-        <div className="media-generation-step-scroll">
-          {currentStep === 0 ? (
-            <section className="creator-tool-panel media-generation-prompt-panel" aria-labelledby="image-prompt-title">
-              <div className="creator-tool-panel-heading">
-                <div>
-                  <h2 id="image-prompt-title">{l('画面描述', 'Image prompt')}</h2>
-                  <p>{l(`写清主体、环境、风格、光线与构图，最多 ${creatorPromptMaxLength} 字`, `Describe subject, setting, style, lighting, and composition, up to ${creatorPromptMaxLength.toLocaleString('en-US')} characters`)}</p>
+      <div className="creator-tool-stack image-generation-studio">
+        <form className="image-generation-composer" aria-label={l('图像生成', 'Image Generation')} onSubmit={event => {
+          event.preventDefault();
+          void generate();
+        }}>
+          <fieldset className="image-generation-fields" disabled={busy}>
+            <div className="image-generation-editor">
+              <div className="image-generation-composer-heading">
+                {props.embeddedTabs ?? <h2 id="image-prompt-title"><ImageIcon size={17} strokeWidth={1.7} aria-hidden="true" />{l('图像', 'Image', 'Bild')}</h2>}
+                {!props.embedded ? <span>{l('文字生成图像', 'Text to image', 'Text till bild')}</span> : null}
+              </div>
+              {supportsReferenceImage ? (
+                <div className="image-generation-reference" data-loaded={Boolean(currentReferenceName)}>
+                  <label className="image-generation-reference-upload" title={currentReferenceName ? l('更换参考图', 'Replace reference') : l('添加参考图', 'Add reference image')}>
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      aria-label={l('上传图像生成参考图', 'Upload an image generation reference')}
+                      onChange={event => {
+                        const file = event.target.files?.[0];
+                        if (file) chooseReference(file);
+                        event.target.value = '';
+                      }}
+                    />
+                    <span className="image-generation-reference-thumbnail">
+                      {referencePreview ? <img src={referencePreview} alt={l('图像生成参考图', 'Image generation reference')} /> : <ImagePlus size={24} strokeWidth={1.5} />}
+                    </span>
+                    {!currentReferenceName ? <span className="image-generation-reference-copy">
+                      <span><strong>{l('参考图', 'Reference', 'Referens')}</strong>
+                        <small>{l('选填', 'Optional')}</small></span>
+                      <small>{l('JPG、PNG、WebP，最大 20 MB', 'JPG, PNG, WebP, up to 20 MB', 'JPG, PNG, WebP, högst 20 MB')}</small>
+                    </span> : null}
+                    <span className="image-generation-reference-count">{currentReferenceName ? 1 : 0}/1</span>
+                  </label>
+                  {currentReferenceName ? <button className="image-generation-reference-remove" type="button" onClick={clearReference}
+                    aria-label={l('移除参考图', 'Remove reference')} title={l('移除参考图', 'Remove reference')}>
+                    <X size={16} strokeWidth={1.8} />
+                  </button> : null}
                 </div>
+              ) : null}
+              {promptField}
+              <div className="image-generation-prompt-tools">
+                <button type="button" title={l('填入示例提示词', 'Use sample prompt')} aria-label={l('填入示例提示词', 'Use sample prompt')} onClick={() => updatePrompt(l(samplePromptZh, samplePromptEn, samplePromptSv))}>
+                  <WandSparkles size={16} strokeWidth={1.8} />
+                </button>
+                <button type="button" disabled={!prompt} title={l('清空提示词', 'Clear prompt', 'Rensa prompt')} aria-label={l('清空提示词', 'Clear prompt', 'Rensa prompt')} onClick={() => updatePrompt('')}>
+                  <Trash2 size={16} strokeWidth={1.8} />
+                </button>
                 <small>{characterCount} / {creatorPromptMaxLength}</small>
               </div>
-              <div className="creator-tool-field image-generation-prompt-field">
-                <span id="image-prompt-label">{l('提示词', 'Prompt')}</span>
-                <div className={supportsReferenceImage
-                  ? 'cover-prompt-row'
-                  : 'image-generation-prompt-row'}>
-                  {supportsReferenceImage ? (
-                    <div className="cover-reference-control">
-                      <label
-                        className="creator-tool-upload cover-reference-upload"
-                        title={currentReferenceName ?? l('添加参考图', 'Add reference image')}
-                      >
-                        <input
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp"
-                          aria-label={l('上传图像生成参考图', 'Upload an image generation reference')}
-                          onChange={event => chooseReference(event.target.files?.[0] ?? null)}
-                        />
-                        {referencePreview
-                          ? <img src={referencePreview} alt={l('图像生成参考图', 'Image generation reference')} />
-                          : currentReferenceName
-                            ? <ImagePlus size={23} />
-                            : <UploadCloud size={23} strokeWidth={1.5} />}
-                        <span>{currentReferenceName
-                          ? l('更换参考图', 'Replace reference')
-                          : l('添加参考图', 'Add reference')}</span>
-                      </label>
-                      {currentReferenceName ? (
-                        <button
-                          className="cover-reference-remove"
-                          type="button"
-                          onClick={clearReference}
-                          aria-label={l('移除参考图', 'Remove reference')}
-                          title={l('移除参考图', 'Remove reference')}
-                        >
-                          <X size={14} strokeWidth={2} />
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  <textarea
-                    rows={7}
-                    maxLength={creatorPromptMaxLength}
-                    value={prompt}
-                    onChange={event => updatePrompt(event.target.value)}
-                    aria-labelledby="image-prompt-label"
-                    aria-invalid={missingReference}
-                    aria-describedby={missingReference ? 'image-reference-validation' : undefined}
-                    placeholder={l('例如：一位产品设计师站在明亮的工作室中，真实摄影，柔和侧光，画面简洁', 'For example: A product designer in a bright studio, realistic photography, soft side lighting, clean composition')}
-                  />
-                </div>
-                {missingReference ? (
-                  <p id="image-reference-validation" className="creator-services-inline-note" role="status">
-                    {referenceValidationMessage}
-                  </p>
-                ) : null}
-              </div>
-              <button className="smart-dubbing-sample" type="button" onClick={() => updatePrompt(l(samplePromptZh, samplePromptEn))}>
-                <WandSparkles size={14} strokeWidth={1.8} />
-                {l('填入示例提示词', 'Use sample prompt')}
-              </button>
-            </section>
-          ) : null}
-
-          {currentStep === 1 ? (
-            <section className="creator-tool-panel" aria-labelledby="image-settings-title">
-              <div className="creator-tool-panel-heading">
-                <div>
-                  <h2 id="image-settings-title">{l('生成设置', 'Generation settings')}</h2>
-                  <p>{l('设置图片画幅、质量和一次生成数量', 'Set the image format, quality, and number of outputs')}</p>
-                </div>
-              </div>
-              {official.official ? <OfficialModelField label={l('图片模型', 'Image model')} service={official} disabled={generating} /> : <div className="media-generation-control">
-                <span>{l('图像服务', 'Image provider')}</span>
-                <div className="creator-tool-segmented" role="radiogroup" aria-label={l('图像服务', 'Image provider')}>
-                  {providers.map(item => (
-                    <button type="button" role="radio" aria-checked={provider === item.value} aria-selected={provider === item.value} key={item.value} onClick={() => updateProvider(item.value)}>
-                      {l(item.zh, item.en)}
-                    </button>
-                  ))}
-                </div>
-                {provider === 'codex-native' ? (
-                  <p className="creator-services-inline-note">
-                    {l(
-                      '使用本机 Codex 生成图像，无需额外配置；每次任务生成 1 张。',
-                      'Use local Codex to generate images with no additional configuration; each task generates 1 image.'
-                    )}
-                  </p>
-                ) : null}
-              </div>}
-              {imageOptions ? <>
-                {[
-                  { key: 'aspectRatio', label: l('图片画幅', 'Image format'), values: imageOptions.aspectRatios, value: aspectRatio, set: setAspectRatio },
-                  { key: 'resolution', label: l('分辨率', 'Resolution'), values: imageOptions.resolutions, value: resolution, set: setResolution },
-                  { key: 'officialQuality', label: l('图片质量', 'Image quality'), values: imageOptions.qualities, value: officialQuality, set: setOfficialQuality }
-                ].filter(option => option.values?.length).map(option => <label className="creator-tool-field" key={option.key}>
-                  <span>{option.label}</span>
-                  <select aria-label={option.label} value={option.value} disabled={official.taskRunning || !official.ready}
-                    onChange={event => { option.set(event.target.value); session?.updateDraft({ [option.key]: event.target.value }); }}>
-                    {option.values?.map(value => <option key={value} value={value}>{value}</option>)}
-                  </select>
-                </label>)}
-              </> : <><div className="media-generation-control">
-                <span>{l('画幅', 'Format')}</span>
-                <div className="media-generation-option-grid" role="radiogroup" aria-label={l('图片画幅', 'Image format')}>
-                  {sizes.map(item => (
-                    <button type="button" role="radio" aria-checked={size === item.value} data-selected={size === item.value} key={item.value} onClick={() => updateSize(item.value)}>
-                      <span className="media-generation-ratio-swatch" data-ratio={item.ratio} />
-                      <strong>{l(item.zh, item.en)}</strong>
-                      <small>{item.ratio} · {item.value}</small>
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="media-generation-control">
-                <span>{l('生成质量', 'Quality')}</span>
-                <div className="creator-tool-segmented" role="radiogroup" aria-label={l('图片质量', 'Image quality')}>
-                  {qualities.map(item => (
-                    <button type="button" role="radio" aria-checked={quality === item.value} aria-selected={quality === item.value} key={item.value} onClick={() => updateQuality(item.value)}>
-                      {l(item.zh, item.en)}
-                    </button>
-                  ))}
-                </div>
-              </div></>}
-              <div className="media-generation-control">
-                <span>{l('生成数量', 'Number of images')}</span>
-                <div className="creator-tool-segmented" role="radiogroup" aria-label={l('生成数量', 'Number of images')}>
-                  {(!official.official && provider === 'codex-native' ? [1] : [1, 2, 4].filter(value => value <= (imageOptions?.maxImages ?? 4))).map(value => (
-                    <button type="button" role="radio" aria-checked={count === value} aria-selected={count === value} key={value} onClick={() => updateCount(value)}>
-                      {value} {l('张', value === 1 ? 'image' : 'images')}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </section>
-          ) : null}
-
-          {currentStep === 2 ? (
-            <div className="creator-task-final-grid media-generation-final-grid">
-              <section className="creator-tool-panel media-generation-output-panel" aria-labelledby="image-output-title">
-                <div className="creator-tool-panel-heading">
-                  <div>
-                    <h2 id="image-output-title">{selectedResult ? l('生成结果', 'Generated images') : l('生成图片', 'Generate images')}</h2>
-                    <p>{selectedResult ? l('查看历史版本并下载需要的方案', 'Review versions and download any image') : l('确认设置后开始生成图片', 'Review the settings, then start generating')}</p>
-                  </div>
-                  {selectedResult ? (
-                    <CreatorResultVersionMenu
-                      version={selectedResult.value}
-                      versions={resultVersions.map((version, index) => ({
-                        value: version.value,
-                        description: index === 0
-                          ? l('初次生成', 'Initial generation')
-                          : l(`第 ${index + 1} 次生成`, `Generation ${index + 1}`)
-                      }))}
-                      onVersionChange={selectVersion}
-                    />
-                  ) : null}
-                </div>
-                {selectedResult ? (
-                  <>
-                    <div className="image-generation-result-grid" data-count={selectedResult.artifacts.length} data-ratio={resultSizeOption.ratio}>
-                      {selectedResult.artifacts.map((artifact, index) => (
-                        <article key={artifact.id}>
-                          {imageUrls[artifact.id] ? (
-                            <img src={imageUrls[artifact.id]} alt={`${l('生成图片', 'Generated image')} ${index + 1}`} />
-                          ) : (
-                            <div className="video-result-player-status" role="status">
-                              <LoaderCircle className="smart-dubbing-spinner" size={18} />
-                              {l('正在加载预览', 'Loading preview')}
-                            </div>
-                          )}
-                          <footer>
-                            <span>
-                              <strong>{l('方案', 'Option')} {readCandidate(artifact, index + 1)}</strong>
-                              <small>{formatBytes(readArtifactBytes(artifact))}</small>
-                            </span>
-                            <button type="button" onClick={() => void download(artifact, index)} aria-label={`${l('下载图片', 'Download image')} ${index + 1}`} title={l('下载', 'Download')}>
-                              <Download size={16} strokeWidth={1.8} />
-                            </button>
-                          </footer>
-                        </article>
-                      ))}
-                    </div>
-                    <div className="media-generation-result-actions">
-                      <button type="button" onClick={() => void generate()} disabled={generating || (official.official && !official.ready)}>
-                        {generating ? <LoaderCircle className="smart-dubbing-spinner" size={15} /> : <RotateCcw size={15} />}
-                        {generating ? l('正在生成', 'Generating') : l('重新生成', 'Regenerate')}
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <div className="smart-dubbing-ready">
-                    <span><Images size={24} strokeWidth={1.6} /></span>
-                    <strong>{generating ? l('正在生成图片', 'Generating images') : l('准备生成图片', 'Ready to generate images')}</strong>
-                    <p>{l(
-                      `${l(selectedProvider.zh, selectedProvider.en)} · ${count} 张 ${selectedSize.ratio} 图片 · ${l(selectedQuality.zh, selectedQuality.en)}质量`,
-                      `${selectedProvider.en} · ${count} ${selectedSize.ratio} images · ${selectedQuality.en} quality`
-                    )}</p>
-                    <button className="creator-tool-primary" type="button" onClick={() => void generate()} disabled={generating || (official.official && !official.ready)}>
-                      {generating ? <LoaderCircle className="smart-dubbing-spinner" size={16} /> : <Sparkles size={16} />}
-                      {generating ? l('正在生成', 'Generating') : l('开始生成', 'Generate')}
-                    </button>
-                  </div>
-                )}
-              </section>
-              <CreatorTaskSummary
-                sourceIcon={ImageIcon}
-                sourceLabel={l('画面描述', 'Prompt')}
-                sourceValue={selectedResult ? readString(resultSettings?.prompt) : prompt.trim()}
-                items={selectedResult ? [
-                  { label: l('图像服务', 'Provider'), value: l(resultProvider.zh, resultProvider.en) },
-                  { label: l('画幅', 'Format'), value: `${l(resultSizeOption.zh, resultSizeOption.en)} · ${resultSizeOption.ratio}` },
-                  { label: l('分辨率', 'Resolution'), value: resultSize },
-                  { label: l('质量', 'Quality'), value: l(resultQuality.zh, resultQuality.en) },
-                  { label: l('当前版本', 'Version'), value: `V${selectedResult.value}` }
-                ] : [
-                  { label: l('图像服务', 'Provider'), value: l(selectedProvider.zh, selectedProvider.en) },
-                  { label: l('画幅', 'Format'), value: `${l(selectedSize.zh, selectedSize.en)} · ${selectedSize.ratio}` },
-                  { label: l('分辨率', 'Resolution'), value: imageOptions ? resolution || l('默认', 'Default') : size },
-                  { label: l('质量', 'Quality'), value: l(selectedQuality.zh, selectedQuality.en) },
-                  { label: l('生成数量', 'Images'), value: String(count) }
-                ]}
-              />
             </div>
-          ) : null}
-          {visibleError ? <p className="creator-tool-error" role="alert">{visibleError}</p> : null}
-          {notice ? <p className="creator-tool-notice" role="status">{notice}</p> : null}
-        </div>
+            <div className="image-generation-action-bar">
+              <div className="image-generation-model-row">
+                {official.official ? <OfficialModelField label={l('图片模型', 'Image model')} service={official} disabled={busy} layout="grouped" /> : (
+                  <label className="creator-tool-field image-generation-provider-picker">
+                    <OfficialModelSelect
+                      label={l('模型', 'Model')}
+                      value={selectedCatalogId}
+                      disabled={busy}
+                      layout="grouped"
+                      loginRequiredModelIds={loginRequiredModelIds}
+                      onOpen={loadPublicCatalog}
+                      onChange={selectCatalogModel}
+                      models={catalogModels}
+                    />
+                  </label>
+                )}
+              </div>
+              <ImageGenerationSettings
+                label={l('图片设置', 'Image settings', 'Bildinställningar')}
+                summary={imageSettingsSummary}
+                sections={availableImageSettingSections}
+                disabled={busy || official.taskRunning || (official.official && !official.ready)}
+                hideHeader={props.embedded}
+              />
+              <div className="image-generation-submit-row">
+                <button className="creator-tool-primary" type="submit" disabled={busy}>
+                  {busy ? <LoaderCircle className="smart-dubbing-spinner" size={16} /> : selectedResult ? <RotateCcw size={16} /> : <Sparkles size={16} />}
+                  {busy ? l('正在生成', 'Generating') : selectedResult ? l('重新生成', 'Regenerate') : l('开始生成', 'Generate')}
+                </button>
+              </div>
+            </div>
+          </fieldset>
+        </form>
 
-        <footer className="video-translation-wizard-actions media-generation-actions">
-          <button className="video-translation-secondary-action" type="button" onClick={() => currentStep === 0 ? props.onBack() : openStep((currentStep - 1) as ImageStep)}>
-            {currentStep === 0 ? l('返回', 'Back') : l('上一步', 'Back')}
-          </button>
-          {currentStep < 2 ? (
-            <button className="video-translation-primary-action" type="button" onClick={nextStep}>
-              {l('继续', 'Continue')}
-            </button>
-          ) : null}
-        </footer>
+        {!props.embedded && (selectedResult || generating) ? (
+          <section className="image-generation-output media-generation-output-panel" aria-labelledby="image-output-title">
+            <div className="creator-tool-panel-heading">
+              <div>
+                <h2 id="image-output-title">{selectedResult ? l('生成结果', 'Generated images') : l('生成图片', 'Generate images')}</h2>
+                <p>{generating ? l('任务正在后台运行，完成后会自动显示', 'The task is running in the background and will appear automatically') : l('查看历史版本并下载需要的方案', 'Review versions and download any image')}</p>
+              </div>
+              {selectedResult ? (
+                <CreatorResultVersionMenu
+                  version={selectedResult.value}
+                  versions={resultVersions.map((version, index) => ({
+                    value: version.value,
+                    description: index === 0
+                      ? l('初次生成', 'Initial generation')
+                      : l(`第 ${index + 1} 次生成`, `Generation ${index + 1}`, `Generering ${index + 1}`)
+                  }))}
+                  onVersionChange={selectVersion}
+                />
+              ) : null}
+            </div>
+            {selectedResult ? (
+              <>
+                <div className="image-generation-result-grid" data-count={selectedResult.artifacts.length} data-ratio={resultSizeOption.ratio}>
+                  {selectedResult.artifacts.map((artifact, index) => (
+                    <article key={artifact.id}>
+                      {imageUrls[artifact.id] ? (
+                        <img src={imageUrls[artifact.id]} alt={`${l('生成图片', 'Generated image')} ${index + 1}`} />
+                      ) : (
+                        <div className="video-result-player-status" role="status">
+                          <LoaderCircle className="smart-dubbing-spinner" size={18} />
+                          {l('正在加载预览', 'Loading preview')}
+                        </div>
+                      )}
+                      <footer>
+                        <span>
+                          <strong>{l('方案', 'Option')} {readCandidate(artifact, index + 1)}</strong>
+                          <small>{formatBytes(readArtifactBytes(artifact))}</small>
+                        </span>
+                        <button type="button" onClick={() => void download(artifact, index)} aria-label={`${l('下载图片', 'Download image')} ${index + 1}`} title={l('下载', 'Download')}>
+                          <Download size={16} strokeWidth={1.8} />
+                        </button>
+                      </footer>
+                    </article>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="smart-dubbing-ready">
+                <span><Images size={24} strokeWidth={1.6} /></span>
+                <strong>{generating ? l('正在生成图片', 'Generating images') : l('准备生成图片', 'Ready to generate images')}</strong>
+                <p>{l(
+                  `${l(selectedProvider.zh, selectedProvider.en)} · ${count * outputBatchSize} 张 ${selectedSize.ratio} 图片 · ${l(selectedQuality.zh, selectedQuality.en)}质量`,
+                  `${selectedProvider.en} · ${count} ${selectedSize.ratio} images · ${selectedQuality.en} quality`,
+                  `${l(selectedProvider.zh, selectedProvider.en)} · ${count} bilder i ${selectedSize.ratio} · ${l(selectedQuality.zh, selectedQuality.en)} kvalitet`
+                )}</p>
+              </div>
+            )}
+          </section>
+        ) : null}
+        {props.embedded && visibleError ? <p className="creator-tool-error" role="alert">{visibleError}</p> : null}
+        {notice ? <p className="creator-tool-notice" role="status">{notice}</p> : null}
+        {!props.embedded ? (
+          <ImageGenerationDiscovery
+            official={official}
+            models={catalogModels}
+            localModelId={localImageModelId}
+            selectedId={selectedCatalogId}
+            busy={busy}
+            onModelSelect={selectCatalogModel}
+            onTemplate={applyTemplate}
+          />
+        ) : null}
       </div>
     </CreatorToolShell>
   );
@@ -826,10 +948,6 @@ function createImageResultVersions(
       artifacts: versionArtifacts.sort(compareCandidates),
       state: {}
     }));
-}
-
-function readImageStep(value: CreatorJson | undefined, fallback: ImageStep): ImageStep {
-  return value === 0 || value === 1 || value === 2 ? value : fallback;
 }
 
 function compareCandidates(left: CreatorArtifact, right: CreatorArtifact) {
@@ -881,6 +999,20 @@ function readSize(value: CreatorJson | undefined): ImageGenerationSize {
 
 function readQuality(value: CreatorJson | undefined): ImageGenerationQuality {
   return value === 'low' || value === 'high' ? value : 'medium';
+}
+
+function imageQualityLabel(value: string, l: LocalizeCopy): string {
+  switch (value.toLowerCase()) {
+    case 'low': return l('快速', 'Fast');
+    case 'medium':
+    case 'standard': return l('标准', 'Standard');
+    case 'high':
+    case 'hd': return l('高清', 'High');
+    case 'auto': return l('自动选择', 'Automatic', 'Automatiskt');
+    case 'xhigh': return `${l('高清', 'High')}+`;
+    case 'max': return l('最高', 'Maximum', 'Maximal');
+    default: return value;
+  }
 }
 
 function readCount(value: CreatorJson | undefined): number {
