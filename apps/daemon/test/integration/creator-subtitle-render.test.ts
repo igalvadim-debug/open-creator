@@ -15,6 +15,7 @@ import { delimiter, dirname, join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { buildKrillinSubtitleStyle } from '../../src/creator/krillin/adapter.js';
 import { createSubtitlePreviewService } from '../../src/creator/krillin/subtitle-preview.js';
+import { createSubtitleRenderService } from '../../src/creator/krillin/subtitle-render.js';
 import { readKrillinRuntimeManifest } from '../../src/creator/krillin/manifest.js';
 import { resolveYtDlpRuntime } from '../../src/creator/yt-dlp/runtime.js';
 import sharp from 'sharp';
@@ -36,6 +37,55 @@ afterAll(() => {
 });
 
 describe.runIf(hasPackagedRuntime)('Creator packaged subtitle rendering', () => {
+  it('compiles complete documents without model configuration and returns verified packaged fonts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'opencreator-subtitle-document-'));
+    roots.push(root);
+    const service = createSubtitleRenderService({ resourceRoot: runtimeRoot, workRoot: root, ensureRuntimeReady: async () => {} });
+    const input = { width: 640, height: 360, horizontal: true, bilingual: true, subtitlePosition: 'bottom' as const,
+      subtitleStyle: { fontPreset: 'sans' }, cues: [{ startMs: 1230, endMs: 4560, text: '完整字幕！\n手动换行', sourceText: 'Original context, '.repeat(20) }] };
+    const [first, second] = await Promise.all([service.compile(input), service.compile(input)]);
+    expect(first).toEqual(second);
+    expect(first.ass).toContain(input.cues[0]!.sourceText);
+    expect(first.ass).toContain('完整字幕！\\N手动换行');
+    expect(first.ass).toContain('00:00:01.23,00:00:04.56');
+    expect(first.fonts.length).toBeGreaterThan(0);
+    for (const font of first.fonts) {
+      const bytes = await service.font(font.id);
+      expect(createHash('sha256').update(bytes!).digest('hex')).toBe(font.sha256);
+    }
+    expect(await service.font('../manifest.json')).toBeUndefined();
+    expect(await service.font('0'.repeat(64))).toBeUndefined();
+    const changed = await service.compile({ ...input, subtitleStyle: { fontPreset: 'serif' } });
+    expect(changed.contentHash).not.toBe(first.contentHash);
+  });
+
+  it('keeps bilingual glyphs sharp with a soft shadow and zero outline', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'opencreator-soft-shadow-'));
+    roots.push(root);
+    const service = createSubtitleRenderService({ resourceRoot: runtimeRoot, workRoot: root, ensureRuntimeReady: async () => {} });
+    const input = { width: 1920, height: 1080, horizontal: true, bilingual: true, subtitlePosition: 'top' as const,
+      cues: [{ startMs: 0, endMs: 2000, text: '你知道吗？你的人生今晚就可能彻底改变。', sourceText: 'Do you know your entire life can change tonight?' }] };
+    const style = { fontPreset: 'sans', fontWeight: 'medium', outlineWidth: 0,
+      shadow: { enabled: true, color: '#000000', opacity: 0.85, offsetX: 0, offsetY: 2, blur: 4 } };
+    const frames: Buffer[] = [];
+    for (const enabled of [false, true]) {
+      const bundle = await service.compile({ ...input, subtitleStyle: { ...style, shadow: { ...style.shadow, enabled } } });
+      const assPath = join(root, `${enabled}.ass`);
+      writeFileSync(assPath, bundle.ass);
+      frames.push(run(ffmpegPath, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=black@0:s=1920x1080:d=1,format=rgba',
+        '-ss', '0.5', '-vf', `ass=filename='${assPath}':fontsdir='${join(runtimeRoot, 'fonts')}':alpha=1`,
+        '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', 'pipe:1'], null));
+    }
+    const countPixels = (frame: Buffer, predicate: (r: number, alpha: number) => boolean) => {
+      let count = 0;
+      for (let i = 0; i < frame.length; i += 4) if (predicate(frame[i]!, frame[i + 3]!)) count++;
+      return count;
+    };
+    const sharpGlyphs = frames.map(frame => countPixels(frame, (r, alpha) => r > 180 && alpha > 250));
+    expect(sharpGlyphs[0]).toBeGreaterThan(10000);
+    expect(sharpGlyphs[1]).toBeGreaterThan(sharpGlyphs[0]! * 0.95);
+    expect(countPixels(frames[1]!, (r, alpha) => r < 5 && alpha > 5 && alpha < 200)).toBeGreaterThan(1000);
+  });
   it.each([
     ['sans', 640, 360, 'top', false],
     ['serif', 640, 360, 'bottom', false],
@@ -45,6 +95,7 @@ describe.runIf(hasPackagedRuntime)('Creator packaged subtitle rendering', () => 
     const style = {
       fontPreset, fontWeight: 'bold', fontSize: 'medium',
       primaryColor: '#7EE7FF', secondaryColor: '#FFD45C', outlineColor: '#102030', outlineWidth: 2,
+      verticalOffset: 40,
       shadow: { enabled: true, color: '#000000', opacity: 0.6, offsetX: -4, offsetY: 6, blur: 2 }
     } as const;
     const result = renderStyle(style, { width, height, position, mixed });
@@ -83,6 +134,17 @@ describe.runIf(hasPackagedRuntime)('Creator packaged subtitle rendering', () => 
     const second = renderStyle({ shadow: { ...style.shadow, offsetX: 6, offsetY: -6 } });
     expect(first.frame.sha256).not.toBe(second.frame.sha256);
   });
+  it.each([
+    [640, 360],
+    [360, 640]
+  ])('raises burned subtitles in %dx%d video when height increases', (width, height) => {
+    const options = { width, height, position: 'top' };
+    const baseline = renderStyle({ verticalOffset: 0 }, options);
+    const raised = renderStyle({ verticalOffset: 40 }, options);
+    expect(baseline.frame.changedPixels).toBeGreaterThan(100);
+    expect(raised.frame.changedPixels).toBeGreaterThan(100);
+    expect(baseline.frame.centerY - raised.frame.centerY).toBeGreaterThan(height * 0.1);
+  });
   it('renders visibly different fixed frames and fails when a packaged font is missing', () => {
     const first = renderStyle({
       fontPreset: 'sans',
@@ -119,10 +181,10 @@ describe.runIf(hasPackagedRuntime)('Creator packaged subtitle rendering', () => 
       }
     });
 
-    expect(first.ass).toContain('Style: Major,OpenCreator Sans Regular,12,&H00FFFFFF');
-    expect(first.ass).toContain('Style: Minor,OpenCreator Sans Regular,9,&H005CD4FF');
-    expect(second.ass).toContain('Style: Major,OpenCreator Serif Bold,18,&H00FFE77E');
-    expect(second.ass).toContain('Style: Minor,OpenCreator Serif Bold,12,&H006B6BFF');
+    expect(first.ass).toContain('Style: Major,OpenCreator Sans Regular,14,&H00FFFFFF');
+    expect(first.ass).toContain('Style: Minor,OpenCreator Sans Regular,10,&H005CD4FF');
+    expect(second.ass).toContain('Style: Major,OpenCreator Serif Bold,22,&H00FFE77E');
+    expect(second.ass).toContain('Style: Minor,OpenCreator Serif Bold,15,&H006B6BFF');
     expect(second.ass).toContain('&H99000000');
     expect(second.ass).toContain(',5,6,2,10,10,20,1');
     expect(second.ass).toContain('\\xshad-4\\yshad6\\blur2.5');
@@ -182,7 +244,7 @@ function renderStyle(style: Parameters<typeof buildKrillinSubtitleStyle>[0], opt
   return {
     ass: readFileSync(assPath, 'utf8'),
     assPath,
-    frame: compareFramePixels(inputVideo, outputVideo),
+    frame: compareFramePixels(inputVideo, outputVideo, options.width),
     paths: { launcher, workdir, inputVideo, subtitle },
     stylePath
   };
@@ -229,19 +291,24 @@ function runCli(
   });
 }
 
-function compareFramePixels(sourceVideo: string, renderedVideo: string) {
+function compareFramePixels(sourceVideo: string, renderedVideo: string, width: number) {
   const source = rawFrame(sourceVideo);
   const rendered = rawFrame(renderedVideo);
   expect(rendered.length).toBe(source.length);
   let changedPixels = 0;
+  let totalY = 0;
   for (let offset = 0; offset < rendered.length; offset += 3) {
     const distance = Math.abs(rendered[offset]! - source[offset]!)
       + Math.abs(rendered[offset + 1]! - source[offset + 1]!)
       + Math.abs(rendered[offset + 2]! - source[offset + 2]!);
-    if (distance > 24) changedPixels += 1;
+    if (distance > 24) {
+      changedPixels += 1;
+      totalY += Math.floor(offset / (width * 3));
+    }
   }
   return {
     changedPixels,
+    centerY: changedPixels === 0 ? 0 : totalY / changedPixels,
     sha256: createHash('sha256').update(rendered).digest('hex')
   };
 }

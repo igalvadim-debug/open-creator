@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/clipperhouse/uax29/v2/graphemes"
 	"krillin-ai/config"
 	"krillin-ai/internal/types"
 	"krillin-ai/log"
 	"krillin-ai/pkg/util"
 	"krillin-ai/pkg/whisper"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -53,7 +55,9 @@ type AudioSegment struct {
 }
 
 type TranslationProgress struct {
-	Fraction float64
+	Fraction  float64
+	Completed int
+	Total     int
 }
 
 type contextChatCompleter interface {
@@ -88,6 +92,18 @@ type originSubtitleCue struct {
 	Text  string
 }
 
+type transcriptionSegmentError struct {
+	error
+	segmentNumber int
+	attemptNumber int
+}
+
+func (err *transcriptionSegmentError) Unwrap() error { return err.error }
+
+func (err *transcriptionSegmentError) TranscriptionPosition() (int, int) {
+	return err.segmentNumber, err.attemptNumber
+}
+
 func (s Service) audioToOriginSubtitle(ctx context.Context, stepParam *types.SubtitleTaskStepParam) error {
 	timePoints, err := s.getSplitPointsForAudio(stepParam)
 	if err != nil {
@@ -95,6 +111,14 @@ func (s Service) audioToOriginSubtitle(ctx context.Context, stepParam *types.Sub
 	}
 	cues := make([]originSubtitleCue, 0)
 	segmentCount := len(timePoints) - 1
+	report := func(index, percent int) {
+		fraction := float64(index) + clampFraction(float64(percent)/100)
+		if index >= segmentCount {
+			stepParam.TaskPtr.ReportProgress(types.TaskProgress{Phase: "transcribing_audio", Percent: 90, Message: fmt.Sprintf("语音识别完成 %d/%d 段", index, segmentCount), Completed: index, Total: segmentCount})
+			return
+		}
+		stepParam.TaskPtr.ReportProgress(types.TaskProgress{Phase: "transcribing_audio", Percent: int(15 + fraction/float64(segmentCount)*75), Message: fmt.Sprintf("语音识别 %d/%d 段；正在识别第 %d 段（%d%%）", index, segmentCount, min(index+1, segmentCount), percent), Completed: index, Total: segmentCount})
+	}
 	for segmentIndex := 0; segmentIndex < segmentCount; segmentIndex++ {
 		select {
 		case <-ctx.Done():
@@ -102,6 +126,7 @@ func (s Service) audioToOriginSubtitle(ctx context.Context, stepParam *types.Sub
 		default:
 		}
 
+		report(segmentIndex, 0)
 		audioPath := filepath.Join(stepParam.TaskBasePath, fmt.Sprintf(types.SubtitleTaskSplitAudioFileNamePattern, segmentIndex))
 		if err := ClipAudio(stepParam.AudioFilePath, audioPath, timePoints[segmentIndex], timePoints[segmentIndex+1]); err != nil {
 			return err
@@ -111,15 +136,16 @@ func (s Service) audioToOriginSubtitle(ctx context.Context, stepParam *types.Sub
 		if attempts < 1 {
 			attempts = 1
 		}
+		attemptNumber := 0
 		for range attempts {
+			attemptNumber++
 			transcription, err = s.transcribeAudio(
 				segmentIndex,
 				audioPath,
 				string(stepParam.OriginLanguage),
 				stepParam.TaskBasePath,
 				func(percent int) {
-					completed := float64(segmentIndex) + clampFraction(float64(percent)/100)
-					stepParam.TaskPtr.SetProgress(uint8(15 + completed/float64(segmentCount)*75))
+					report(segmentIndex, percent)
 				},
 			)
 			if err == nil {
@@ -131,7 +157,11 @@ func (s Service) audioToOriginSubtitle(ctx context.Context, stepParam *types.Sub
 			}
 		}
 		if err != nil {
-			return fmt.Errorf("transcribe audio segment %d: %w", segmentIndex, err)
+			return &transcriptionSegmentError{
+				error:         fmt.Errorf("transcribe audio segment %d: %w", segmentIndex, err),
+				segmentNumber: segmentIndex + 1,
+				attemptNumber: attemptNumber,
+			}
 		}
 		cues = append(cues, originCuesFromTranscription(
 			transcription,
@@ -140,7 +170,7 @@ func (s Service) audioToOriginSubtitle(ctx context.Context, stepParam *types.Sub
 			stepParam.MaxWordOneLine,
 			stepParam.OriginLanguage,
 		)...)
-		stepParam.TaskPtr.SetProgress(uint8(15 + float64(segmentIndex+1)/float64(segmentCount)*75))
+		report(segmentIndex+1, 0)
 	}
 	if len(cues) == 0 {
 		return errors.New("transcription produced no subtitle cues")
@@ -177,21 +207,33 @@ func originCuesFromTranscription(
 		}
 		return []originSubtitleCue{{Start: offset, End: segmentEnd, Text: text}}
 	}
-	if !util.IsAsianLanguage(language) {
+	if types.LanguageUsesWordSpaces(language) {
 		if alignedWords, ok := alignTranscriptionWords(transcription.Text, words); ok {
 			words = alignedWords
 		}
 	}
 
 	cues := make([]originSubtitleCue, 0, (len(words)+maxWords-1)/maxWords)
-	for start := 0; start < len(words); start += maxWords {
+	// Prefer contiguous original text, preserving Thai phrase spaces and punctuation.
+	positions := transcriptionWordTextPositions(transcription.Text, words)
+	boundaries := map[int]bool{0: true}
+	iter := graphemes.FromString(transcription.Text)
+	for iter.Next() {
+		boundaries[iter.End()] = true
+	}
+	for start := 0; start < len(words); {
 		end := min(start+maxWords, len(words))
+		if positions != nil {
+			for end < len(words) && !boundaries[positions[end]] {
+				end++
+			}
+		}
 		parts := make([]string, 0, end-start)
 		for _, word := range words[start:end] {
 			parts = append(parts, strings.TrimSpace(word.Text))
 		}
 		separator := " "
-		if util.IsAsianLanguage(language) {
+		if !types.LanguageUsesWordSpaces(language) {
 			separator = ""
 		}
 		cueStart := offset + words[start].Start
@@ -199,13 +241,34 @@ func originCuesFromTranscription(
 		if cueEnd <= cueStart {
 			cueEnd = cueStart + 0.5
 		}
+		text := strings.Join(parts, separator)
+		if positions != nil {
+			text = strings.TrimSpace(transcription.Text[positions[start]:positions[end]])
+		}
 		cues = append(cues, originSubtitleCue{
 			Start: cueStart,
 			End:   cueEnd,
-			Text:  strings.Join(parts, separator),
+			Text:  text,
 		})
+		start = end
 	}
 	return cues
+}
+
+func transcriptionWordTextPositions(text string, words []types.Word) []int {
+	positions := make([]int, len(words)+1)
+	offset := 0
+	for i, word := range words {
+		token := strings.TrimSpace(word.Text)
+		index := strings.Index(text[offset:], token)
+		if index < 0 || token == "" {
+			return nil
+		}
+		positions[i] = offset + index
+		offset += index + len(token)
+	}
+	positions[0], positions[len(words)] = 0, len(text)
+	return positions
 }
 
 func alignTranscriptionWords(text string, words []types.Word) ([]types.Word, bool) {
@@ -375,9 +438,6 @@ func (s Service) transcribeAudio(
 		}
 	}()
 
-	if language == "zh_cn" {
-		language = "zh" // 切换一下
-	}
 	if transcriber, ok := s.Transcriber.(types.ProgressTranscriber); ok {
 		transcriptionData, err = transcriber.TranscriptionWithProgress(
 			audioFilePath,
@@ -417,11 +477,22 @@ func (s Service) splitTextAndTranslateV2(
 	enableModalFilter bool,
 	id int,
 	reportProgress func(completed, total int) error,
+	onProgress ...func(completed, total int),
+) ([]*TranslatedItem, error) {
+	return s.splitTextAndTranslateRecoverable(ctx, basePath, inputText, originLang, targetLang, enableModalFilter, id, nil, reportProgress, onProgress...)
+}
+
+func (s Service) splitTextAndTranslateRecoverable(
+	ctx context.Context, basePath, inputText string,
+	originLang, targetLang types.StandardLanguageCode,
+	enableModalFilter bool, id int, task *types.SubtitleTask,
+	reportProgress func(completed, total int) error,
+	onProgress ...func(completed, total int),
 ) ([]*TranslatedItem, error) {
 	sentences := splitTranslationSentences(inputText)
-	translator := &Translator{chatCompleter: s.ChatCompleter, filterNonSemanticFillers: enableModalFilter}
+	translator := (&Translator{chatCompleter: s.ChatCompleter, filterNonSemanticFillers: enableModalFilter, terminologyEnabled: s.TerminologyEnabled, naturalizeEnabled: false}).withTranslationRecovery(basePath, task)
 	var results []*TranslatedItem
-	_, err := translator.translatePairedSentences(ctx, sentences, originLang, targetLang, subtitleTargetLimit(), translationBatchSize, func(batch []pairedSentence, completed, total int) error {
+	paired, err := translator.translatePairedSentences(ctx, sentences, originLang, targetLang, subtitleTargetLimit(), translationBatchSize, func(batch []pairedSentence, completed, total int) error {
 		results = append(results, flattenPairedSentences(batch)...)
 		if basePath != "" {
 			path := filepath.Join(basePath, fmt.Sprintf(types.SubtitleTaskTranslationDataPersistenceFileNamePattern, id))
@@ -433,9 +504,17 @@ func (s Service) splitTextAndTranslateV2(
 			return reportProgress(completed, total)
 		}
 		return nil
-	})
+	}, onProgress...)
 	if err != nil {
 		return nil, err
+	}
+	// 流式回调保留初译检查点，最终输出使用限时语义检查后的配对结果。
+	results = flattenPairedSentences(paired)
+	if basePath != "" {
+		path := filepath.Join(basePath, fmt.Sprintf(types.SubtitleTaskTranslationDataPersistenceFileNamePattern, id))
+		if err := util.SaveToDisk(results, path); err != nil {
+			return nil, fmt.Errorf("save reviewed translation checkpoint: %w", err)
+		}
 	}
 	return results, nil
 }
@@ -732,6 +811,14 @@ func (s Service) startTranscribeWorkers(ctx context.Context, eg *errgroup.Group,
 					if !ok {
 						return nil
 					}
+					if transcriptionData, ok := loadTranscriptionCheckpoint(stepParam.TaskBasePath, audioFileItem.Id); ok {
+						log.GetLogger().Info("Reuse transcription checkpoint", zap.Any("taskId", stepParam.TaskId), zap.Any("splitId", audioFileItem.Id))
+						transcribedQueue <- DataWithId[*types.TranscriptionData]{
+							Data: transcriptionData,
+							Id:   audioFileItem.Id,
+						}
+						continue
+					}
 					var (
 						err               error
 						transcriptionData *types.TranscriptionData
@@ -739,7 +826,9 @@ func (s Service) startTranscribeWorkers(ctx context.Context, eg *errgroup.Group,
 					log.GetLogger().Info("Begin transcribe", zap.Any("taskId", stepParam.TaskId), zap.Any("splitId", audioFileItem.Id))
 					// 语音转文字
 					attempts := max(1, config.Conf.App.TranscribeMaxAttempts)
+					attemptNumber := 0
 					for range attempts {
+						attemptNumber++
 						transcriptionData, err = s.transcribeAudio(
 							audioFileItem.Id,
 							audioFileItem.Data,
@@ -764,7 +853,11 @@ func (s Service) startTranscribeWorkers(ctx context.Context, eg *errgroup.Group,
 						}
 					}
 					if err != nil {
-						return fmt.Errorf("audioToSubtitle audioToSrt Transcription err: %w", err)
+						return &transcriptionSegmentError{
+							error:         fmt.Errorf("audioToSubtitle audioToSrt Transcription err: %w", err),
+							segmentNumber: audioFileItem.Id + 1,
+							attemptNumber: attemptNumber,
+						}
 					}
 					log.GetLogger().Info("Transcribe completed", zap.Any("taskId", stepParam.TaskId), zap.Any("splitId", audioFileItem.Id))
 
@@ -777,6 +870,23 @@ func (s Service) startTranscribeWorkers(ctx context.Context, eg *errgroup.Group,
 			}
 		})
 	}
+}
+
+func loadTranscriptionCheckpoint(taskBasePath string, id int) (*types.TranscriptionData, bool) {
+	checkpointPath := filepath.Join(taskBasePath, fmt.Sprintf(types.SubtitleTaskAudioTranscriptionDataPersistenceFileNamePattern, id))
+	content, err := os.ReadFile(checkpointPath)
+	if err != nil {
+		return nil, false
+	}
+
+	var transcriptionData types.TranscriptionData
+	if err := json.Unmarshal(content, &transcriptionData); err != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(transcriptionData.Text) == "" && len(transcriptionData.Words) == 0 {
+		return nil, false
+	}
+	return &transcriptionData, true
 }
 
 // 启动翻译工作协程
@@ -798,19 +908,17 @@ func (s Service) startTranslateWorker(ctx context.Context, eg *errgroup.Group, s
 				// 翻译文本
 				log.GetLogger().Info("Begin to translate", zap.Any("taskId", stepParam.TaskId), zap.Any("splitId", translateItem.Id))
 
-				reportProgress := func(completed, total int) error {
+				reportProgress := func(completed, total int) {
 					fraction := scaledProgress(completed, total, 0, 1)
 					select {
 					case translationProgressQueue <- DataWithId[TranslationProgress]{
-						Data: TranslationProgress{Fraction: fraction},
+						Data: TranslationProgress{Fraction: fraction, Completed: completed, Total: total},
 						Id:   translateItem.Id,
 					}:
-						return nil
 					case <-ctx.Done():
-						return ctx.Err()
 					}
 				}
-				translatedResults, err = s.splitTextAndTranslateV2(ctx, stepParam.TaskBasePath, translateItem.Data, stepParam.OriginLanguage, stepParam.TargetLanguage, stepParam.EnableModalFilter, translateItem.Id, reportProgress)
+				translatedResults, err = s.splitTextAndTranslateRecoverable(ctx, stepParam.TaskBasePath, translateItem.Data, stepParam.OriginLanguage, stepParam.TargetLanguage, stepParam.EnableModalFilter, translateItem.Id, stepParam.TaskPtr, nil, reportProgress)
 				if err != nil {
 					return fmt.Errorf("audioToSubtitle audioToSrt splitTextAndTranslate err: %w", err)
 				}
@@ -846,8 +954,10 @@ func (s Service) startResultHandler(ctx context.Context, eg *errgroup.Group, ste
 		splitCompleted := 0
 		transcriptionProgress := make(map[int]float64, segmentNum)
 		translationProgress := make(map[int]float64, segmentNum)
+		sentenceProgress := make(map[int]TranslationProgress, segmentNum)
+		transcribed, translated := 0, 0
 		updateProgress := func() {
-			stepParam.TaskPtr.SetProgress(audioProcessPercent(
+			percent := audioProcessPercent(
 				segmentNum,
 				splitCompleted,
 				transcriptionProgress,
@@ -855,8 +965,28 @@ func (s Service) startResultHandler(ctx context.Context, eg *errgroup.Group, ste
 				SPLIT_WEIGHT,
 				TRANSCRIBE_WEIGHT,
 				TRANSLATE_WEIGHT,
-			))
+			)
+			phase := "processing_audio"
+			if transcribed == segmentNum && translated < segmentNum {
+				phase = "translating_audio"
+			}
+			message := fmt.Sprintf("音频分段 %d/%d；语音识别 %d/%d 段；字幕翻译 %d/%d 段", splitCompleted, segmentNum, transcribed, segmentNum, translated, segmentNum)
+			for id := 0; id < segmentNum; id++ {
+				if fraction := transcriptionProgress[id]; fraction > 0 && fraction < 1 {
+					message += fmt.Sprintf("；第 %d 段识别 %d%%", id+1, int(fraction*100))
+					break
+				}
+			}
+			// Translation runs in source order, while transcription can overlap.
+			for id := 0; id < segmentNum; id++ {
+				if current, ok := sentenceProgress[id]; ok && current.Total > 0 && current.Completed < current.Total {
+					message += fmt.Sprintf("；第 %d 段已翻译 %d/%d 句", id+1, current.Completed, current.Total)
+					break
+				}
+			}
+			stepParam.TaskPtr.ReportProgress(types.TaskProgress{Phase: phase, Percent: int(percent), Message: message, Completed: translated, Total: segmentNum})
 		}
+		updateProgress()
 		// 完成的任务数量
 		completedTasks := 0
 		for {
@@ -881,6 +1011,7 @@ func (s Service) startResultHandler(ctx context.Context, eg *errgroup.Group, ste
 				}
 			case transcribedItem := <-transcribedQueue:
 				transcriptionProgress[transcribedItem.Id] = 1
+				transcribed++
 				updateProgress()
 				// 处理转录结果
 				audioSegments[transcribedItem.Id].TranscriptionData = transcribedItem.Data
@@ -891,12 +1022,18 @@ func (s Service) startResultHandler(ctx context.Context, eg *errgroup.Group, ste
 				}
 			case progressItem := <-translationProgressQueue:
 				fraction := clampFraction(progressItem.Data.Fraction)
-				if fraction > translationProgress[progressItem.Id] {
-					translationProgress[progressItem.Id] = fraction
+				previous := sentenceProgress[progressItem.Id]
+				// Completion and progress use separate queues; late events must not
+				// re-open a segment whose result has already been processed.
+				if translationProgress[progressItem.Id] < 1 && (fraction > translationProgress[progressItem.Id] || progressItem.Data.Total > previous.Total || progressItem.Data.Completed > previous.Completed) {
+					translationProgress[progressItem.Id] = math.Max(fraction, translationProgress[progressItem.Id])
+					sentenceProgress[progressItem.Id] = progressItem.Data
 					updateProgress()
 				}
 			case translatedItems := <-translatedQueue:
 				translationProgress[translatedItems.Id] = 1
+				delete(sentenceProgress, translatedItems.Id)
+				translated++
 				updateProgress()
 				// 处理翻译结果，保存不带时间戳的原始字幕
 				originNoTsSrtFileName := filepath.Join(stepParam.TaskBasePath, fmt.Sprintf(types.SubtitleTaskSplitSrtNoTimestampFileNamePattern, translatedItems.Id))
@@ -1128,6 +1265,21 @@ func splitSrt(stepParam *types.SubtitleTaskStepParam) error {
 	if err = scanner.Err(); err != nil {
 		log.GetLogger().Error("audioToSubtitle splitSrt scan bilingual srt file error", zap.Any("taskId", stepParam.TaskId), zap.Error(err))
 		return fmt.Errorf("audioToSubtitle splitSrt scan bilingual srt file error: %w", err)
+	}
+	// 两种语言先按原始配对分离，再对最终文件换行；多行回退不能混入另一语言。
+	if err := originLanguageSrtFile.Close(); err != nil {
+		return err
+	}
+	if err := targetLanguageSrtFile.Close(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := ReportSubtitleLengthFallbacks(originLanguageSrtFilePath, targetLanguageSrtFilePath, stepParam.BilingualSrtFilePath,
+		filepath.Join(stepParam.TaskBasePath, types.SubtitleTaskShortOriginSrtFileName),
+		filepath.Join(stepParam.TaskBasePath, types.SubtitleTaskShortOriginMixedSrtFileName)); err != nil {
+		return err
 	}
 	// 添加原语言单语字幕
 	subtitleInfo := types.SubtitleFileInfo{

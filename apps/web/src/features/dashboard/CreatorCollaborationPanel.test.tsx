@@ -3,7 +3,7 @@ import { useEffect } from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { LanguageProvider } from '../../i18n/LanguageProvider.js';
-import CreatorCollaborationPanel, { CreatorTaskProgressNotice } from './CreatorCollaborationPanel.js';
+import CreatorCollaborationPanel, { CreatorTaskProgressNotice, CreatorTaskProgressBar, useCreatorTaskProgress } from './CreatorCollaborationPanel.js';
 import {
   shortVideoScriptPanelAdapter,
   coverPanelAdapter,
@@ -12,7 +12,8 @@ import {
   wechatArticlePanelAdapter,
   xiaohongshuPostPanelAdapter,
   videoDownloadPanelAdapter,
-  videoGenerationPanelAdapter
+  videoGenerationPanelAdapter,
+  videoTranslationPanelAdapter
 } from './creator-panel-adapters.js';
 import { CreatorSessionProvider, useCreatorSession } from './creator-session-store.js';
 import { normalizePageIssue } from '../issues/page-issue-state.js';
@@ -59,7 +60,79 @@ function ProgressHeartbeatControl() {
   })}>Receive status</button>;
 }
 
+function TaskProgressBarHarness() {
+  const task = useCreatorTaskProgress();
+  return task ? <CreatorTaskProgressBar task={task} onDetails={() => {}} /> : null;
+}
+
 describe('shared video progress timing', () => {
+  it('shows draft and review work in the task bar before any subtitle is finalized', () => {
+    const current = videoGenerationJob();
+    current.templateId = 'video-translation';
+    current.stages = current.stages.map(stage => ({ ...stage, stageId: 'subtitle', progress: {
+      phase: 'translating_subtitles', percent: 48, completed: 0, total: 60,
+      message: '初译 40/60；字幕完成 0/60；正在审校、排版'
+    } }));
+    render(<LanguageProvider initialPreference="zh-CN">
+      <CreatorSessionProvider initialJob={current} service={{ applyAction: vi.fn(), runAgentTurn: vi.fn() } as never}>
+        <TaskProgressBarHarness />
+      </CreatorSessionProvider>
+    </LanguageProvider>);
+    expect(screen.getByText('初译 40/60；字幕完成 0/60；正在审校、排版')).toBeVisible();
+    expect(screen.getByRole('progressbar', { name: '当前任务进度' })).toHaveAttribute('aria-valuenow', '48');
+  });
+
+  it('keeps subtitle translation progress fixed while waiting and shows real sentence counts', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-07T08:00:08.000Z'));
+    try {
+      const current = videoGenerationJob();
+      current.templateId = 'video-translation';
+      current.stages = current.stages.map(stage => ({ ...stage, stageId: 'subtitle', progress: {
+        phase: 'translating_subtitles', percent: 5, completed: 0, total: 52
+      } }));
+      const view = render(<LanguageProvider initialPreference="zh-CN">
+        <CreatorSessionProvider initialJob={current} service={{ applyAction: vi.fn(), runAgentTurn: vi.fn() } as never}>
+          <CreatorCollaborationPanel adapter={videoTranslationPanelAdapter} stepLabel="翻译设置" contextSummary="印地语 → 简体中文" />
+        </CreatorSessionProvider>
+      </LanguageProvider>);
+      expect(screen.getByText('翻译字幕，已完成 0/52 句')).toBeVisible();
+      expect(screen.getByRole('progressbar', { name: '字幕翻译进度' })).toHaveAttribute('aria-valuenow', '5');
+      act(() => { vi.advanceTimersByTime(30_000); });
+      expect(screen.getByText('已运行 0:35')).toBeVisible();
+      expect(screen.getByRole('progressbar', { name: '字幕翻译进度' })).toHaveAttribute('aria-valuenow', '5');
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([
+    ['subtitle', 'processing_audio', '字幕翻译', '音频分段 4/4；语音识别 3/4 段；字幕翻译 1/4 段；第 2 段已翻译 5/12 句'],
+    ['subtitle', 'translating_audio', '字幕翻译', '音频分段 1/1；语音识别 1/1 段；字幕翻译 0/1 段'],
+    ['tts', 'generating_voice', '配音生成', '已生成配音 1/4 段'],
+    ['render-horizontal', 'rendering_video', '横屏成片', '正在编码并合成字幕视频；已处理 12 秒 / 60 秒']
+  ])('shows video details and elapsed time for %s without advancing progress while waiting', (stageId, phase, label, message) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-07T08:00:08.000Z'));
+    try {
+      const current = videoGenerationJob();
+      current.templateId = 'video-translation';
+      current.stages = current.stages.map(stage => ({ ...stage, stageId, progress: { phase, message, percent: 45, completed: 1, total: 4 } }));
+      const view = render(<LanguageProvider initialPreference="zh-CN">
+        <CreatorSessionProvider initialJob={current} service={{ applyAction: vi.fn(), runAgentTurn: vi.fn() } as never}>
+          <CreatorCollaborationPanel adapter={videoTranslationPanelAdapter} stepLabel="视频翻译" contextSummary="英语 → 简体中文" />
+        </CreatorSessionProvider>
+      </LanguageProvider>);
+      const messageElement = phase === 'translating_audio'
+        ? screen.getByText(message, { exact: false })
+        : screen.getByText(message);
+      expect(messageElement).toBeVisible();
+      act(() => { vi.advanceTimersByTime(30_000); });
+      expect(screen.getByText('已运行 0:35')).toBeVisible();
+      expect(screen.getByRole('progressbar', { name: `${label}进度` })).toHaveAttribute('aria-valuenow', '45');
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('updates elapsed time without inventing progress and tracks received status independently of language', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-07T08:00:08.000Z'));
@@ -169,6 +242,126 @@ describe('Short video script panel', () => {
 });
 
 describe('CreatorCollaborationPanel', () => {
+  it.each([
+    ['zh-CN', 'downloading_media', 41, '下载视频与音频', '正在下载视频：27.7 MiB / 39.8 MiB；预计剩余 165 秒', '视频: 27.7 MiB / 39.8 MiB · ~165 秒'],
+    ['en-US', 'downloading_media', 41, 'Downloading video and audio', '正在下载视频：27.7 MiB / 39.8 MiB；预计剩余 165 秒', 'Video: 27.7 MiB / 39.8 MiB · ~165 sec'],
+    ['en-US', 'analyzing_clips', 48, 'Analyzing highlights and social potential', '正在分析字幕窗口 2/4', '2/4'],
+    ['en-US', 'rendering_clips', 60, 'Exporting video clips 0/3', '正在生成片段 1/3', null]
+  ] as const)('localizes auto-clip %s progress for %s beside overall progress', (language, phase, percent, label, message, detail) => {
+    const job = videoGenerationJob();
+    job.templateId = 'auto-clip';
+    job.templateVersion = 3;
+    job.state = { sourceType: 'url', sourceUrl: 'https://www.youtube.com/watch?v=fixture', clipCount: 3, duration: '90-180' };
+    job.activities = [];
+    job.stages[0] = {
+      ...job.stages[0]!, stageId: 'clip', executor: 'krillinai',
+      progress: { phase, percent, message, completed: 0, total: 3 }
+    };
+    const { container } = render(<LanguageProvider initialPreference={language}>
+      <CreatorSessionProvider initialJob={job} service={{ applyAction: vi.fn(), runAgentTurn: vi.fn() } as never}>
+        <CreatorCollaborationPanel adapter={creatorPanelAdapterFor('auto-clip')} stepLabel="生成视频切片" contextSummary="3 个片段" />
+      </CreatorSessionProvider>
+    </LanguageProvider>);
+
+    expect(screen.getByText(label)).toBeVisible();
+    const displayedDetail = container.querySelector('.creator-collaboration-stage-message');
+    if (detail === null) expect(displayedDetail).not.toBeInTheDocument();
+    else expect(displayedDetail).toHaveTextContent(detail);
+    expect(screen.queryByText(message, { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', String(percent));
+  });
+
+  it('keeps the failed subtitle retry distinct from an active source download', () => {
+    const job = videoGenerationJob();
+    job.templateId = 'video-translation';
+    job.status = 'failed';
+    job.state = { sourceType: 'url', sourceUrl: 'https://www.youtube.com/watch?v=demo',
+      targetLanguage: 'zh_cn', currentStage: 'preview-source-video' };
+    const failedSubtitle = { ...job.stages[0]!, id: 'subtitle_failed', stageId: 'subtitle', status: 'failed' as const,
+      errorCode: 'platform_caption_access_failed',
+      errorMessage: 'WARNING: [youtube] The provided YouTube account cookies are no longer valid.',
+      progress: { phase: 'reading_platform_captions', percent: 5, workflow: true }, finishedAt: job.updatedAt };
+    const runningDownload = { ...job.stages[0]!, id: 'download_running', stageId: 'preview-source-video',
+      executor: 'download', progress: { phase: 'downloading', percent: 39, backgroundSourceDownload: false } };
+    job.stages = [failedSubtitle, runningDownload];
+    const issue = { ...normalizePageIssue('runtime', 'creator.retry-stage', new Error(failedSubtitle.errorMessage),
+      failedSubtitle.errorMessage), source: 'stage' as const, code: failedSubtitle.errorCode,
+      stageId: 'subtitle', stageRunId: failedSubtitle.id, status: 'open' as const,
+      publicFacts: { kind: 'unknown' as const, provider: 'krillinai', upstreamMessage: failedSubtitle.errorMessage },
+      repairActions: [{ kind: 'retry-operation' as const, operationId: 'creator.retry-stage', requiresConfirmation: false, risk: 'normal' as const }] };
+    const applyAction = vi.fn();
+    render(<LanguageProvider initialPreference="zh-CN">
+      <CreatorSessionProvider initialJob={job} externalIssues={[issue]}
+        service={{ applyAction, runAgentTurn: vi.fn() } as never}>
+        <CreatorCollaborationPanel adapter={videoTranslationPanelAdapter} stepLabel="项目结果" contextSummary="English → 简体中文" />
+        <TaskProgressBarHarness />
+      </CreatorSessionProvider>
+    </LanguageProvider>);
+    expect(screen.getAllByText('YouTube 登录态已失效，请在平台连接中重新连接，然后重试字幕翻译')).toHaveLength(2);
+    expect(screen.getByRole('link', { name: '去平台连接' })).toHaveAttribute('href', '#/settings?tab=platform-connections');
+    expect(screen.getByRole('button', { name: '重试字幕翻译' })).toBeDisabled();
+    expect(screen.getByRole('progressbar', { name: '原视频预览准备进度' })).toHaveAttribute('aria-valuenow', '39');
+    expect(applyAction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['subtitle_timeout', 'downloadYouTubeSubtitle: yt-dlp subtitle metadata error: [Errno 60] Operation timed out', '视频平台连接超时，字幕读取未完成'],
+    ['subtitle_refused', 'downloadYouTubeSubtitle: yt-dlp subtitle metadata error: [Errno 61] Connection refused', '视频平台连接被拒绝，字幕读取未完成']
+  ])('offers proxy settings and stage retry for %s', (stageId, errorMessage, summary) => {
+    const job = videoGenerationJob();
+    job.templateId = 'video-translation';
+    job.status = 'failed';
+    job.state = { sourceType: 'url', sourceUrl: 'https://www.youtube.com/watch?v=demo' };
+    const failedStage = { ...job.stages[0]!, id: stageId, stageId: 'subtitle', status: 'failed' as const,
+      errorCode: 'platform_caption_access_failed',
+      errorMessage,
+      progress: { phase: 'failed', percent: 1, workflow: true }, finishedAt: job.updatedAt };
+    job.stages = [failedStage];
+    const previousHash = window.location.hash;
+    window.location.hash = `#/workbench?tool=video-translation&jobId=${job.id}&returnTo=projects`;
+    const issue = { ...normalizePageIssue('runtime', 'creator.retry-stage', new Error(failedStage.errorMessage),
+      failedStage.errorMessage), source: 'stage' as const, code: failedStage.errorCode,
+      stageId: 'subtitle', stageRunId: failedStage.id, status: 'open' as const,
+      publicFacts: { kind: 'unknown' as const, provider: 'krillinai', upstreamMessage: failedStage.errorMessage },
+      repairActions: [{ kind: 'retry-operation' as const, operationId: 'creator.retry-stage', requiresConfirmation: false, risk: 'normal' as const }] };
+    render(<LanguageProvider initialPreference="zh-CN">
+      <CreatorSessionProvider initialJob={job} externalIssues={[issue]}
+        service={{ applyAction: vi.fn(), runAgentTurn: vi.fn() } as never}>
+        <CreatorCollaborationPanel adapter={videoTranslationPanelAdapter} stepLabel="翻译字幕" contextSummary="English → 简体中文" />
+        <TaskProgressBarHarness />
+      </CreatorSessionProvider>
+    </LanguageProvider>);
+
+    expect(screen.getByRole('log', { name: '协作时间线' })).toHaveTextContent(summary);
+    const settings = screen.getByRole('link', { name: '检查代理设置' });
+    expect(settings.getAttribute('href')).toContain('#/settings?from=video-translation&returnPath=');
+    expect(new URLSearchParams(settings.getAttribute('href')?.split('?')[1]).get('returnPath'))
+      .toBe(`#/workbench?tool=video-translation&jobId=${job.id}&returnTo=projects`);
+    expect(screen.getByRole('button', { name: '重试字幕翻译' })).toBeEnabled();
+    window.location.hash = previousHash;
+  });
+
+  it('links a cover extractor failure to yt-dlp components and returns to the cover job', () => {
+    const job = coverJob();
+    job.status = 'failed';
+    const errorMessage = 'ERROR: [youtube] Signature extraction failed. Please update to the latest version.';
+    const issue = { ...normalizePageIssue('runtime', 'creator.retry-stage', new Error(errorMessage), errorMessage),
+      source: 'stage' as const, code: 'yt_dlp_update_recommended', stageId: 'analyze-source', status: 'open' as const,
+      publicFacts: { kind: 'unsupported' as const, provider: 'yt-dlp', upstreamMessage: errorMessage } };
+    const previousHash = window.location.hash;
+    window.location.hash = `#/workbench?tool=cover-generator&jobId=${job.id}&returnTo=projects`;
+    render(<LanguageProvider initialPreference="zh-CN">
+      <CreatorSessionProvider initialJob={job} externalIssues={[issue]} service={{ applyAction: vi.fn(), runAgentTurn: vi.fn() } as never}>
+        <CreatorCollaborationPanel adapter={coverPanelAdapter} stepLabel="分析视频" contextSummary="封面" />
+      </CreatorSessionProvider>
+    </LanguageProvider>);
+    const settings = screen.getByRole('link', { name: '检查 yt-dlp 更新' });
+    const params = new URLSearchParams(settings.getAttribute('href')?.split('?')[1]);
+    expect(params.get('tab')).toBe('local-components');
+    expect(params.get('returnPath')).toBe(`#/workbench?tool=cover-generator&jobId=${job.id}&returnTo=projects`);
+    window.location.hash = previousHash;
+  });
+
   it('places a supplied summary above the timeline and preserves current issues', () => {
     const panel = (currentIssue?: string) => <LanguageProvider initialPreference="zh-CN">
       <CreatorSessionProvider initialJob={videoGenerationJob()} service={{ applyAction: vi.fn(), runAgentTurn: vi.fn() } as never}>
@@ -228,6 +421,29 @@ describe('CreatorCollaborationPanel', () => {
     expect(ensureJob).not.toHaveBeenCalled();
   });
 
+  it('offers a direct sign-in action for expired OpenCreator sessions', () => {
+    const issue = normalizePageIssue(
+      'creator-launch',
+      'creator-launch.create-job',
+      { code: 'GATEWAY_AUTH_REQUIRED' },
+      'OpenCreator sign-in has expired.'
+    );
+    const pendingJob = { ...videoGenerationJob(), id: 'pending:project_1:video-generation', stages: [], activities: [], issues: [] };
+    render(
+      <LanguageProvider initialPreference="zh-CN">
+        <CreatorSessionProvider
+          initialJob={pendingJob}
+          externalIssues={[issue]}
+          service={{ applyAction: vi.fn(), runAgentTurn: vi.fn() } as never}
+        >
+          <CreatorCollaborationPanel adapter={videoGenerationPanelAdapter} stepLabel="生成视频" contextSummary="Veo" />
+        </CreatorSessionProvider>
+      </LanguageProvider>
+    );
+
+    expect(screen.getByRole('link', { name: '去登录' })).toHaveAttribute('href', '#/account');
+  });
+
   it('keeps entries in top-down order and follows new activity only while reading the latest entries', () => {
     render(
       <LanguageProvider initialPreference="zh-CN">
@@ -269,7 +485,7 @@ describe('CreatorCollaborationPanel', () => {
       id: 'real-person-die-cut-sticker-poster',
       title: '真人切模贴纸海报',
       version: 2,
-      adapterId: 'generic'
+      adapterId: 'image-generation'
     },
     {
       module: 'video-generation' as const,

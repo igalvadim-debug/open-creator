@@ -1,4 +1,5 @@
 import {
+  openCreatorAccentColors,
   openCreatorLanguagePreferences,
   type OpenCreatorStorageSettingsResponse,
   type UpdateOpenCreatorStorageSettingsRequest,
@@ -8,22 +9,14 @@ import {
 import type { FastifyInstance } from 'fastify';
 import { accessSync, constants, mkdirSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import { z, ZodError } from 'zod';
+import { z, ZodError } from 'zod/v3';
 import type { OpenCreatorSettingsStore } from '../settings/store.js';
 import { apiError } from './errors.js';
 
 const updateSchema = z.object({
   language: z.enum(openCreatorLanguagePreferences).optional(),
   colorMode: z.enum(['light', 'dark']).optional(),
-  accentColor: z.enum([
-    'neutral',
-    'blue',
-    'cyan',
-    'purple',
-    'orange',
-    'red',
-    'custom'
-  ]).optional(),
+  accentColor: z.enum(openCreatorAccentColors).optional(),
   customAccentColor: z.string().regex(/^#[\da-f]{6}$/i).optional(),
   defaultPermission: z.enum([
     'follow-project',
@@ -51,6 +44,14 @@ export async function registerSettingsRoutes(
   server.get('/settings/ui', async (): Promise<OpenCreatorUiSettingsResponse> => (
     store.readUi()
   ));
+
+  server.post<{ Body: unknown }>('/settings/agent-onboarding', async (request, reply) => {
+    const parsed = z.object({ offer: z.boolean() }).strict().safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send(apiError('VALIDATION_FAILED', 'Agent onboarding request is invalid'));
+    }
+    return { show: store.claimAgentOnboarding(parsed.data.offer) };
+  });
 
   server.patch<{ Body: unknown }>(
     '/settings/ui',

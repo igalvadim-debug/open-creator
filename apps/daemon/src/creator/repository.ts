@@ -31,13 +31,13 @@ import type {
 import { parseSrt } from './validators/srt.js';
 
 type RepositoryOptions = {
-  serviceBinding?(): CreatorServiceBinding;
+  serviceBinding?(templateId: string): CreatorServiceBinding;
   idFactory?(prefix: string): string;
   now?(): string;
 };
 
 export type CreatorServiceBinding = { source: 'manual' } | {
-  source: 'gateway'; accountId: string; bindingVersion: string; supplier?: string;
+  source: 'gateway'; accountId: string; bindingVersion: string | null; supplier?: string;
   models: Record<string, string>; capabilities: Record<string, string[]>;
 };
 
@@ -154,6 +154,7 @@ type CreateProviderRequestInput = {
 
 export type CreatorRepository = {
   getServiceBinding(jobId: string): CreatorServiceBinding;
+  finalizeServiceBinding(jobId: string, binding: CreatorServiceBinding): void;
   transaction<T>(operation: () => T): T;
   createJob(input: CreateJobInput): CreatorJob;
   getJob(id: string): CreatorJob | undefined;
@@ -187,6 +188,7 @@ export type CreatorRepository = {
     errorMessage?: string | null;
   }): void;
   listStageRuns(jobId: string): CreatorStageRun[];
+  listRecoveredInterruptedStageRuns?(): CreatorStageRun[];
   listDispatchableStageRuns(now: string, limit: number): CreatorStageRun[];
   claimStageRun(input: {
     id: string;
@@ -246,7 +248,7 @@ export function createCreatorRepository(
   const now = options.now ?? (() => new Date().toISOString());
   repairLeadingResultSnapshotGaps(db);
   repairLegacyVerticalSubtitleArtifacts(db);
-  recoverInterruptedStageRuns(db, now());
+  const recoveredInterruptedStageIds = recoverInterruptedStageRuns(db, now());
   recoverInterruptedIssues(db, now(), idFactory);
 
   const getJob = (id: string): CreatorJob | undefined => {
@@ -462,7 +464,7 @@ export function createCreatorRepository(
     createJob(input: CreateJobInput): CreatorJob {
       const id = idFactory('creator_job');
       const timestamp = now();
-      const serviceBinding = options.serviceBinding?.() ?? { source: 'manual' as const };
+      const serviceBinding = options.serviceBinding?.(input.templateId) ?? { source: 'manual' as const };
       const state = serviceBinding.source === 'gateway'
         ? { ...input.state, officialModels: { ...serviceBinding.models, ...(isRecord(input.state.officialModels) ? input.state.officialModels : {}) } }
         : input.state;
@@ -496,6 +498,11 @@ export function createCreatorRepository(
       const row = db.prepare('SELECT service_binding_json FROM creator_jobs WHERE id = ?').get(jobId) as { service_binding_json: string } | undefined;
       if (!row) throw new Error('Creator job was not found');
       return JSON.parse(row.service_binding_json) as CreatorServiceBinding;
+    },
+    finalizeServiceBinding(jobId, binding) {
+      db.prepare(`UPDATE creator_jobs SET service_binding_json = ? WHERE id = ?
+        AND json_extract(service_binding_json, '$.source') = 'gateway'
+        AND json_type(service_binding_json, '$.bindingVersion') = 'null'`).run(JSON.stringify(binding), jobId);
     },
     getJobByCreationKey(creationKey: string): CreatorJob | undefined {
       const row = db.prepare(`
@@ -663,6 +670,12 @@ export function createCreatorRepository(
       );
     },
     listStageRuns,
+    listRecoveredInterruptedStageRuns() {
+      return recoveredInterruptedStageIds.flatMap(id => {
+        const stage = this.getStageRun(id);
+        return stage === undefined ? [] : [stage];
+      });
+    },
     listDispatchableStageRuns(timestamp: string, limit: number): CreatorStageRun[] {
       return (db.prepare(`
         SELECT id, job_id, stage_id, executor, status, dispatch_status,
@@ -1123,7 +1136,12 @@ function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function recoverInterruptedStageRuns(db: Database.Database, timestamp: string): void {
+function recoverInterruptedStageRuns(db: Database.Database, timestamp: string): string[] {
+  const affected = db.prepare(`
+    SELECT id FROM creator_stage_runs
+    WHERE status = 'running'
+    ORDER BY created_at ASC, rowid ASC
+  `).all() as Array<{ id: string }>;
   db.transaction(() => {
     const affectedJobs = db.prepare(`
       SELECT DISTINCT job_id
@@ -1151,6 +1169,7 @@ function recoverInterruptedStageRuns(db: Database.Database, timestamp: string): 
     `);
     for (const row of affectedJobs) updateJob.run(timestamp, row.job_id);
   })();
+  return affected.map(row => row.id);
 }
 
 function recoverInterruptedIssues(
